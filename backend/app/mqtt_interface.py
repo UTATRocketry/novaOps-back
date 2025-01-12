@@ -4,7 +4,7 @@ import json
 from datetime import datetime
 import asyncio
 
-MQTT_BROKER = "mqtt://localhost:1883"
+MQTT_BROKER = "mqtt://localhost:1883" # use broker.hivemq.com for testing on PCs
 MQTT_PORT = 1883 # TCP Port
 DATA_TOPIC = "novaground/telemetry"
 COMMAND_TOPIC = "novaground/command"
