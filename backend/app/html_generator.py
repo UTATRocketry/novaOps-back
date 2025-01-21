@@ -164,7 +164,7 @@ new_html = """
     <p id="reconnect-status"></p>
     <pre id="json-data">Waiting for data...</pre>
     <script>
-        const wsUrl = "ws://localhost:8000/ws_basic";
+        const wsUrl = "ws://raspberrypi.local:8000/ws_basic";
         let socket;
         let reconnectAttempts = 0;
         const maxReconnectAttempts = 10;

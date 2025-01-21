@@ -8,6 +8,8 @@ sudo apt update && sudo apt upgrade -y
 echo "Installing packages..."
 sudo apt install ufw
 sudo apt install -y dnsmasq docker-compose
+sudo apt install mosquitto mosquitto-clients # Check with sudo systemctl status mosquitto
+sudo apt-get install -y nodejs npm
 
 # Backup existing dhcpcd.conf and create a new one
 echo "Backing up Files..."
@@ -113,6 +115,17 @@ ff02::2		ip6-allrouters
 127.0.1.1	raspberrypi
 192.168.0.1 novaOps
 EOF'
+
+# Add custom Mosquitto configuration file
+echo "Customizing Mosquitto configuration..."
+sudo touch /etc/mosquitto/conf.D/novamqtt.conf
+sudo bash -c 'cat << EOF > /etc/mosquitto/conf.D/novamqtt.conf
+listener 1883
+allow_anonymous true
+EOF'
+
+echo "Restarting Mosquitto..."
+sudo systemctl restart mosquitto
 
 # Check if Docker is installed
 echo "Installing Docker..."

@@ -3,6 +3,7 @@
 # manual eth0 IP  setting
 echo "Configuring IP address"
 sudo ifconfig eth0 192.168.0.1 netmask 255.255.255.0 # Check with ip addr show eth0
+# sudo ifconfig wlan0 172.20.10.1 netmask 255.255.255.0
 
 # Ask if the user wants to enable the container to run at boot
 read -p "Would you like Docker to run at boot? (y/n): " run_at_boot

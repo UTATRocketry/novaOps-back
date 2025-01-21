@@ -36,11 +36,12 @@ To run this project, you will need Docker and Docker Compose installed on your m
    ```bash
    git clone https://github.com/UTATRocketry/novaOps-back.git
    cd /path/to/novaOps-back
+   git checkout fastapi_server
    ```
 
 2. **Build and Run the Docker Containers:**
    ```bash
-   docker-compose up --build
+   sudo docker-compose up --build
    ```
 
 3. **Viewing the Application:**
@@ -54,6 +55,7 @@ To run this project, you will need Docker and Docker Compose installed on your m
    ```bash
    git clone https://github.com/UTATRocketry/novaOps-back.git
    cd /path/to/novaOps-back
+   git checkout fastapi_server
    ```
 2. **Update Log File Path:**
 `# Save a log of all commands and their output`
@@ -65,7 +67,7 @@ chmod +x /path/to/nova/initial_config.sh
 chmod +x /path/to/nova/post_reboot_config.sh
 ```
 4. **Run the scripts:**
-Run `initial_config.sh` wait for it to reboot the Pi and then run `post_reboot_config.sh`. This will start the server on `http://192.168.0.1:8000`. Use that or `http://novaops.local:8000/` to see the application in a browser. Use `sudo docker-compose stop` to stop and `sudo docker-compose up` to run again.
+Run `initial_config.sh` wait for it to reboot the Pi and then run `post_reboot_config.sh`. This will start the server on `http://192.168.0.1:8000`. Use that if connected by ethernet or `http://raspberrypi.local:8000` to see the application in a browser. Use `sudo docker-compose stop` to stop and `sudo docker-compose up` to run again. The HTTP data endpoint is at `http://raspberrypi.local:8000/front` and the Websocket data endpoint is at `http://raspberrypi.local:8000/ws_basic`
 
 ## Troubleshooting
 

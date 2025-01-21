@@ -4,7 +4,7 @@ import json
 from datetime import datetime
 import asyncio
 
-MQTT_BROKER = "mqtt://localhost:1883" # use broker.hivemq.com for testing on PCs
+MQTT_BROKER = "host.docker.internal" # use broker.hivemq.com for testing on PCs
 MQTT_PORT = 1883 # TCP Port
 DATA_TOPIC = "novaground/telemetry"
 COMMAND_TOPIC = "novaground/command"
@@ -54,3 +54,11 @@ async def process_mqtt_message(payload):
         data_store["actuators"] = payload.get("actuators", [])
     else:
         print("Received payload is not a valid dictionary")
+
+async def send_command(command: dict):
+    try:
+        mqtt.mqtt_client.publish(mqtt.COMMAND_TOPIC, json.dumps(command))
+        return {"status": "Command sent"}
+    except Exception as e:
+        print(f"Error publishing command: {e} - Payload: {json.dumps(command)}")
+        raise Exception(f"Error publishing command: {e} - Payload: {json.dumps(command)}")
