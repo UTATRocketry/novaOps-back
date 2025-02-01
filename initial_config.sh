@@ -10,6 +10,10 @@ sudo apt install ufw
 sudo apt install -y dnsmasq docker-compose
 sudo apt install mosquitto mosquitto-clients # Check with sudo systemctl status mosquitto
 sudo apt-get install -y nodejs npm
+sudo apt-install build-essential clang
+sudo apt-get install libboost-all-dev libpaho-mqttpp-dev
+git clone https://github.com/mccdaq/daqhats.git
+sudo ./daqhats/install.sh
 
 # Backup existing dhcpcd.conf and create a new one
 echo "Backing up Files..."
