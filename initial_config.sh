@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # Update and upgrade the system
-echo "Updating system..."
-sudo apt update && sudo apt upgrade -y
+#echo "Updating system..."
+#sudo apt update && sudo apt upgrade -y
 
 # Install required packages
 echo "Installing packages..."
