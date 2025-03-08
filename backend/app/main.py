@@ -9,7 +9,7 @@ import mqtt_interface as mqtt
 import data_file
 from html_generator import generate_html, new_html
 from auth import authenticate_user, create_access_token, get_current_user, ACCESS_TOKEN_EXPIRE_MINUTES
-from dummy_pi import get_timestamp, generate_sensor_data, handle_comand
+from dummy_pi import generate_data, handle_dummy_command
 
 app = FastAPI()
 
@@ -41,7 +41,24 @@ async def basic_test_endpoint():
 
 @app.get("/raw_data")
 async def data_test_endpoint():
-    return {"data" : mqtt.data_store}  
+    return {"data" : mqtt.processed_data}  
+
+@app.get("/dummy_data")
+async def dummy_data_endpoint():
+    return generate_data() 
+
+@app.get("/dummy_command")
+async def dummy_command_endpoint(command: dict):
+    handle_dummy_command(command)
+    return {"status": "Command sent"}
+
+@app.get("/callibrate_sensor")
+async def callibrate_endpoint():
+    return {"status": "Sensor callibrated"}
+
+@app.get("/update_config")
+async def update_config_enpoint():
+    return {"status": "Config updated"}
 
 @app.get("/front")
 async def get_actuator_data():
@@ -49,7 +66,7 @@ async def get_actuator_data():
         while True:
             #await generate_sensor_data()
             #await get_timestamp()
-            return mqtt.data_store 
+            return mqtt.processed_data 
     except:
         return {} 
 
@@ -58,7 +75,7 @@ async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     while True:
         #await mqtt.generate_sensor_data()
-        await websocket.send_json(mqtt.data_store)
+        await websocket.send_json(mqtt.processed_data)
         await asyncio.sleep(0.0000001)
 
 @app.websocket("/ws")
@@ -71,17 +88,14 @@ async def websocket_endpoint(websocket: WebSocket):
     user = await get_current_user(token)
     try:
         while True:
-            await generate_sensor_data()
-            await get_timestamp()
-            await websocket.send_text(json.dumps(data_file.data_store))
-
+            await websocket.send_json(mqtt.processed_data)
             # Check if any commands are received
             try:
                 message = await asyncio.wait_for(websocket.receive_text(), timeout=1.0)
                 command = json.loads(message)
 
                 # Handle actuator toggling
-                await handle_comand(command)
+                await handle_dummy_command(command)
 
             except asyncio.TimeoutError:
                 # Continue sending sensor updates if no command is received

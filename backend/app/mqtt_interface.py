@@ -3,14 +3,15 @@ from fastapi import HTTPException
 import json
 from datetime import datetime
 import asyncio
-
+from config_parser import get_config, process_data
 MQTT_BROKER = "host.docker.internal" # use broker.hivemq.com for testing on PCs
 MQTT_PORT = 1883 # TCP Port
 DATA_TOPIC = "novaground/telemetry"
 COMMAND_TOPIC = "novaground/command"
 
+raw_data = {}
 data_store = {"sensors": [], "actuators": []}
-
+processed_data = {}
 # MQTT client setup
 mqtt_client = mqtt.Client()
 
@@ -22,6 +23,8 @@ def on_connect(client, userdata, flags, rc):
         print("Failed to connect to MQTT broker")
 
 def on_message(client, userdata, msg):
+    global raw_data
+    global processed_data
     # Decode the payload from bytes to string
     payload_str = msg.payload.decode('utf-8', errors='replace').strip()
 
@@ -30,9 +33,13 @@ def on_message(client, userdata, msg):
     try:
         # Check if the payload is non-empty before attempting to decode as JSON
         if payload_str:
-            data = json.loads(payload_str)  # Attempt to decode the payload into JSON
-            # print(f"Decoded data: {data}")
-            asyncio.run(process_mqtt_message(data))
+            raw_data = json.loads(payload_str)  # Attempt to decode the payload into JSON
+            # print(f"Decoded data: {data}"
+            # Make sure payload is a dictionary before using it in the process
+            if isinstance(raw_data, dict):
+                processed_data = asyncio.run(process_data(raw_data))
+            else:
+                print("Received payload is not a valid dictionary")
         else:
             print("Received empty payload.")
     except json.JSONDecodeError as e:
@@ -62,3 +69,5 @@ async def send_command(command: dict):
     except Exception as e:
         print(f"Error publishing command: {e} - Payload: {json.dumps(command)}")
         raise Exception(f"Error publishing command: {e} - Payload: {json.dumps(command)}")
+    
+

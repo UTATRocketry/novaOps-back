@@ -1,0 +1,188 @@
+Settings: # overall settings
+- 
+
+MCCDAQ: # sensor DAC hat
+- channelId: 0 # the channel number
+  name: PGSO
+  type: PT # apply different units and regression formula based on this? 
+  calibration: [
+    [1.95, 0],
+    [2.277, 25],
+    [2.564, 50],
+    [2.853, 75],
+    [3.145, 100],
+    [3.456, 125],
+    [3.738, 150],
+    [4.028, 175],
+    [4.318, 200],
+    [5.31, 300],
+    [6.44, 400],
+    [7.7, 500],
+    [8.86, 600],
+    [9.29, 650]
+  ]
+
+- channelId: 1
+  name: PGS
+  type: PT
+  calibration: [
+    [1.95, 0],
+    [2.277, 25],
+    [2.564, 50],
+    [2.853, 75],
+    [3.145, 100],
+    [4.318, 200],
+    [5.31, 300],
+    [6.44, 400],
+    [7.7, 500],
+    [8.86, 600],
+    [9.29, 650]
+  ]
+
+- channelId: 2
+  name: POTT
+  type: PT
+  calibration: [
+    [1.95, 0],
+    [2.277, 25],
+    [2.564, 50],
+    [2.853, 75],
+    [3.145, 100],
+    [4.318, 200],
+    [5.31, 300],
+    [6.44, 400],
+    [7.7, 500],
+    [8.86, 600],
+    [9.29, 650]
+  ]
+
+- channelId: 3
+  name: POTB
+  type: PT
+  calibration: [
+    [1.95, 0],
+    [2.277, 25],
+    [2.564, 50],
+    [2.853, 75],
+    [3.145, 100],
+    [4.318, 200],
+    [5.31, 300],
+    [6.44, 400],
+    [7.7, 500],
+    [8.86, 600],
+    [9.29, 650]
+  ]
+
+- channelId: 4
+  name: PFT
+  calibration: [
+    [1,100],
+    [2,200],
+    [3,300]
+  ]
+
+- channelId: 5
+  name: PFM
+  calibration: [
+    [1,100],
+    [2,200],
+    [3,300]
+  ]
+
+- channelId: 6
+  name: PCC
+  calibration: [
+    [1,100],
+    [2,200],
+    [3,300]
+  ]
+
+- channelId: 7
+  name: MOT
+  type: LC
+  calibration: [
+    [5.09, 0],
+    [8.65, 15.8]
+  ]
+
+- channelId: 8
+  name: MFT
+  type: LC
+  calibration: [
+    [5.09, 0],
+    [8.65, 15.8]
+
+  ]
+
+- channelId: 9
+  name: TGSO-G
+  type: TC
+  calibration: [
+  ]
+
+- channelId: 10
+  name: TOT
+  type: TC
+  calibration: [
+  ]
+
+- channelId: 11
+  name: TFM
+  type: TC
+  calibration: [
+  ]
+
+relayBoard: # solenoid relay board
+- channelId: 0
+  name: SVGSD
+
+- channelId: 1
+  name: SVBVGS
+
+- channelId: 2
+  name: SVMOVP
+
+- channelId: 3
+  name: SVOTD
+
+- channelId: 4
+  name: SVOTV
+
+- channelId: 5
+  name: SVFTV
+
+PCA9685: # servo driver board
+- channelId: 0
+  name: MFV
+  open_angle: 0
+  close_angle: 90
+  min_angle: 0
+  max_angle: 180
+
+- channelId: 1
+  name: BVGSO
+  open_angle: 0
+  close_angle: 90
+  min_angle: 0
+  max_angle: 180
+
+- channelId: 2
+  name: BVGSP
+  open_angle: 0
+  close_angle: 90
+  min_angle: 0
+  max_angle: 180
+
+- channelId: 3
+  name: BVOTP
+  open_angle: 0
+  close_angle: 90
+  min_angle: 0
+  max_angle: 180
+
+- channelId: 4
+  name: BVFTP
+  open_angle: 0
+  close_angle: 90
+  min_angle: 0
+  max_angle: 180

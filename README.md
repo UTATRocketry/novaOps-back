@@ -46,7 +46,10 @@ To run this project, you will need Docker and Docker Compose installed on your m
 
 3. **Viewing the Application:**
    Once the container is running, you can access the application in your browser at: `http://localhost:8000`
-
+    To see the stdin, stdout, sterr from the container run:
+    ```
+    docker attach CONTAINER
+    ```
 4. **Stopping the Application:**
    To stop the application, use CTRL+C in the original terminal where you started the app or run `sudo docker-compose stop` in a second terminal within the novaOps-back directory.
 
@@ -67,7 +70,10 @@ chmod +x /path/to/nova/initial_config.sh
 chmod +x /path/to/nova/post_reboot_config.sh
 ```
 4. **Run the scripts:**
-Run `initial_config.sh` wait for it to reboot the Pi and then run `post_reboot_config.sh`. This will start the server on `http://192.168.0.1:8000`. Use that if connected by ethernet or `http://raspberrypi.local:8000` to see the application in a browser. Use `sudo docker-compose stop` to stop and `sudo docker-compose up` to run again. The HTTP data endpoint is at `http://raspberrypi.local:8000/front` and the Websocket data endpoint is at `http://raspberrypi.local:8000/ws_basic`
+- Run `initial_config.sh` wait for it to reboot the Pi and then run `post_reboot_config.sh`. 
+- This will start the server on `http://192.168.0.1:8000`. Use that if connected by ethernet or `http://raspberrypi.local:8000` to see the application in a browser. 
+- Use `sudo docker-compose stop` to stop and `sudo docker-compose up` to run again. 
+- The HTTP data endpoint is at `http://raspberrypi.local:8000/front` and the Websocket data endpoint is at `http://raspberrypi.local:8000/ws_basic`
 
 ## Troubleshooting
 
@@ -81,3 +87,4 @@ To stop the application and remove the containers entirely, run:
 - Check if the static IP address is configured correctly with `ip addr show eth0`
 - Check if DHCP is enabled and running with `sudo systemctl status dhcpcd`
 - Check if DNS is enabled and running with `sudo systemctl status dnsmasq`
+- Check if the Docker container is running with `sudo docker ps`
