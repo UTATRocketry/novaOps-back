@@ -5,9 +5,12 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPExcept
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from fastapi.security import OAuth2PasswordRequestForm
+from pydantic import BaseModel
+from typing import List, Tuple
 import mqtt_interface as mqtt
 import data_file
-from html_generator import generate_html, new_html
+import config_parser
+from html_generator import generate_html, new_html, calibration_html
 from auth import authenticate_user, create_access_token, get_current_user, ACCESS_TOKEN_EXPIRE_MINUTES
 from dummy_pi import generate_data, handle_dummy_command
 
@@ -35,7 +38,7 @@ async def get_token_from_websocket(websocket: WebSocket):
 async def get():
     return HTMLResponse(new_html)
 
-@app.get("/entry")                 # Temporary route for testing for frontend and backend integration
+@app.get("/entry")  # Temporary route for testing for frontend and backend integration
 async def basic_test_endpoint():
     return {"message": "Hello World from Backend!"}
 
@@ -52,12 +55,9 @@ async def dummy_command_endpoint(command: dict):
     handle_dummy_command(command)
     return {"status": "Command sent"}
 
-@app.get("/callibrate_sensor")
-async def callibrate_endpoint():
-    return {"status": "Sensor callibrated"}
-
 @app.get("/update_config")
 async def update_config_enpoint():
+    config_parser.load_config()
     return {"status": "Config updated"}
 
 @app.get("/front")
@@ -116,6 +116,22 @@ async def send_command(command: dict):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+# Data model for calibration update
+class CalibrationRequest(BaseModel):
+    sensor: str
+    calibration: List[Tuple[float, float]]  # List of (voltage, unit value) pairs
+
+@app.post("/calibrate_sensor")
+async def calibrate_sensor(request: CalibrationRequest):
+    # Mock logic to store calibration (replace with actual DB/store logic)
+    print(f"Received calibration for {request.sensor}: {request.calibration}")
+
+    if not request.calibration:
+        raise HTTPException(status_code=400, detail="Calibration data is empty")
+    else:
+        # config_parser.update_calibration(request.sensor, request.calibration)
+        # update_calibration(sensor_str, calibration_points)
+        return {"message": "Calibration updated successfully", "sensor": request.sensor}
 
 # Token route for login
 @app.post("/token")

@@ -5,7 +5,7 @@ import numpy as np
 CONFIG_FILE = 'config.yml' 
 config_data = None
 
-def load_config(config_yml):
+def load_config(config_yml=CONFIG_FILE):
     """Load the YAML configuration file."""
     global config_data
     with open(config_yml, 'r') as file:
@@ -29,7 +29,7 @@ def get_config():
     if config_data:
         return config_data
     else:
-        load_config(CONFIG_FILE)
+        load_config()
         return config_data
 
 def interpolate(value, calibration_points):
@@ -41,13 +41,18 @@ def interpolate(value, calibration_points):
 async def process_data(raw_data):
     """Process incoming raw sensor and actuator data."""
     processed_data = {"sensors": [], "actuators": []}
+    
     # Process sensors
     for sensor in raw_data.get("sensors", []):
         sensor_info = get_config()["sensors"].get(sensor["id"])
         if sensor_info:
             value = sensor["value"]
-            if "calibration" in sensor_info:
-                value = interpolate(value, sensor_info["calibration"])
+            calibration = sensor_info.get("calibration", [])
+
+            # Apply interpolation only if calibration is non-empty
+            if calibration and len(calibration) > 0:
+                value = interpolate(value, calibration)
+            
             processed_data["sensors"].append({
                 "name": sensor_info["name"],
                 "value": f"{value:.2f}",

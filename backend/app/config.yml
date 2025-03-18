@@ -111,25 +111,30 @@ MCCDAQ: # sensor DAC hat
   calibration: [
     [5.09, 0],
     [8.65, 15.8]
-
   ]
 
 - channelId: 9
   name: TGSO-G
   type: TC
   calibration: [
+    [1, 1],
+    [2, 2]
   ]
 
 - channelId: 10
   name: TOT
   type: TC
   calibration: [
+    [1, 1],
+    [2, 2]
   ]
 
 - channelId: 11
   name: TFM
   type: TC
   calibration: [
+    [1, 1],
+    [2, 2]
   ]
 
 relayBoard: # solenoid relay board
