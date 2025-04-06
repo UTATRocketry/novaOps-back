@@ -1,19 +1,28 @@
 #!/bin/bash
 
 # Update and upgrade the system
-#echo "Updating system..."
-#sudo apt update && sudo apt upgrade -y
+read -p "Would you like to update system first? (y/n): " update_sys
 
+if [ "$update_sys" == "y" ]; then
+    echo "Updating system..."
+    sudo apt update && sudo apt upgrade -y
+else
+    echo "Skipping system updates..."
+fi
 # Install required packages
 echo "Installing packages..."
 sudo apt install ufw
 sudo apt install -y dnsmasq docker-compose
 sudo apt install mosquitto mosquitto-clients # Check with sudo systemctl status mosquitto
+curl -sL https://deb.nodesource.com/setup_18.x | sudo -E bash -
 sudo apt-get install -y nodejs npm
 sudo apt-install build-essential clang
 sudo apt-get install libboost-all-dev libpaho-mqttpp-dev
 git clone https://github.com/mccdaq/daqhats.git
 sudo ./daqhats/install.sh
+# If the Wifi-Adapter isn't plugged in, select & install the driver for the AC5L model
+sh -c 'wget linux.brostrend.com/install -O /tmp/install && sh /tmp/install'
+sudo nmcli device wifi hotspot ssid hotspot password rocketry ifname wlan1
 
 # Backup existing dhcpcd.conf and create a new one
 echo "Backing up Files..."
@@ -115,9 +124,6 @@ sudo bash -c 'cat << EOF > /etc/hosts
 ::1		localhost ip6-localhost ip6-loopback
 ff02::1		ip6-allnodes
 ff02::2		ip6-allrouters
-
-127.0.1.1	raspberrypi
-192.168.0.1 novaOps
 EOF'
 
 # Add custom Mosquitto configuration file
