@@ -46,7 +46,7 @@ To run this project, you will need Docker and Docker Compose installed on your m
 
 3. **Viewing the Application:**
    Once the container is running, you can access the application in your browser at: `http://localhost:8000`
-    To see the stdin, stdout, sterr from the container run:
+    To see the stdin, stdout, stderr from the container run:
     ```
     docker attach CONTAINER
     ```
