@@ -3,7 +3,7 @@ from fastapi import HTTPException
 import json
 from datetime import datetime
 import asyncio
-from config_parser import get_config, process_data
+from config_parser import get_config, process_data, convert_command
 MQTT_BROKER = "host.docker.internal" # use broker.hivemq.com for testing on PCs
 MQTT_PORT = 1883 # TCP Port
 DATA_TOPIC = "novaground/telemetry"
@@ -62,12 +62,40 @@ async def process_mqtt_message(payload):
     else:
         print("Received payload is not a valid dictionary")
 
-async def send_command(command: dict):
+async def publish_command(command):
     try:
-        mqtt.mqtt_client.publish(mqtt.COMMAND_TOPIC, json.dumps(command))
+        mqtt_client.publish(mqtt.COMMAND_TOPIC, json.dumps(command))
         return {"status": "Command sent"}
     except Exception as e:
         print(f"Error publishing command: {e} - Payload: {json.dumps(command)}")
         raise Exception(f"Error publishing command: {e} - Payload: {json.dumps(command)}")
     
 
+async def set_all_to_closed():
+    """Set all servos and solenoids to their closed state."""
+    config = get_config()
+    commands = []
+    # Send commands to close all solenoids
+    for relay in config["relays"].values():
+        #if relay.get("type") is None:
+        #    continue
+        command = {
+            "type": "solenoid",
+            "name": relay["name"],
+            "state": "closed"
+        }
+        relay_commands = await convert_command(command)
+        commands.extend(relay_commands)
+    # Send commands to close all servos
+    for servo in config["servos"].values():
+        command = {
+            "type": "servo",
+            "name": servo["name"],
+            "state": "closed"
+        }
+        servo_commands = await convert_command(command)
+        commands.extend(servo_commands)
+        
+    # Publish all commands to the MQTT broker
+    for command in commands:
+        await publish_command(command)

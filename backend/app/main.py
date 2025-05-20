@@ -3,7 +3,7 @@ import json
 from datetime import timedelta
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, FileResponse, RedirectResponse
 from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel
 from typing import List, Tuple
@@ -36,7 +36,7 @@ async def get_token_from_websocket(websocket: WebSocket):
 
 @app.get("/")
 async def get():
-    return HTMLResponse(new_html)
+    return FileResponse("wsData.html")
 
 @app.get("/entry")  # Temporary route for testing for frontend and backend integration
 async def basic_test_endpoint():
@@ -60,6 +60,7 @@ async def update_config_enpoint():
     config_parser.load_config()
     return {"status": "Config updated"}
 
+# TODO: use ORJSON for the data stream
 @app.get("/front")
 async def get_actuator_data():
     try:
@@ -79,7 +80,7 @@ async def websocket_endpoint(websocket: WebSocket):
         await asyncio.sleep(0.0000001)
 
 @app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
+async def websocket_endpoint2(websocket: WebSocket):
     # Accept the WebSocket connection
     await websocket.accept()
 
@@ -110,11 +111,32 @@ async def websocket_endpoint(websocket: WebSocket):
 
 @app.post("/command")
 async def send_command(command: dict):
+    # Servos: {"id": "1", "angle": 90}
+    # Relays: {"id": "1", "state": "0"}
     try:
-        mqtt.mqtt_client.publish(mqtt.COMMAND_TOPIC, json.dumps(command))
+        commands = await config_parser.convert_command(command)  # Convert command based on config
+        for command in commands:
+            # Publish each command to the MQTT broker
+            #mqtt.publish_command(command)
+            mqtt.mqtt_client.publish(mqtt.COMMAND_TOPIC, json.dumps(command))
         return {"status": "Command sent"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/close_all")
+async def close_all_endpoint():
+    #status = mqtt.set_all_to_closed()
+    #return status
+    relay_command = {
+        "type": "relay",
+        "id": 0,
+        "state": 0
+    }
+    #mqtt.mqtt_client.publish(mqtt.COMMAND_TOPIC, json.dumps(relay_command))
+    status = await mqtt.set_all_to_closed()
+    return {"status": "Commands sent"}
+    
+    
 
 # Data model for calibration update
 class CalibrationRequest(BaseModel):

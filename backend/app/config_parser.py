@@ -11,15 +11,34 @@ def load_config(config_yml=CONFIG_FILE):
     with open(config_yml, 'r') as file:
         config = yaml.safe_load(file)
     
-    sensor_map = {sensor['channelId']: sensor for sensor in config.get('MCCDAQ', [])}
-    relay_map = {relay['channelId']: relay for relay in config.get('relayBoard', [])}
-    servo_map = {servo['channelId']: servo for servo in config.get('PCA9685', [])}
+    validate_config(config)
+
+    # sensor_map = {(sensor['hatID'], sensor['channelID']): sensor for sensor in config.get('MCCDAQ', [])}
+    # relay_map = {relay['channelID']: relay for relay in config.get('relayBoard', [])}
+    # servo_map = {servo['channelID']: servo for servo in config.get('PCA9685', [])}
+    
+    sensor_map = {sensor['name']: sensor for sensor in config.get('MCCDAQ', [])}
+    relay_map = {relay['name']: relay for relay in config.get('relayBoard', [])}
+    servo_map = {servo['name']: servo for servo in config.get('PCA9685', [])}
     
     config_data = {
         "sensors": sensor_map,
         "relays": relay_map,
         "servos": servo_map
     }
+    print("Loaded config:", config_data)
+
+def validate_config(config):
+    """Validate the configuration for missing keys."""
+    for relay in config.get('relayBoard', []):
+        if 'channelId' not in relay:
+            print(f"Warning: Missing 'channelID' in relay entry: {relay}")
+    for sensor in config.get('MCCDAQ', []):
+        if 'channelID' not in sensor:
+            print(f"Warning: Missing 'channelID' in sensor entry: {sensor}")
+    for servo in config.get('PCA9685', []):
+        if 'channelId' not in servo:
+            print(f"Warning: Missing 'channelID' in servo entry: {servo}")
 
 def update_config(config_yml,new_config):
     with open(config_yml,'w') as file:
@@ -44,9 +63,17 @@ async def process_data(raw_data):
     
     # Process sensors
     for sensor in raw_data.get("sensors", []):
-        sensor_info = get_config()["sensors"].get(sensor["id"])
+        hat_id = sensor.get("hat_id")
+        channel_id = sensor.get("channel_id")
+        value = sensor.get("value")
+        timestamp = sensor.get("timestamp")
+
+        # Find the sensor in the config using hat_id and channel_id
+        sensor_info = next(
+            (s for s in get_config()["sensors"].values() if s["hatID"] == hat_id and s["channelID"] == channel_id),
+            None
+        )
         if sensor_info:
-            value = sensor["value"]
             calibration = sensor_info.get("calibration", [])
 
             # Apply interpolation only if calibration is non-empty
@@ -56,9 +83,9 @@ async def process_data(raw_data):
             processed_data["sensors"].append({
                 "name": sensor_info["name"],
                 "value": f"{value:.2f}",
-                "timestamp": sensor["timestamp"]
+                "timestamp": timestamp
             })
-    
+    """
     # Process relays
     for relay in raw_data.get("relays", []):
         relay_info = get_config()["relays"].get(relay["id"])
@@ -78,5 +105,90 @@ async def process_data(raw_data):
                 "name": servo_info["name"],
                 "state": state
             })
-    
+    """
     return processed_data
+
+
+    
+async def convert_command(command):
+    """
+    Convert and send command values based on config.yml values.
+    """
+    config = get_config()  # Load the configuration
+    command_type = command["type"]
+    name = command["name"]
+    state = command["state"]
+    mqtt_commands = []
+
+    if command_type == "solenoid":
+        # Find the relay by name
+        relay = next((r for r in config["relays"].values() if r["name"] == name), None)
+        if not relay:
+            raise ValueError(f"Relay with name '{name}' not found in config.")
+
+        if (relay["type"]):
+            # Convert state based on relay type
+            relay_type = relay["type"]
+            relay_state = 1 if (state == "open" and relay_type == "NO") or (state == "closed" and relay_type == "NC") else 0
+        else:
+            relay_state = 1 if (state == "open") else 0
+        
+        # Create the command
+        relay_command = {
+            "type": "solenoid",
+            "id": relay["channelID"],
+            "state": relay_state
+        }
+
+        # Add the command to the list
+        mqtt_commands.append(relay_command)
+        return mqtt_commands
+
+    elif command_type == "servo":
+        # Find the servo by name
+        servo = next((s for s in config["servos"].values() if s["name"] == name), None)
+        if not servo:
+            raise ValueError(f"Servo with name '{name}' not found in config.")
+
+        # Determine the angle based on state
+        if state == "open":
+            angle = servo["open_pos"]
+            over_angle = servo.get("open_over")
+        elif state == "closed":
+            angle = servo["close_pos"]
+            over_angle = servo.get("close_over")
+        else:
+            raise ValueError(f"Invalid state '{state}' for servo.")
+
+        # If relayId exists, send a command to turn the relay on
+        if "relayID" in servo:
+            relay_command = {
+                "type": "solenoid",
+                "id": servo["relayID"],
+                "state": "1"  # Turn relay on
+            }
+            mqtt_commands.append(relay_command)
+
+        # If over position exists, send the over position first
+        if over_angle:
+            over_command = {
+                "type": "servo",
+                "id": servo["channelID"],
+                "angle": over_angle
+            }
+            mqtt_commands.append(over_command)
+
+        # Send the actual position command
+        servo_command = {
+            "type": "servo",
+            "id": servo["channelID"],
+            "angle": angle
+        }
+        mqtt_commands.append(servo_command)
+
+        return mqtt_commands
+    else:
+        raise ValueError(f"Invalid command type '{command_type}'.")
+    
+
+    

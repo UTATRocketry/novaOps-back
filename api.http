@@ -1,0 +1,57 @@
+# To use this file, install REST Client VScode Extension or any HTTP client that supports `.http` files.
+# You can also use Postman or similar tools to run these requests.
+# REST Client VScode Extension: https://marketplace.visualstudio.com/items/?itemName=humao.rest-client
+
+### Check data connection
+GET http://192.168.0.1:8000/front
+Accept: application/json
+
+### Update the configuration
+GET http://192.168.0.1:8000/update_config
+Accept: application/json
+
+### Close all valves
+GET http://192.168.0.1:8000/close_all
+Accept: application/json
+
+
+### Basic commands for individual solenoids and servos
+POST http://192.168.0.1:8000/command
+Content-Type: application/json
+
+{
+    "type": "solenoid",
+    "name": "SVMOVP",
+	"state": "open"
+}
+
+###
+POST http://192.168.0.1:8000/command
+Content-Type: application/json
+
+{
+    "type": "solenoid",
+    "name": "SVMOVP",
+	"state": "open"
+}
+
+###
+POST http://192.168.0.1:8000/command
+Content-Type: application/json
+
+{
+    "type": "servo",
+    "name": "BVGSO",
+	"state": "closed"
+}
+
+###
+POST http://192.168.0.1:8000/command
+Content-Type: application/json
+
+{
+    "type": "servo",
+    "name": "MFV",
+	"state": "open"
+}
+

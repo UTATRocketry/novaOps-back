@@ -1,193 +1,186 @@
 Settings: # overall settings
 - 
 
-MCCDAQ: # sensor DAC hat
-- channelId: 0 # the channel number
+MCCDAQ: # sensor DAC hats, Max 8 channels per hat
+- hatID: 0 # DAQ hat address
+  channelID: 0 # Channel ID on the DAQ hat
   name: PGSO
-  type: PT # apply different units and regression formula based on this? 
+  unit: psi
+  type: PT # apply different regression formula + other things based on this? 
   calibration: [
-    [1.95, 0],
-    [2.277, 25],
-    [2.564, 50],
-    [2.853, 75],
-    [3.145, 100],
-    [3.456, 125],
-    [3.738, 150],
-    [4.028, 175],
-    [4.318, 200],
-    [5.31, 300],
-    [6.44, 400],
-    [7.7, 500],
-    [8.86, 600],
-    [9.29, 650]
+    [0, 0],
+    [1, 1]
   ]
 
-- channelId: 1
+- hatID: 0
+  channelID: 1
   name: PGS
+  unit: psi
   type: PT
   calibration: [
-    [1.95, 0],
-    [2.277, 25],
-    [2.564, 50],
-    [2.853, 75],
-    [3.145, 100],
-    [4.318, 200],
-    [5.31, 300],
-    [6.44, 400],
-    [7.7, 500],
-    [8.86, 600],
-    [9.29, 650]
+    [0, 0],
+    [1, 1]
   ]
 
-- channelId: 2
-  name: POTT
-  type: PT
-  calibration: [
-    [1.95, 0],
-    [2.277, 25],
-    [2.564, 50],
-    [2.853, 75],
-    [3.145, 100],
-    [4.318, 200],
-    [5.31, 300],
-    [6.44, 400],
-    [7.7, 500],
-    [8.86, 600],
-    [9.29, 650]
-  ]
-
-- channelId: 3
-  name: POTB
-  type: PT
-  calibration: [
-    [1.95, 0],
-    [2.277, 25],
-    [2.564, 50],
-    [2.853, 75],
-    [3.145, 100],
-    [4.318, 200],
-    [5.31, 300],
-    [6.44, 400],
-    [7.7, 500],
-    [8.86, 600],
-    [9.29, 650]
-  ]
-
-- channelId: 4
+- hatID: 0
+  channelID: 2
   name: PFT
+  unit: psi
+  type: PT
   calibration: [
-    [1,100],
-    [2,200],
-    [3,300]
   ]
 
-- channelId: 5
+- hatID: 0
+  channelID: 3
   name: PFM
+  unit: psi
+  type: PT
+  calibration: [
+  ]
+
+- hatID: 0
+  channelID: 4
+  name: POT
+  unit: psi
   calibration: [
     [1,100],
     [2,200],
     [3,300]
   ]
 
-- channelId: 6
+- hatID: 0
+  channelID: 5
+  name: PVO
+  unit: psi
+  calibration: [
+    [1,50],
+    [2,100],
+    [3,200]
+  ]
+
+- hatID: 0
+  channelID: 6
   name: PCC
+  unit: psi
   calibration: [
-    [1,100],
-    [2,200],
-    [3,300]
+    [1,200],
+    [2,300],
+    [3,400]
   ]
 
-- channelId: 7
+- hatID: 0
+  channelID: 7
   name: MOT
+  unit: kg
   type: LC
   calibration: [
-    [5.09, 0],
-    [8.65, 15.8]
   ]
 
-- channelId: 8
+- hatID: 1
+  channelID: 0
   name: MFT
+  unit: kg
   type: LC
   calibration: [
-    [5.09, 0],
-    [8.65, 15.8]
   ]
 
-- channelId: 9
-  name: TGSO-G
-  type: TC
+- hatID: 1
+  channelID: 1
+  name: CC-LC
+  unit: kg
+  type: LC
   calibration: [
-    [1, 1],
-    [2, 2]
   ]
 
-- channelId: 10
-  name: TOT
-  type: TC
-  calibration: [
-    [1, 1],
-    [2, 2]
-  ]
+relayBoard: # solenoid relay board - 16 channels
 
-- channelId: 11
-  name: TFM
-  type: TC
-  calibration: [
-    [1, 1],
-    [2, 2]
-  ]
-
-relayBoard: # solenoid relay board
-- channelId: 0
-  name: SVGSD
-
-- channelId: 1
-  name: SVBVGS
-
-- channelId: 2
-  name: SVMOVP
-
-- channelId: 3
-  name: SVOTD
-
-- channelId: 4
-  name: SVOTV
-
-- channelId: 5
-  name: SVFTV
-
-PCA9685: # servo driver board
-- channelId: 0
+- channelID: 0
   name: MFV
-  open_angle: 0
-  close_angle: 90
-  min_angle: 0
-  max_angle: 180
 
-- channelId: 1
-  name: BVGSO
-  open_angle: 0
-  close_angle: 90
-  min_angle: 0
-  max_angle: 180
-
-- channelId: 2
-  name: BVGSP
-  open_angle: 0
-  close_angle: 90
-  min_angle: 0
-  max_angle: 180
-
-- channelId: 3
+- channelID: 1
   name: BVOTP
-  open_angle: 0
-  close_angle: 90
-  min_angle: 0
-  max_angle: 180
 
-- channelId: 4
+- channelID: 2
   name: BVFTP
-  open_angle: 0
-  close_angle: 90
-  min_angle: 0
-  max_angle: 180
+
+- channelID: 3
+  name: BVGSP
+
+- channelID: 4
+  name: BVGSO
+
+# - channelID: 5
+
+# - channelID: 6
+
+# - channelID: 7
+
+- channelID: 8
+  name: SVGSD
+  type: NC # Normally open (NO) or normally closed (NC)
+
+- channelID: 9
+  name: SVBVGS
+  type: NC
+
+- channelID: 10
+  name: SVMOVP
+  type: NC
+
+- channelID: 11
+
+- channelID: 12
+  name: SVPP   # injector purge, newly added
+  type: NC
+
+- channelID: 13
+  name: SVFTV
+  type: NO
+
+- channelID: 14
+  name: SVOTV
+  type: NO
+
+- channelID: 15
+  name: SVOTD
+  type: NC
+
+
+PCA9685: # servo driver board - 16 channels
+- channelID: 5
+  name: MFV
+  open_pos: 1300
+  close_pos: 1700
+  relayID: 0
+
+- channelID: 6
+  name: BVOTP
+  open_pos: 1300
+  open_over: 1200
+  close_pos: 1700
+  close_over: 1800
+  relayID: 1
+
+- channelID: 7
+  name: BVFTP
+  open_pos: 1300
+  open_over: 1200
+  close_pos: 1700
+  close_over: 1800
+  relayID: 2
+
+- channelID: 8
+  name: BVGSP
+  open_pos: 1300
+  open_over: 1200
+  close_pos: 1700
+  close_over: 1800
+  relayID: 3
+
+- channelID: 9
+  name: BVGSO
+  open_pos: 2000
+  open_over: 2000
+  close_pos: 1000
+  close_over: 1000
+  relayID: 4
