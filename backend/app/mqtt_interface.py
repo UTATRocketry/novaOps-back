@@ -77,8 +77,8 @@ async def set_all_to_closed():
     commands = []
     # Send commands to close all solenoids
     for relay in config["relays"].values():
-        #if relay.get("type") is None:
-        #    continue
+        if relay.get("type") is None:
+            continue
         command = {
             "type": "solenoid",
             "name": relay["name"],

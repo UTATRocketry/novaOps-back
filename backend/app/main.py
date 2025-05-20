@@ -36,7 +36,15 @@ async def get_token_from_websocket(websocket: WebSocket):
 
 @app.get("/")
 async def get():
+    return FileResponse("index.html")
+
+@app.get("/view-data")
+async def get_dataUI():
     return FileResponse("wsData.html")
+
+@app.get("/view-commands")
+async def get_commandUI():
+    return FileResponse("commands.html")
 
 @app.get("/entry")  # Temporary route for testing for frontend and backend integration
 async def basic_test_endpoint():
@@ -59,6 +67,29 @@ async def dummy_command_endpoint(command: dict):
 async def update_config_enpoint():
     config_parser.load_config()
     return {"status": "Config updated"}
+
+@app.get("/actuators")
+async def get_actuators():
+    # Get the actuators from the config
+    config = config_parser.get_config()
+    actuators = []
+    for relay in config["relays"].values():
+        if relay.get("type") is None:
+            continue
+        actuator = {"type": "solenoid", "name": relay["name"]}
+        actuators.append(actuator)
+    for servo in config["servos"].values():
+        actuator = {"type": "servo", "name": servo["name"]}
+        actuators.append(actuator)
+    return actuators
+
+@app.get("/sensors")
+async def get_sensors():
+    # Get the sensors from the config
+    config = config_parser.get_config()
+    sensors = {"sensors": config["sensors"]}
+    # Return the sensors as JSON
+    return sensors
 
 # TODO: use ORJSON for the data stream
 @app.get("/front")

@@ -13,13 +13,9 @@ def load_config(config_yml=CONFIG_FILE):
     
     validate_config(config)
 
-    # sensor_map = {(sensor['hatID'], sensor['channelID']): sensor for sensor in config.get('MCCDAQ', [])}
-    # relay_map = {relay['channelID']: relay for relay in config.get('relayBoard', [])}
-    # servo_map = {servo['channelID']: servo for servo in config.get('PCA9685', [])}
-    
-    sensor_map = {sensor['name']: sensor for sensor in config.get('MCCDAQ', [])}
-    relay_map = {relay['name']: relay for relay in config.get('relayBoard', [])}
-    servo_map = {servo['name']: servo for servo in config.get('PCA9685', [])}
+    sensor_map = {(sensor['channelID'] + 8*sensor['hatID']): sensor for sensor in config.get('MCCDAQ', [])}
+    relay_map = {relay['channelID']: relay for relay in config.get('relayBoard', [])}
+    servo_map = {servo['channelID']: servo for servo in config.get('PCA9685', [])}
     
     config_data = {
         "sensors": sensor_map,

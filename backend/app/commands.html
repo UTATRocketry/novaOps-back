@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Actuator Commands Viewer</title>
+</head>
+<body>
+    <table>
+        <thead>
+            <tr>
+                <th>Name</th>
+                <th>State</th>
+            </tr>
+        </thead>
+        <tbody id="actuators-table">
+            <!-- Actuators will be dynamically loaded here -->
+        </tbody>
+    </table>
+
+    <script>
+        async function fetchActuators() {
+            try {
+                const response = await fetch('http://192.168.0.1:8000/actuators', {
+                    headers: { 'Accept': 'application/json' }
+                });
+                const actuators = await response.json();
+                const tableBody = document.getElementById('actuators-table');
+                tableBody.innerHTML = '';
+
+                actuators.forEach(actuator => {
+                    actuator.state = "closed"; // Default state for demonstration
+                    const row = document.createElement('tr');
+
+                    const nameCell = document.createElement('td');
+                    nameCell.textContent = actuator.name;
+                    row.appendChild(nameCell);
+
+                    const actionCell = document.createElement('td');
+                    const button = document.createElement('button');
+                    button.style.backgroundColor = actuator.state === 'open' ? 'green' : 'red';
+                    button.textContent = actuator.state === 'open' ? 'open' : 'closed';
+                    button.onclick = async () => {
+                        const newState = actuator.state === 'open' ? 'closed' : 'open';
+                        // sendCommand(actuator.name, actuator.type, newState);
+                        try {
+                            await fetch('http://192.168.0.1:8000/command', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ type: actuator.type, name: actuator.name, state: newState })
+                            });
+                            // fetchActuators(); // Refresh the table after sending the command
+                        } catch (error) {
+                            console.error('Error sending command:', error);
+                        }
+                        actuator.state = newState; // Update the state locally
+                        button.style.backgroundColor = newState === 'open' ? 'green' : 'red';
+                        button.textContent = newState === 'open' ? 'open' : 'closed';
+                    };
+                    actionCell.appendChild(button);
+                    row.appendChild(actionCell);
+
+                    tableBody.appendChild(row);
+                });
+            } catch (error) {
+                console.error('Error fetching actuators:', error);
+            }
+        }
+
+        async function sendCommand(name, type, state) {
+            try {
+                await fetch('http://192.168.0.1:8000/command', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ type, name, state })
+                });
+                // fetchActuators(); // Refresh the table after sending the command
+            } catch (error) {
+                console.error('Error sending command:', error);
+            }
+        }
+        async function reload() {
+            try {
+                await fetch('http://192.168.0.1:8000/close_all');
+                fetchActuators();
+            }
+            catch (error) {
+                console.error('Error reloading actuators:', error);
+            }
+
+        }
+        // Load actuators on page load
+        window.onload = reload;
+    </script>
+</body>
+</html>
