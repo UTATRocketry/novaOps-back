@@ -26,5 +26,5 @@ venv
 
 # Ignore all files in the logs directory
 # but keep the .gitkeep file
-logs/*
-!logs/.gitkeep
+backend/app/logs/*
+!backend/app/logs/.gitkeep
