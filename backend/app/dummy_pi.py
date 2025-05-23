@@ -3,20 +3,53 @@ import yaml
 import random
 from datetime import datetime
 from data_file import data_store
-from config_parser import get_config 
+from config_parser import get_config, process_data, convert_command, interpolate, save_data, SAVE_DATA_FLAG
 
+fake_processed_data = {}
 
 def generate_data():
-    return {"dummmy":"data"}
-    """new_data = {"timestamp": datetime.now().strftime("%H:%M:%S,%d-%m-%Y"), "sensors": [], "actuators":[]}
-    for sensor in get_config()["sensors"]:
-        new_data["sensors"].append({
-            "sensor_id": sensor.get("sensor_id"),
-            #"name": sensor.get("sensor_name"),
-            #"type": sensor.get("sensor_type"),
-            "sensor_value": round(random.uniform(0.0, 100.0), 2),
+    global fake_processed_data
+    #return {"dummmy":"data"}
+    #new_data = {"timestamp": datetime.now().strftime("%H:%M:%S,%d-%m-%Y"), "sensors": [], "actuators":[]}
+    raw_data = {"sensors": []}
+    processed_data = {"sensors": []}
+    for i in range(8):
+        raw_data["sensors"].append({
+            "hat_id": 0,
+            "channel_id": i,
+            "value": round(random.uniform(0.0, 100.0), 3),
             "timestamp": int(time.time()) 
         })
+
+    # Process sensors
+    for sensor in raw_data.get("sensors", []):
+        hat_id = sensor.get("hat_id")
+        channel_id = sensor.get("channel_id")
+        value = sensor.get("value")
+        timestamp = sensor.get("timestamp")
+
+        # Find the sensor in the config using hat_id and channel_id
+        sensor_info = next(
+            (s for s in get_config()["sensors"].values() if s["hatID"] == hat_id and s["channelID"] == channel_id),
+            None
+        )
+        if sensor_info:
+            calibration = sensor_info.get("calibration", [])
+
+            # Apply interpolation only if calibration is non-empty
+            if calibration and len(calibration) > 0:
+                value = interpolate(value, calibration)
+            
+            processed_data["sensors"].append({
+                "name": sensor_info["name"],
+                "value": f"{value:.2f}",
+                "timestamp": timestamp
+            })
+    if SAVE_DATA_FLAG:
+        save_data(processed_data)  # Save the processed data to a file
+    fake_processed_data = processed_data
+    return processed_data
+    """
     for actuator in get_config()["actuators"]:
         new_data["actuators"].append({
             "actuator_id": actuator.get("actuator_id"),
@@ -25,7 +58,8 @@ def generate_data():
             "actuator_status": "off",
             "timestamp": int(time.time())
         })
-    return new_data"""
+    """
+   # return fake_processed_data
 
 async def handle_dummy_command(command):
     print("dummy command")

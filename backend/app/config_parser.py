@@ -1,8 +1,10 @@
 import yaml
 import numpy as np
+from datetime import datetime
 
-
-CONFIG_FILE = 'config.yml' 
+CONFIG_FILE = 'configs/config.yml' 
+DATA_FILE = None
+SAVE_DATA_FLAG = False
 config_data = None
 
 def load_config(config_yml=CONFIG_FILE):
@@ -22,7 +24,7 @@ def load_config(config_yml=CONFIG_FILE):
         "relays": relay_map,
         "servos": servo_map
     }
-    print("Loaded config:", config_data)
+    #print("Loaded config:", config_data)
 
 def validate_config(config):
     """Validate the configuration for missing keys."""
@@ -47,6 +49,27 @@ def get_config():
         load_config()
         return config_data
 
+
+def save_data(data):
+    """Save sensor data to a CSV file."""
+    if DATA_FILE is not None:
+        with open(DATA_FILE, 'a') as file:
+            # write a global timestamp to the file
+            now = datetime.now()
+            timestamp = now.strftime("%Y-%m-%d %H:%M:%S")
+            file.write(f"{timestamp},")
+
+            for sensor in get_config()["sensors"].values():
+                sensor_name = sensor["name"]
+                # find the sensor in the data
+                sensor_data = next((s for s in data["sensors"] if s["name"] == sensor_name), None)
+                if sensor_data:
+                    file.write(f"{sensor_data['value']},")
+                else:
+                    file.write("N/A,")
+            file.write("\n")
+    
+    
 def interpolate(value, calibration_points):
     """Perform linear interpolation for sensor calibration."""
     calibration_points = np.array(calibration_points)
@@ -102,6 +125,8 @@ async def process_data(raw_data):
                 "state": state
             })
     """
+    if SAVE_DATA_FLAG:
+        save_data(processed_data)  # Save the processed data to a file
     return processed_data
 
 

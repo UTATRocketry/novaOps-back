@@ -11,12 +11,16 @@
             border: 1px solid #ccc;
         }
         #update-button { margin-top: 10px; padding: 8px 12px; font-size: 16px; cursor: pointer; }
+        #save-button { margin-top: 10px; padding: 8px 12px; font-size: 16px; cursor: pointer; }
+        #stop-button { margin-top: 10px; padding: 8px 12px; font-size: 16px; cursor: pointer; }
     </style>
 </head>
 <body>
     <h1>NovaOps Backend GUI</h1>
     <p>This is a simple interface for interacting with the backend services.</p>
     <button id="update-button" onclick="updateConfig()">Update Config</button>
+    <button id="save-button" onclick="startSaving()"> Start saving data </button>
+    <button id="stop-button" onclick="stopSaving()"> Stop saving data </button>
     <p id="update-status"></p>
     <div style="display: flex; gap: 20px;">
         <div style="flex: 1;">
@@ -41,6 +45,26 @@
                     updateStatusElem.textContent = "Error updating config";
                     updateStatusElem.style.color = "red";
                     console.error("Update config error:", error);
+                });
+        }
+        function startSaving() {
+            fetch("/start_saving_data")
+                .then(response => response.json())
+                .then(data => {
+                    console.log("Started saving data:", data);
+                })
+                .catch(error => {
+                    console.error("Error starting saving:", error);
+                });
+        }
+        function stopSaving() {
+            fetch("/stop_saving_data")
+                .then(response => response.json())
+                .then(data => {
+                    console.log("Stopped saving data:", data);
+                })
+                .catch(error => {
+                    console.error("Error stopping saving:", error);
                 });
         }
     </script>            

@@ -1,8 +1,12 @@
 import asyncio
 import json
-from datetime import timedelta
+from datetime import timedelta, datetime
 import time
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException, status
+import uvicorn
+import logging
+import threading
+import yaml
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException, status, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, FileResponse, RedirectResponse
 from fastapi.security import OAuth2PasswordRequestForm
@@ -13,9 +17,14 @@ import data_file
 import config_parser
 from html_generator import generate_html, new_html, calibration_html
 from auth import authenticate_user, create_access_token, get_current_user, ACCESS_TOKEN_EXPIRE_MINUTES
-from dummy_pi import generate_data, handle_dummy_command
+import dummy_pi
+from dummy_pi import generate_data, handle_dummy_command, fake_processed_data
+
+FAKE_DATA_FLAG = True
+
 
 app = FastAPI()
+logger = logging.getLogger('uvicorn.error')
 
 # Allow CORS for React frontend
 app.add_middleware(
@@ -55,6 +64,35 @@ async def basic_test_endpoint():
 async def data_test_endpoint():
     return {"data" : mqtt.processed_data}  
 
+@app.get("/start-saving-data")
+async def start_saving_data():
+    config_parser.SAVE_DATA_FLAG = True
+    # create a CSV file with the current date and time in data folder
+    now = datetime.now()
+    timestamp = now.strftime("%Y-%m-%d_%H-%M-%S")
+    config_parser.DATA_FILE = f"logs/{timestamp}_data.csv"
+    # write the header to the file: Timestamp then each sensor name in the config
+    with open(config_parser.DATA_FILE, 'w') as file:
+        file.write("Timestamp,")
+        for sensor in config_parser.get_config()["sensors"].values():
+            file.write(f"{sensor['name']},")
+        file.write("\n")
+    return {"status": f"Saving data to {config_parser.DATA_FILE}"}
+
+@app.get("/stop-saving-data")
+async def stop_saving_data():
+    config_parser.SAVE_DATA_FLAG = False
+    #config_parser.DATA_FILE = None
+    return {"status": "Stopped saving data"}
+
+@app.get("/download-data")
+async def download_data():
+    # Download the CSV file
+    if config_parser.DATA_FILE:
+        return FileResponse(config_parser.DATA_FILE, media_type='text/csv', filename=config_parser.DATA_FILE)
+    else:
+        raise HTTPException(status_code=404, detail="No data file found")
+
 @app.get("/dummy_data")
 async def dummy_data_endpoint():
     return generate_data() 
@@ -63,6 +101,25 @@ async def dummy_data_endpoint():
 async def dummy_command_endpoint(command: dict):
     handle_dummy_command(command)
     return {"status": "Command sent"}
+
+@app.get("/upload_config")
+async def upload_config_endpoint(file: UploadFile):
+    if not file:
+        return {"message": "No upload file sent"}
+    else:
+        # Read the contents of the uploaded file
+        contents = await file.read()
+        # Decode the contents from bytes to string
+        config_str = contents.decode('utf-8')
+        # Parse the YAML string into a Python dictionary
+        new_config = yaml.safe_load(config_str)
+        with open(f"configs/{file.filename}",'w') as file:
+            yaml.dump(new_config, file)
+        # Load the new config into the app
+        config_parser.CONFIG_FILE = f"configs/{file.filename}"
+        config_parser.load_config()
+        # Return a success message
+    return {"status": "Config uploaded"}
 
 @app.get("/update_config")
 async def update_config_enpoint():
@@ -203,3 +260,7 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
         data={"sub": user['username']}, expires_delta=access_token_expires
     )
     return {"access_token": access_token, "token_type": "bearer"}
+
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)

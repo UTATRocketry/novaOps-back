@@ -101,3 +101,4 @@ async def set_all_to_closed():
     for command in commands:
         await publish_command(command)
         time.sleep(0.1)  # Add a small delay between commands to avoid flooding the broker
+    return {"status": "Commands sent"}
