@@ -127,7 +127,7 @@ relayBoard: # solenoid relay board - 16 channels
   name: SVMOVP
   type: NC
 
-- channelID: 11
+# - channelID: 11
 
 - channelID: 12
   name: SVPP   # injector purge, newly added

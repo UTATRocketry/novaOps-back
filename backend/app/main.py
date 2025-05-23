@@ -1,6 +1,7 @@
 import asyncio
 import json
 from datetime import timedelta
+import time
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, FileResponse, RedirectResponse
@@ -150,6 +151,7 @@ async def send_command(command: dict):
             # Publish each command to the MQTT broker
             #mqtt.publish_command(command)
             mqtt.mqtt_client.publish(mqtt.COMMAND_TOPIC, json.dumps(command))
+            time.sleep(0.1)  # Add a small delay between commands to avoid flooding the broker
         return {"status": "Command sent"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

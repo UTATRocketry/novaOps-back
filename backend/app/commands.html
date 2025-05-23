@@ -4,6 +4,12 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Actuator Commands Viewer</title>
+    <style>
+        #status { color: lightgrey; }
+        #status { color: gray; }
+        #status { color: lightgreen; }
+        
+    </style>
 </head>
 <body>
     <table>
@@ -36,11 +42,11 @@
                     nameCell.textContent = actuator.name;
                     row.appendChild(nameCell);
 
-                    const actionCell = document.createElement('td');
-                    const button = document.createElement('button');
-                    button.style.backgroundColor = actuator.state === 'open' ? 'green' : 'red';
-                    button.textContent = actuator.state === 'open' ? 'open' : 'closed';
-                    button.onclick = async () => {
+                    const stateCell = document.createElement('td');
+                    const stateButton = document.createElement('button');
+                    stateButton.style.backgroundColor = actuator.state === 'open' ? 'green' : 'red';
+                    stateButton.textContent = actuator.state === 'open' ? 'open' : 'closed';
+                    stateButton.onclick = async () => {
                         const newState = actuator.state === 'open' ? 'closed' : 'open';
                         // sendCommand(actuator.name, actuator.type, newState);
                         try {
@@ -54,11 +60,35 @@
                             console.error('Error sending command:', error);
                         }
                         actuator.state = newState; // Update the state locally
-                        button.style.backgroundColor = newState === 'open' ? 'green' : 'red';
-                        button.textContent = newState === 'open' ? 'open' : 'closed';
+                        stateButton.style.backgroundColor = newState === 'open' ? 'green' : 'red';
+                        stateButton.textContent = newState === 'open' ? 'open' : 'closed';
                     };
-                    actionCell.appendChild(button);
-                    row.appendChild(actionCell);
+                    stateCell.appendChild(stateButton);
+
+                    if (actuator.type === 'servo') {
+                        const statusButton = document.createElement('button');
+                        statusButton.style.backgroundColor = actuator.status === 'on' ? 'lightgrey' : 'gray';
+                        statusButton.textContent = actuator.status === 'on' ? 'enabled' : 'disabled';
+                        statusButton.onclick = async () => {
+                            const newStatus = actuator.status === 'on' ? 'off' : 'on';
+                            // sendCommand(actuator.name, actuator.type, newState);
+                            try {
+                                await fetch('http://192.168.0.1:8000/command', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ type: actuator.type, name: actuator.name, state: newStatus })
+                                });
+                                // fetchActuators(); // Refresh the table after sending the command
+                            } catch (error) {
+                                console.error('Error sending command:', error);
+                            }
+                            actuator.status = newStatus; // Update the state locally
+                            statusButton.style.backgroundColor = actuator.status === 'on' ? 'lightgrey' : 'gray';
+                            statusButton.textContent = actuator.status === 'on' ? 'enabled' : 'disabled';
+                        };
+                        stateCell.appendChild(statusButton);
+                    }
+                    row.appendChild(stateCell);
 
                     tableBody.appendChild(row);
                 });
@@ -81,7 +111,7 @@
         }
         async function reload() {
             try {
-                await fetch('http://192.168.0.1:8000/close_all');
+                //await fetch('http://192.168.0.1:8000/close_all');
                 fetchActuators();
             }
             catch (error) {

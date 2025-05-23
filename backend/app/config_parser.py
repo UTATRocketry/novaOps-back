@@ -114,7 +114,7 @@ async def convert_command(command):
     command_type = command["type"]
     name = command["name"]
     state = command["state"]
-    mqtt_commands = []
+    
 
     if command_type == "solenoid":
         # Find the relay by name
@@ -131,16 +131,16 @@ async def convert_command(command):
         
         # Create the command
         relay_command = {
-            "type": "solenoid",
+            "type": "relay",
             "id": relay["channelID"],
             "state": relay_state
         }
 
-        # Add the command to the list
-        mqtt_commands.append(relay_command)
-        return mqtt_commands
-
+        return [relay_command]
     elif command_type == "servo":
+        mqtt_commands = []
+        relay_state = None
+        angle = None
         # Find the servo by name
         servo = next((s for s in config["servos"].values() if s["name"] == name), None)
         if not servo:
@@ -153,17 +153,21 @@ async def convert_command(command):
         elif state == "closed":
             angle = servo["close_pos"]
             over_angle = servo.get("close_over")
+
+            
+        elif state == "on" or state == "off":
+            relay_state = 1 if (state == "on") else 0
+            # If relayId exists, send a command to turn the relay on
+            if "relayID" in servo:
+                relay_command = {
+                    "type": "relay",
+                    "id": servo["relayID"],
+                    "state": relay_state  # Turn relay on
+                }
+                return [relay_command]
         else:
             raise ValueError(f"Invalid state '{state}' for servo.")
 
-        # If relayId exists, send a command to turn the relay on
-        if "relayID" in servo:
-            relay_command = {
-                "type": "solenoid",
-                "id": servo["relayID"],
-                "state": "1"  # Turn relay on
-            }
-            mqtt_commands.append(relay_command)
 
         # If over position exists, send the over position first
         if over_angle:
@@ -174,13 +178,14 @@ async def convert_command(command):
             }
             mqtt_commands.append(over_command)
 
-        # Send the actual position command
-        servo_command = {
-            "type": "servo",
-            "id": servo["channelID"],
-            "angle": angle
-        }
-        mqtt_commands.append(servo_command)
+        if angle:
+            # Send the actual position command
+            servo_command = {
+                "type": "servo",
+                "id": servo["channelID"],
+                "angle": angle
+            }
+            mqtt_commands.append(servo_command)
 
         return mqtt_commands
     else:

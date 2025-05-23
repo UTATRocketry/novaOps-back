@@ -3,6 +3,7 @@ from fastapi import HTTPException
 import json
 from datetime import datetime
 import asyncio
+import time
 from config_parser import get_config, process_data, convert_command
 MQTT_BROKER = "host.docker.internal" # use broker.hivemq.com for testing on PCs
 MQTT_PORT = 1883 # TCP Port
@@ -99,3 +100,4 @@ async def set_all_to_closed():
     # Publish all commands to the MQTT broker
     for command in commands:
         await publish_command(command)
+        time.sleep(0.1)  # Add a small delay between commands to avoid flooding the broker
