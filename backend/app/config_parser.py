@@ -53,7 +53,7 @@ def get_config():
 def save_data(data):
     """Save sensor data to a CSV file."""
     if DATA_FILE is not None:
-        with open(DATA_FILE, 'a') as file:
+        with open(f"logs/{DATA_FILE}", 'a') as file:
             # write a global timestamp to the file
             now = datetime.now()
             timestamp = now.strftime("%Y-%m-%d %H:%M:%S")

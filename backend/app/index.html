@@ -66,6 +66,36 @@
                 .catch(error => {
                     console.error("Error stopping saving:", error);
                 });
+            fetch("/download_data_file")
+                .then(response => {
+                    if (response.ok) {
+                        const contentDisposition = response.headers.get("Content-Disposition");
+                        let filename = "data_file.csv"; // Default filename
+                        if (contentDisposition) {
+                            const match = contentDisposition.match(/filename="?(.+)"?/);
+                            if (match && match[1]) {
+                                filename = match[1];
+                            }
+                        }
+                        return response.blob().then(blob => ({ blob, filename }));
+                    } else {
+                        throw new Error("Network response was not ok.");
+                    }
+                })
+                .then(({ blob, filename }) => {
+                    const url = window.URL.createObjectURL(blob);
+                    const a = document.createElement("a");
+                    a.style.display = "none";
+                    a.href = url;
+                    a.download = filename; // Use the filename from the server
+                    document.body.appendChild(a);
+                    a.click();
+                    window.URL.revokeObjectURL(url);
+                })
+                .catch(error => {
+                    console.error("Error downloading file:", error);
+                });
+
         }
     </script>            
 </body>

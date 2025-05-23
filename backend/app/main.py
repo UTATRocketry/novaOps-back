@@ -64,32 +64,32 @@ async def basic_test_endpoint():
 async def data_test_endpoint():
     return {"data" : mqtt.processed_data}  
 
-@app.get("/start-saving-data")
+@app.get("/start_saving_data")
 async def start_saving_data():
     config_parser.SAVE_DATA_FLAG = True
     # create a CSV file with the current date and time in data folder
     now = datetime.now()
     timestamp = now.strftime("%Y-%m-%d_%H-%M-%S")
-    config_parser.DATA_FILE = f"logs/{timestamp}_data.csv"
+    config_parser.DATA_FILE = f"{timestamp}_data.csv"
     # write the header to the file: Timestamp then each sensor name in the config
-    with open(config_parser.DATA_FILE, 'w') as file:
+    with open(f"logs/{config_parser.DATA_FILE}", 'w') as file:
         file.write("Timestamp,")
         for sensor in config_parser.get_config()["sensors"].values():
             file.write(f"{sensor['name']},")
         file.write("\n")
     return {"status": f"Saving data to {config_parser.DATA_FILE}"}
 
-@app.get("/stop-saving-data")
+@app.get("/stop_saving_data")
 async def stop_saving_data():
     config_parser.SAVE_DATA_FLAG = False
     #config_parser.DATA_FILE = None
     return {"status": "Stopped saving data"}
 
-@app.get("/download-data")
+@app.get("/download_data_file")
 async def download_data():
     # Download the CSV file
     if config_parser.DATA_FILE:
-        return FileResponse(config_parser.DATA_FILE, media_type='text/csv', filename=config_parser.DATA_FILE)
+        return FileResponse(f"logs/{config_parser.DATA_FILE}", media_type='text/csv', filename=config_parser.DATA_FILE,  headers={"Content-Disposition": f"attachment; filename={config_parser.DATA_FILE}"})
     else:
         raise HTTPException(status_code=404, detail="No data file found")
 

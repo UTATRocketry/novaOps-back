@@ -20,3 +20,11 @@ env/
 venv/
 ENV/
 venv
+
+# log files
+*.log
+
+# Ignore all files in the logs directory
+# but keep the .gitkeep file
+logs/*
+!logs/.gitkeep
