@@ -29,13 +29,13 @@ def load_config(config_yml=CONFIG_FILE):
 def validate_config(config):
     """Validate the configuration for missing keys."""
     for relay in config.get('relayBoard', []):
-        if 'channelId' not in relay:
+        if 'channelID' not in relay:
             print(f"Warning: Missing 'channelID' in relay entry: {relay}")
     for sensor in config.get('MCCDAQ', []):
         if 'channelID' not in sensor:
             print(f"Warning: Missing 'channelID' in sensor entry: {sensor}")
     for servo in config.get('PCA9685', []):
-        if 'channelId' not in servo:
+        if 'channelID' not in servo:
             print(f"Warning: Missing 'channelID' in servo entry: {servo}")
 
 def update_config(config_yml,new_config):
