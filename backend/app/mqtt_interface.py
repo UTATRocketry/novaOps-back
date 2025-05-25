@@ -76,12 +76,13 @@ async def set_all_to_closed():
     """Set all servos and solenoids to their closed state."""
     config = get_config()
     commands = []
+    """
     # Send commands to close all solenoids
     for relay in config["relays"].values():
         if relay.get("type") is None:
             continue
         command = {
-            "type": "solenoid",
+            "type": "relay",
             "name": relay["name"],
             "state": "closed"
         }
@@ -96,9 +97,17 @@ async def set_all_to_closed():
         }
         servo_commands = await convert_command(command)
         commands.extend(servo_commands)
-        
     # Publish all commands to the MQTT broker
     for command in commands:
         await publish_command(command)
+        time.sleep(0.1)  # Add a small delay between commands to avoid flooding the broker
+    """
+    for i in range(16):
+        command = {
+            "type": "relay",
+            "id": i,
+            "state": 1
+        }
+        mqtt_client.publish(mqtt.COMMAND_TOPIC, json.dumps(command))
         time.sleep(0.1)  # Add a small delay between commands to avoid flooding the broker
     return {"status": "Commands sent"}

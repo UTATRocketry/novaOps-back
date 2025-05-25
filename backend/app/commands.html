@@ -8,6 +8,7 @@
         #status { color: lightgrey; }
         #status { color: gray; }
         #status { color: lightgreen; }
+        th {text-align: center; }
         
     </style>
 </head>
@@ -111,7 +112,7 @@
         }
         async function reload() {
             try {
-                //await fetch('http://192.168.0.1:8000/close_all');
+                // await fetch('http://192.168.0.1:8000/close_all');
                 fetchActuators();
             }
             catch (error) {

@@ -3,27 +3,15 @@ Settings: # overall settings
 
 MCCDAQ: # sensor DAC hats, Max 8 channels per hat
 - hatID: 0 # DAQ hat address
-  channelID: 0 # Channel ID on the DAQ hat
+  channelID: 0 # Channel ID on the DAQ hat, CH0H
   name: PGSO
   unit: psi
   type: PT # apply different regression formula + other things based on this? 
   calibration: [
-    [0, 0],
-    [1, 1]
   ]
 
 - hatID: 0
-  channelID: 1
-  name: PGS
-  unit: psi
-  type: PT
-  calibration: [
-    [0, 0],
-    [1, 1]
-  ]
-
-- hatID: 0
-  channelID: 2
+  channelID: 1 # CH1H
   name: PFT
   unit: psi
   type: PT
@@ -31,156 +19,164 @@ MCCDAQ: # sensor DAC hats, Max 8 channels per hat
   ]
 
 - hatID: 0
-  channelID: 3
-  name: PFM
+  channelID: 2 # CH2H
+  name: PVO
   unit: psi
   type: PT
   calibration: [
   ]
 
 - hatID: 0
-  channelID: 4
-  name: POT
-  unit: psi
-  calibration: [
-    [1,100],
-    [2,200],
-    [3,300]
-  ]
-
-- hatID: 0
-  channelID: 5
-  name: PVO
-  unit: psi
-  calibration: [
-    [1,50],
-    [2,100],
-    [3,200]
-  ]
-
-- hatID: 0
-  channelID: 6
-  name: PCC
-  unit: psi
-  calibration: [
-    [1,200],
-    [2,300],
-    [3,400]
-  ]
-
-- hatID: 0
-  channelID: 7
+  channelID: 3 # CH3H
   name: MOT
   unit: kg
   type: LC
   calibration: [
   ]
 
-- hatID: 1
-  channelID: 0
+- hatID: 0
+  channelID: 4 # CH0L
+  name: PGS
+  unit: psi
+  calibration: [
+  ]
+
+- hatID: 0
+  channelID: 5 # CH1L
+  name: POT
+  unit: psi
+  calibration: [
+  ]
+
+- hatID: 0
+  channelID: 6 # CH2L
+  name: PCC
+  unit: psi
+  calibration: [
+  ]
+
+- hatID: 0
+  channelID: 7 # CH3L
   name: MFT
   unit: kg
   type: LC
   calibration: [
   ]
 
-- hatID: 1
-  channelID: 1
-  name: CC-LC
-  unit: kg
-  type: LC
-  calibration: [
-  ]
+# - hatID: 1
+#   channelID: 0
+#   name: MFT
+#   unit: kg
+#   type: LC
+#   calibration: [
+#   ]
+
+# - hatID: 1
+#   channelID: 1
+#   name: CC-LC
+#   unit: kg
+#   type: LC
+#   calibration: [
+#   ]
 
 relayBoard: # solenoid relay board - 16 channels
 
-- channelID: 0
-  name: MFV
+#- channelID: 1
+#  name: MFV
 
-- channelID: 1
-  name: BVOTP
+#- channelID: 0
+#  name: 
 
-- channelID: 2
-  name: BVFTP
+#- channelID: 2
+#  name: 
 
-- channelID: 3
-  name: BVGSP
+#- channelID: 3
+#  name: 
 
-- channelID: 4
-  name: BVGSO
+#- channelID: 4
+#  name: 
 
-# - channelID: 5
+#- channelID: 5
+#  name: ch5
 
-# - channelID: 6
+#- channelID: 6
+#  name: ch6
 
-# - channelID: 7
+#- channelID: 7
+#  name: ch7
 
-- channelID: 8
+- channelID: 9
   name: SVGSD
   type: NC # Normally open (NO) or normally closed (NC)
 
-- channelID: 9
+- channelID: 8
   name: SVBVGS
   type: NC
 
-- channelID: 10
+- channelID: 11
   name: SVMOVP
   type: NC
 
-# - channelID: 11
+#- channelID: 11
+#  name: ch11
 
-- channelID: 12
+- channelID: 10
   name: SVPP   # injector purge, newly added
   type: NC
 
-- channelID: 13
+- channelID: 12
   name: SVFTV
-  type: NO
-
-- channelID: 14
-  name: SVOTV
-  type: NO
+  type: NC    # Fix later, should be NO but software should know
 
 - channelID: 15
+  name: SVOTV
+  type: NC
+
+- channelID: 14
   name: SVOTD
   type: NC
 
-
 PCA9685: # servo driver board - 16 channels
-- channelID: 5
+# - channelID: 0
+#   name: SERVO0
+#   open_pos: 1300
+#   close_pos: 1700
+
+
+- channelID: 4
   name: MFV
   open_pos: 1300
   close_pos: 1700
-  relayID: 0
+  relayID: 1
 
 - channelID: 6
   name: BVOTP
-  open_pos: 1300
-  open_over: 1200
-  close_pos: 1700
-  close_over: 1800
-  relayID: 1
+  open_pos: 2030
+  open_over: 2060
+  close_pos: 1020
+  close_over: 990
+  relayID: 0
 
 - channelID: 7
   name: BVFTP
-  open_pos: 1300
-  open_over: 1200
-  close_pos: 1700
-  close_over: 1800
-  relayID: 2
+  open_pos: 2000
+  open_over: 2030
+  close_pos: 1060
+  close_over: 1030
+  relayID: 3
 
 - channelID: 8
   name: BVGSP
-  open_pos: 1300
-  open_over: 1200
-  close_pos: 1700
-  close_over: 1800
-  relayID: 3
+  open_pos: 850
+  open_over: 850
+  close_pos: 1850
+  close_over: 1850
+  relayID: 2
 
 - channelID: 9
   name: BVGSO
-  open_pos: 2000
-  open_over: 2000
-  close_pos: 1000
-  close_over: 1000
-  relayID: 4
+  open_pos: 1000
+  open_over: 1000
+  close_pos: 1970
+  close_over: 1970
+  relayID: 5

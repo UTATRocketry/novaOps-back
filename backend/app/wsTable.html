@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <title>Sensor Data Viewer</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        table { border-collapse: collapse; width: 100%; margin-top: 20px; }
+        th, td { border: 1px solid #ddd; padding: 8px; text-align: center; }
+        th { background-color: #f2f2f2; }
+        #status { color: green; }
+        #reconnect-status { color: orange; font-style: italic; }
+    </style>
+</head>
+<body>
+    <p>Status: <span id="status">Connecting...</span></p>
+    <p id="reconnect-status"></p>
+    <table id="sensor-table">
+        <thead>
+            <tr>
+                <th>Sensor Name</th>
+                <th>Value</th>
+            </tr>
+        </thead>
+        <tbody id="sensor-table-body">
+            <tr><td colspan="2">Waiting for data...</td></tr>
+        </tbody>
+    </table>
+
+    <script>
+        const wsUrl = "ws://192.168.0.1:8000/ws_basic";
+        let socket;
+        let reconnectAttempts = 0;
+        const maxReconnectAttempts = 10;
+        const reconnectInterval = 2000;
+
+        const statusElem = document.getElementById("status");
+        const reconnectStatusElem = document.getElementById("reconnect-status");
+        const tableBody = document.getElementById("sensor-table-body");
+
+        function updateTable(sensors) {
+            tableBody.innerHTML = ""; // Clear table body
+            if (!Array.isArray(sensors) || sensors.length === 0) {
+                tableBody.innerHTML = "<tr><td colspan='2'>No sensor data available.</td></tr>";
+                return;
+            }
+
+            sensors.forEach(sensor => {
+                const row = document.createElement("tr");
+                const nameCell = document.createElement("td");
+                const valueCell = document.createElement("td");
+
+                nameCell.textContent = sensor.name || "Unnamed";
+                valueCell.textContent = sensor.value || "N/A";
+
+                row.appendChild(nameCell);
+                row.appendChild(valueCell);
+                tableBody.appendChild(row);
+            });
+        }
+
+        function connectWebSocket() {
+            socket = new WebSocket(wsUrl);
+
+            socket.onopen = () => {
+                statusElem.textContent = "Connected";
+                statusElem.style.color = "green";
+                reconnectStatusElem.textContent = "";
+                reconnectAttempts = 0;
+            };
+
+            socket.onmessage = (event) => {
+                try {
+                    const jsonData = JSON.parse(event.data);
+                    if (jsonData && jsonData.sensors) {
+                        updateTable(jsonData.sensors);
+                    } else {
+                        tableBody.innerHTML = "<tr><td colspan='2'>Invalid data format.</td></tr>";
+                    }
+                } catch (err) {
+                    console.error("Error parsing JSON:", err);
+                    tableBody.innerHTML = "<tr><td colspan='2'>Invalid JSON received.</td></tr>";
+                }
+            };
+
+            socket.onerror = (error) => {
+                statusElem.textContent = "Error";
+                statusElem.style.color = "red";
+                console.error("WebSocket error:", error);
+            };
+
+            socket.onclose = () => {
+                statusElem.textContent = "Disconnected";
+                statusElem.style.color = "orange";
+                attemptReconnect();
+            };
+        }
+
+        function attemptReconnect() {
+            if (reconnectAttempts < maxReconnectAttempts) {
+                reconnectAttempts++;
+                reconnectStatusElem.textContent = `Reconnecting... (Attempt ${reconnectAttempts} of ${maxReconnectAttempts})`;
+                setTimeout(() => {
+                    connectWebSocket();
+                }, reconnectInterval);
+            } else {
+                reconnectStatusElem.textContent = "Failed to reconnect after multiple attempts.";
+                reconnectStatusElem.style.color = "red";
+            }
+        }
+
+        connectWebSocket();
+    </script>
+</body>
+</html>

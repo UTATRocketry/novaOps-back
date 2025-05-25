@@ -208,7 +208,7 @@ async def send_command(command: dict):
             # Publish each command to the MQTT broker
             #mqtt.publish_command(command)
             mqtt.mqtt_client.publish(mqtt.COMMAND_TOPIC, json.dumps(command))
-            time.sleep(0.1)  # Add a small delay between commands to avoid flooding the broker
+            time.sleep(0.05)  # Add a small delay between commands to avoid flooding the broker
         return {"status": "Command sent"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -223,7 +223,15 @@ async def close_all_endpoint():
         "state": 0
     }
     #mqtt.mqtt_client.publish(mqtt.COMMAND_TOPIC, json.dumps(relay_command))
-    status = await mqtt.set_all_to_closed()
+    #status = await mqtt.set_all_to_closed()
+    for i in range(16):
+        command = {
+            "type": "relay",
+            "id": i,
+            "state": 1
+        }
+        mqtt.mqtt_client.publish(mqtt.COMMAND_TOPIC, json.dumps(command))
+        time.sleep(0.1)  # Add a small delay between commands to avoid flooding the broker
     return {"status": "Commands sent"}
     
     

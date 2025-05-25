@@ -101,7 +101,8 @@ async def process_data(raw_data):
             
             processed_data["sensors"].append({
                 "name": sensor_info["name"],
-                "value": f"{value:.2f}",
+                "value": f"{round(value, 2)}",
+                #"unit": sensor_info.get("unit", ""),
                 "timestamp": timestamp
             })
     """
@@ -181,7 +182,7 @@ async def convert_command(command):
 
             
         elif state == "on" or state == "off":
-            relay_state = 1 if (state == "on") else 0
+            relay_state = 0 if (state == "on") else 1
             # If relayId exists, send a command to turn the relay on
             if "relayID" in servo:
                 relay_command = {
