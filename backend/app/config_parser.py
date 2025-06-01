@@ -5,16 +5,23 @@ from datetime import datetime
 CONFIG_FILE = 'configs/config.yml' 
 DATA_FILE = None
 SAVE_DATA_FLAG = False
+CALIBRATION_FLAG = True
 config_data = None
+test_start = datetime.now()
+file_length = 0
 
-def load_config(config_yml=CONFIG_FILE):
+def load_config():
     """Load the YAML configuration file."""
     global config_data
-    with open(config_yml, 'r') as file:
+    with open(CONFIG_FILE, 'r') as file:
         config = yaml.safe_load(file)
     
-    validate_config(config)
-
+    try:
+        validate_config(config)
+    except ValueError as e:
+        print(f"Configuration error: {e}")
+        return
+    
     sensor_map = {(sensor['channelID'] + 8*sensor['hatID']): sensor for sensor in config.get('MCCDAQ', [])}
     relay_map = {relay['channelID']: relay for relay in config.get('relayBoard', [])}
     servo_map = {servo['channelID']: servo for servo in config.get('PCA9685', [])}
@@ -28,19 +35,56 @@ def load_config(config_yml=CONFIG_FILE):
 
 def validate_config(config):
     """Validate the configuration for missing keys."""
-    for relay in config.get('relayBoard', []):
-        if 'channelID' not in relay:
-            print(f"Warning: Missing 'channelID' in relay entry: {relay}")
+    if 'MCCDAQ' not in config:
+        raise ValueError("Missing 'MCCDAQ' section in the configuration.")
+    if 'relayBoard' not in config:
+        raise ValueError("Missing 'relayBoard' section in the configuration.")
+    if 'PCA9685' not in config:
+        raise ValueError("Missing 'PCA9685' section in the configuration.")
+
     for sensor in config.get('MCCDAQ', []):
         if 'channelID' not in sensor:
-            print(f"Warning: Missing 'channelID' in sensor entry: {sensor}")
+            raise ValueError("Missing 'channelID' in sensor entry: {sensor}")
+        if 'hatID' not in sensor:
+            raise ValueError("Missing 'hatID' in sensor entry: {sensor}")
+        if 'name' not in sensor:
+            raise ValueError("Missing 'name' in sensor entry: {sensor}")
+        if 'unit' not in sensor:
+            print(f"Warning: Missing 'unit' in sensor entry: {sensor}")
+        if 'calibration' not in sensor:
+            print(f"Warning: Missing 'calibration' in sensor entry: {sensor}")
+        if 'type' not in sensor:
+            print(f"Warning: Missing 'type' in sensor entry: {sensor}")
+
+    for relay in config.get('relayBoard', []):
+        if 'channelID' not in relay:
+            raise ValueError("Missing 'channelID' in relay entry: {relay}")
+        if 'name' not in relay:
+            raise ValueError("Missing 'name' in relay entry: {relay}")
+        if 'type' not in relay:
+            print(f"Warning: Missing 'type' in relay entry: {relay}")
+    
     for servo in config.get('PCA9685', []):
         if 'channelID' not in servo:
-            print(f"Warning: Missing 'channelID' in servo entry: {servo}")
+            raise ValueError("Missing 'channelID' in servo entry: {servo}")
+        if 'name' not in servo:
+            raise ValueError("Missing 'name' in servo entry: {servo}")
+        if 'open_pos' not in servo:
+            raise ValueError("Missing 'open_pos' in servo entry: {servo}")
+        if 'close_pos' not in servo:
+            raise ValueError("Missing 'close_pos' in servo entry: {servo}")
+        if 'open_over' not in servo:
+            print(f"Warning: Missing 'open_over' in servo entry: {servo}")
+        if 'close_over' not in servo:
+            print(f"Warning: Missing 'close_over' in servo entry: {servo}")
+    
 
-def update_config(config_yml,new_config):
-    with open(config_yml,'w') as file:
-        yaml.dump(new_config,file)
+def update_config(config_filename, new_config):
+    global CONFIG_FILE
+    with open(f"configs/{config_filename}",'w') as file:
+        yaml.dump(new_config, file)
+    CONFIG_FILE = f"configs/{config_filename}"
+    load_config()  # Reload the configuration after updating
 
 def get_config():
     if config_data:
@@ -49,20 +93,20 @@ def get_config():
         load_config()
         return config_data
 
-
 def save_data(data):
     """Save sensor data to a CSV file."""
     if DATA_FILE is not None:
         with open(f"logs/{DATA_FILE}", 'a') as file:
             # write a global timestamp to the file
             now = datetime.now()
-            timestamp = now.strftime("%Y-%m-%d %H:%M:%S")
+            timedelta = now-test_start
+            timestamp = str(timedelta)
             file.write(f"{timestamp},")
 
             for sensor in get_config()["sensors"].values():
                 sensor_name = sensor["name"]
                 # find the sensor in the data
-                sensor_data = next((s for s in data["sensors"] if s["name"] == sensor_name), None)
+                sensor_data = next((s for s in data if s["name"] == sensor_name), None)
                 if sensor_data:
                     file.write(f"{sensor_data['value']},")
                 else:
@@ -70,15 +114,16 @@ def save_data(data):
             file.write("\n")
     
     
-def interpolate(value, calibration_points):
+def interpolate(value, calibration_points, degree=1):
     """Perform linear interpolation for sensor calibration."""
     calibration_points = np.array(calibration_points)
     voltages, readings = calibration_points[:, 0], calibration_points[:, 1]
-    return np.interp(value, voltages, readings)
+    m, b = np.polyfit(voltages, readings, degree)
+    return m*value + b
 
 async def process_data(raw_data):
     """Process incoming raw sensor and actuator data."""
-    processed_data = {"sensors": [], "actuators": []}
+    processed_data = []
     
     # Process sensors
     for sensor in raw_data.get("sensors", []):
@@ -96,13 +141,13 @@ async def process_data(raw_data):
             calibration = sensor_info.get("calibration", [])
 
             # Apply interpolation only if calibration is non-empty
-            if calibration and len(calibration) > 0:
+            if calibration and len(calibration) > 0 and CALIBRATION_FLAG:
                 value = interpolate(value, calibration)
             
-            processed_data["sensors"].append({
+            processed_data.append({
                 "name": sensor_info["name"],
                 "value": f"{round(value, 2)}",
-                #"unit": sensor_info.get("unit", ""),
+                "unit": sensor_info.get("unit", ""),
                 "timestamp": timestamp
             })
     """
@@ -131,7 +176,35 @@ async def process_data(raw_data):
     return processed_data
 
 
-    
+async def validate_command(command):
+    if not isinstance(command, dict):
+        raise ValueError("Command must be a dictionary.")
+    if "type" not in command or "name" not in command or "state" not in command:
+        raise ValueError("Command must contain 'type', 'name', and 'state' keys.")
+    if command["type"] not in ["solenoid", "servo"]:
+        raise ValueError("Command type must be either 'solenoid' or 'servo'.")
+    if command["type"] == "solenoid":
+        relay = next((r for r in get_config()["relays"].values() if r["name"] == command["name"]), None)
+        if not relay:
+            raise ValueError(f"Relay with name '{command['name']}' not found in config.")
+        if command["state"] not in ["open", "closed"]:
+            raise ValueError("Solenoid state must be either 'open' or 'closed'.")
+        if "type" not in relay and "relay_type" not in relay:
+            raise ValueError(f"Relay '{command['name']}' must have 'type' or 'relay_type' defined.")
+    if command["type"] == "servo":
+        config = get_config()
+        servo = config["servos"].get(command["name"], None)
+        if not servo:
+            raise ValueError(f"Servo with name '{command['name']}' not found in config.")
+        if command["state"] not in ["open", "closed", "on", "off"]:
+            raise ValueError("Servo state must be either 'open', 'closed', 'on', or 'off'.")
+        if command["state"] in ["on", "off"] and "relayID" not in servo:
+            raise ValueError(f"Servo '{command['name']}' does not have a relayID for 'on'/'off' state.")
+        if command["state"] in ["open", "closed"] and ("open_pos" not in servo or "close_pos" not in servo):
+            raise ValueError(f"Servo '{command['name']}' must have 'open_pos' and 'close_pos' for 'open'/'closed' state.")
+    return True
+
+
 async def convert_command(command):
     """
     Convert and send command values based on config.yml values.
@@ -150,10 +223,24 @@ async def convert_command(command):
 
         if (relay["type"]):
             # Convert state based on relay type
-            relay_type = relay["type"]
-            relay_state = 1 if (state == "open" and relay_type == "NO") or (state == "closed" and relay_type == "NC") else 0
-        else:
-            relay_state = 1 if (state == "open") else 0
+            type = relay["type"]
+            if type not in ["NO", "NC"]:
+                raise ValueError(f"Invalid type '{type}' for relay '{name}'.")
+            # turn relay off if xyz else turn relay on
+            relay_state = 1 if (state == "open" and type == "NO") or (state == "closed" and type == "NC") else 0
+
+        elif (relay["relay_type"] & relay["solenoid_type"]):
+            # Convert state based on relay type
+            relay_type = relay["relay_type"]
+            solenoid_type = relay["solenoid_type"]
+
+            if relay_type not in ["NO", "NC"]:
+                raise ValueError(f"Invalid relay type '{type}' for relay '{name}'.")
+            if solenoid_type not in ["NO", "NC"]:
+                raise ValueError(f"Invalid solenoid type '{solenoid_type}' for relay '{name}'.")
+            
+            power_state = "on" if (state == "open" and solenoid_type == "NC") or (state == "closed" and solenoid_type == "NO") else "off"
+            relay_state = 0 if (power_state == "on" and  relay_type == "NO" ) or (power_state == "off" and relay_type == "NC") else 1
         
         # Create the command
         relay_command = {
@@ -178,17 +265,14 @@ async def convert_command(command):
             over_angle = servo.get("open_over")
         elif state == "closed":
             angle = servo["close_pos"]
-            over_angle = servo.get("close_over")
-
-            
-        elif state == "on" or state == "off":
+            over_angle = servo.get("close_over")   
+        elif state in ["on", "off"]:
             relay_state = 0 if (state == "on") else 1
-            # If relayId exists, send a command to turn the relay on
             if "relayID" in servo:
                 relay_command = {
                     "type": "relay",
                     "id": servo["relayID"],
-                    "state": relay_state  # Turn relay on
+                    "state": relay_state
                 }
                 return [relay_command]
         else:

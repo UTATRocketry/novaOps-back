@@ -12,7 +12,7 @@ COMMAND_TOPIC = "novaground/command"
 
 raw_data = {}
 data_store = {"sensors": [], "actuators": []}
-processed_data = {}
+processed_data = {"sensors": [], "actuators": []}
 # MQTT client setup
 mqtt_client = mqtt.Client()
 
@@ -38,7 +38,7 @@ def on_message(client, userdata, msg):
             # print(f"Decoded data: {data}"
             # Make sure payload is a dictionary before using it in the process
             if isinstance(raw_data, dict):
-                processed_data = asyncio.run(process_data(raw_data))
+                processed_data["sensors"] = asyncio.run(process_data(raw_data))
             else:
                 print("Received payload is not a valid dictionary")
         else:

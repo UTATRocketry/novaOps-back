@@ -5,14 +5,15 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Actuator Commands Viewer</title>
     <style>
+        th { text-align: center; }
+        th { background-color: #f2f2f2; }
         #status { color: lightgrey; }
         #status { color: gray; }
         #status { color: lightgreen; }
-        th {text-align: center; }
-        
     </style>
 </head>
 <body>
+    <button id="lock-button" onclick="toggleActuatorsLock()">Lock Actuators</button>
     <table>
         <thead>
             <tr>
@@ -26,9 +27,15 @@
     </table>
 
     <script>
+        let isLocked = false; // Global variable to track lock state
+        async function toggleActuatorsLock(actuator) {
+            isLocked = !isLocked; // Toggle lock state
+            const lockButton = document.getElementById('lock-button');
+            lockButton.textContent = isLocked ? 'Unlock Actuators' : 'Lock Actuators';
+        }
         async function fetchActuators() {
             try {
-                const response = await fetch('http://192.168.0.1:8000/actuators', {
+                const response = await fetch('http://192.168.0.1:8000/get_actuators', {
                     headers: { 'Accept': 'application/json' }
                 });
                 const actuators = await response.json();
@@ -36,7 +43,8 @@
                 tableBody.innerHTML = '';
 
                 actuators.forEach(actuator => {
-                    actuator.state = "closed"; // Default state for demonstration
+                    actuator.state = actuator.state || "closed"; // Default state for demonstration
+                    actuator.status = actuator.status || 'off'; // Ensure status is defined
                     const row = document.createElement('tr');
 
                     const nameCell = document.createElement('td');
@@ -48,21 +56,29 @@
                     stateButton.style.backgroundColor = actuator.state === 'open' ? 'green' : 'red';
                     stateButton.textContent = actuator.state === 'open' ? 'open' : 'closed';
                     stateButton.onclick = async () => {
-                        const newState = actuator.state === 'open' ? 'closed' : 'open';
-                        // sendCommand(actuator.name, actuator.type, newState);
-                        try {
-                            await fetch('http://192.168.0.1:8000/command', {
-                                method: 'POST',
-                                headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify({ type: actuator.type, name: actuator.name, state: newState })
-                            });
-                            // fetchActuators(); // Refresh the table after sending the command
-                        } catch (error) {
-                            console.error('Error sending command:', error);
+                        if (isLocked) {
+                            alert('Actuators are locked. Please unlock to change states.');
                         }
-                        actuator.state = newState; // Update the state locally
-                        stateButton.style.backgroundColor = newState === 'open' ? 'green' : 'red';
-                        stateButton.textContent = newState === 'open' ? 'open' : 'closed';
+                        else if (actuator.type === 'servo' && actuator.status === 'off') {
+                            alert('Servo is disabled. Please enable it first.');
+                        }
+                        else {
+                            const newState = actuator.state === 'open' ? 'closed' : 'open';
+                            // sendCommand(actuator.name, actuator.type, newState);
+                            try {
+                                await fetch('http://192.168.0.1:8000/send_command', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ type: actuator.type, name: actuator.name, state: newState })
+                                });
+                                // fetchActuators(); // Refresh the table after sending the command
+                            } catch (error) {
+                                console.error('Error sending command:', error);
+                            }
+                            actuator.state = newState; // Update the state locally
+                            stateButton.style.backgroundColor = newState === 'open' ? 'green' : 'red';
+                            stateButton.textContent = newState === 'open' ? 'open' : 'closed';
+                        }
                     };
                     stateCell.appendChild(stateButton);
 
@@ -71,21 +87,26 @@
                         statusButton.style.backgroundColor = actuator.status === 'on' ? 'lightgrey' : 'gray';
                         statusButton.textContent = actuator.status === 'on' ? 'enabled' : 'disabled';
                         statusButton.onclick = async () => {
-                            const newStatus = actuator.status === 'on' ? 'off' : 'on';
-                            // sendCommand(actuator.name, actuator.type, newState);
-                            try {
-                                await fetch('http://192.168.0.1:8000/command', {
-                                    method: 'POST',
-                                    headers: { 'Content-Type': 'application/json' },
-                                    body: JSON.stringify({ type: actuator.type, name: actuator.name, state: newStatus })
-                                });
-                                // fetchActuators(); // Refresh the table after sending the command
-                            } catch (error) {
-                                console.error('Error sending command:', error);
+                            if (isLocked) {
+                                alert('Actuators are locked. Please unlock to change states.');
                             }
-                            actuator.status = newStatus; // Update the state locally
-                            statusButton.style.backgroundColor = actuator.status === 'on' ? 'lightgrey' : 'gray';
-                            statusButton.textContent = actuator.status === 'on' ? 'enabled' : 'disabled';
+                            else {
+                                const newStatus = actuator.status === 'on' ? 'off' : 'on';
+                                // sendCommand(actuator.name, actuator.type, newState);
+                                try {
+                                    await fetch('http://192.168.0.1:8000/send_command', {
+                                        method: 'POST',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({ type: actuator.type, name: actuator.name, state: newStatus })
+                                    });
+                                    // fetchActuators(); // Refresh the table after sending the command
+                                } catch (error) {
+                                    console.error('Error sending command:', error);
+                                }
+                                actuator.status = newStatus; // Update the state locally
+                                statusButton.style.backgroundColor = actuator.status === 'on' ? 'lightgrey' : 'gray';
+                                statusButton.textContent = actuator.status === 'on' ? 'enabled' : 'disabled';
+                            }
                         };
                         stateCell.appendChild(statusButton);
                     }
@@ -100,7 +121,7 @@
 
         async function sendCommand(name, type, state) {
             try {
-                await fetch('http://192.168.0.1:8000/command', {
+                await fetch('http://192.168.0.1:8000/send_command', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ type, name, state })
@@ -110,6 +131,7 @@
                 console.error('Error sending command:', error);
             }
         }
+
         async function reload() {
             try {
                 // await fetch('http://192.168.0.1:8000/close_all');

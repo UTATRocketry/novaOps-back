@@ -46,15 +46,27 @@ async def get_token_from_websocket(websocket: WebSocket):
 
 @app.get("/")
 async def get():
-    return FileResponse("index.html")
+    return FileResponse("index2.html")
 
-@app.get("/view-data")
+@app.get("/view-json")
 async def get_dataUI():
-    return FileResponse("wsData.html")
+    return FileResponse("wsJSON.html")
+
+@app.get("/view-table")
+async def get_dataUI():
+    return FileResponse("wsTable.html")
+
+@app.get("/view-table2")
+async def get_dataUI():
+    return FileResponse("table.html")
 
 @app.get("/view-commands")
 async def get_commandUI():
     return FileResponse("commands.html")
+
+@app.get("/view-gui")
+async def get_commandUI():
+    return FileResponse("index.html")
 
 @app.get("/entry")  # Temporary route for testing for frontend and backend integration
 async def basic_test_endpoint():
@@ -62,8 +74,30 @@ async def basic_test_endpoint():
 
 @app.get("/raw_data")
 async def data_test_endpoint():
-    return {"data" : mqtt.processed_data}  
+    return {"data" : mqtt.raw_data}  
 
+@app.post("/toggle_calibration")
+async def toggle_calibration(command: dict):
+    """
+    Set the calibration flag to True or False.
+    """
+    flag = command.get("flag")  # Default to toggling the current state
+    if flag is None:
+        #flag = not config_parser.CALIBRATION_FLAG  # Toggle the current state if no flag is provided
+        raise HTTPException(status_code=400, detail="Flag parameter is required")
+    if not isinstance(flag, bool):
+        raise HTTPException(status_code=400, detail="Flag must be a boolean value")
+    # Set the calibration flag in the config parser
+    if config_parser.CALIBRATION_FLAG == flag:
+        raise HTTPException(status_code=400, detail="Calibration mode is already set to this value")
+    print(f"Setting calibration mode to {flag}")
+    #config_parser.CALIBRATION_FLAG = not config_parser.CALIBRATION_FLAG
+    config_parser.CALIBRATION_FLAG = flag
+    if flag:
+        return {"status": "Calibration mode enabled"}
+    else:
+        return {"status": "Calibration mode disabled"}
+    
 @app.get("/start_saving_data")
 async def start_saving_data():
     config_parser.SAVE_DATA_FLAG = True
@@ -102,6 +136,14 @@ async def dummy_command_endpoint(command: dict):
     handle_dummy_command(command)
     return {"status": "Command sent"}
 
+@app.get("/get_config")
+async def get_config_endpoint():
+    # Get the current configuration
+    config = config_parser.get_config()
+    if not config:
+        raise HTTPException(status_code=404, detail="Configuration not found")
+    return config
+
 @app.get("/upload_config")
 async def upload_config_endpoint(file: UploadFile):
     if not file:
@@ -113,11 +155,12 @@ async def upload_config_endpoint(file: UploadFile):
         config_str = contents.decode('utf-8')
         # Parse the YAML string into a Python dictionary
         new_config = yaml.safe_load(config_str)
-        with open(f"configs/{file.filename}",'w') as file:
-            yaml.dump(new_config, file)
-        # Load the new config into the app
-        config_parser.CONFIG_FILE = f"configs/{file.filename}"
-        config_parser.load_config()
+
+        # Validate the new configuration
+        if not new_config or not isinstance(new_config, dict):
+            raise HTTPException(status_code=400, detail="Invalid configuration format")
+        # Update the configuration using the config_parser
+        config_parser.update_config(file.filename, new_config)
         # Return a success message
     return {"status": "Config uploaded"}
 
@@ -126,7 +169,7 @@ async def update_config_enpoint():
     config_parser.load_config()
     return {"status": "Config updated"}
 
-@app.get("/actuators")
+@app.get("/get_actuators")
 async def get_actuators():
     # Get the actuators from the config
     config = config_parser.get_config()
@@ -141,7 +184,7 @@ async def get_actuators():
         actuators.append(actuator)
     return actuators
 
-@app.get("/sensors")
+@app.get("/get_sensors")
 async def get_sensors():
     # Get the sensors from the config
     config = config_parser.get_config()
@@ -161,14 +204,38 @@ async def get_actuator_data():
         return {} 
 
 @app.websocket("/ws_basic")
-async def websocket_endpoint(websocket: WebSocket):
+async def websocket_basic_endpoint(websocket: WebSocket):
     await websocket.accept()
     while True:
         #await mqtt.generate_sensor_data()
         await websocket.send_json(mqtt.processed_data)
-        await asyncio.sleep(0.0000001)
+        await asyncio.sleep(0.1)
 
 @app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    try:
+        while True:
+            await websocket.send_json(mqtt.processed_data)
+            # Check if any commands are received
+            try:
+                message = await asyncio.wait_for(websocket.receive_text(), timeout=0.5)
+                command = json.loads(message)
+
+                # Handle actuator toggling
+                print(command)
+
+            except asyncio.TimeoutError:
+                # Continue sending sensor updates if no command is received
+                pass
+
+            # Wait for 1 second before sending the next update
+            await asyncio.sleep(0.1)
+
+    except WebSocketDisconnect:
+        print(f"Client disconnected")
+
+@app.websocket("/ws_auth")
 async def websocket_endpoint2(websocket: WebSocket):
     # Accept the WebSocket connection
     await websocket.accept()
@@ -198,17 +265,26 @@ async def websocket_endpoint2(websocket: WebSocket):
         print(f"Client {user['username']} disconnected")
 
 
-@app.post("/command")
+@app.post("/send_command")
 async def send_command(command: dict):
     # Servos: {"id": "1", "angle": 90}
     # Relays: {"id": "1", "state": "0"}
     try:
+        config_parser.validate_command(command)  # Validate command structure
+        # Update processed data with the new actuator state
         commands = await config_parser.convert_command(command)  # Convert command based on config
         for command in commands:
             # Publish each command to the MQTT broker
             #mqtt.publish_command(command)
+            if command is None:
+                raise HTTPException(status_code=400, detail="Invalid command format")
+            if "wait" in command:
+                # If the command has a wait time, handle it accordingly
+                wait_time = command.pop("wait", 0)
+                if wait_time > 0:
+                    await asyncio.sleep(wait_time)
             mqtt.mqtt_client.publish(mqtt.COMMAND_TOPIC, json.dumps(command))
-            time.sleep(0.05)  # Add a small delay between commands to avoid flooding the broker
+            asyncio.sleep(0.01)  # Add a small delay between commands to avoid flooding the broker
         return {"status": "Command sent"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -216,14 +292,6 @@ async def send_command(command: dict):
 @app.get("/close_all")
 async def close_all_endpoint():
     #status = mqtt.set_all_to_closed()
-    #return status
-    relay_command = {
-        "type": "relay",
-        "id": 0,
-        "state": 0
-    }
-    #mqtt.mqtt_client.publish(mqtt.COMMAND_TOPIC, json.dumps(relay_command))
-    #status = await mqtt.set_all_to_closed()
     for i in range(16):
         command = {
             "type": "relay",
@@ -234,7 +302,18 @@ async def close_all_endpoint():
         time.sleep(0.1)  # Add a small delay between commands to avoid flooding the broker
     return {"status": "Commands sent"}
     
-    
+@app.get("/open_all")
+async def open_all_endpoint():
+    #status = mqtt.set_all_to_closed()
+    for i in range(16):
+        command = {
+            "type": "relay",
+            "id": i,
+            "state": 0
+        }
+        mqtt.mqtt_client.publish(mqtt.COMMAND_TOPIC, json.dumps(command))
+        time.sleep(0.1)  # Add a small delay between commands to avoid flooding the brokerr
+    return {"status": "Commands sent"} 
 
 # Data model for calibration update
 class CalibrationRequest(BaseModel):
