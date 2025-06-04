@@ -2,7 +2,7 @@ Settings: # overall settings
 - 
 
 MCCDAQ: # sensor DAC hats, Max 8 channels per hat
-- hatID: 0 # DAQ hat address
+- hatID: 1 # DAQ hat address
   channelID: 0 # Channel ID on the DAQ hat, CH0H
   name: PGSO
   unit: psi
@@ -12,7 +12,7 @@ MCCDAQ: # sensor DAC hats, Max 8 channels per hat
     [1.8, 100] # example calibration points
   ]
 
-- hatID: 0
+- hatID: 1
   channelID: 1 # CH1H
   name: PFT
   unit: psi
@@ -20,7 +20,7 @@ MCCDAQ: # sensor DAC hats, Max 8 channels per hat
   calibration: [
   ]
 
-- hatID: 0
+- hatID: 1
   channelID: 2 # CH2H
   name: PVO
   unit: psi
@@ -28,7 +28,7 @@ MCCDAQ: # sensor DAC hats, Max 8 channels per hat
   calibration: [
   ]
 
-- hatID: 0
+- hatID: 1
   channelID: 3 # CH3H
   name: MOT
   unit: kg
@@ -36,14 +36,14 @@ MCCDAQ: # sensor DAC hats, Max 8 channels per hat
   calibration: [
   ]
 
-- hatID: 0
+- hatID: 1
   channelID: 4 # CH0L
   name: PGS
   unit: psi
   calibration: [
   ]
 
-- hatID: 0
+- hatID: 1
   channelID: 5 # CH1L
   name: POT
   unit: psi
@@ -57,7 +57,7 @@ MCCDAQ: # sensor DAC hats, Max 8 channels per hat
   calibration: [
   ]
 
-- hatID: 0
+- hatID: 1
   channelID: 7 # CH3L
   name: MFT
   unit: kg
@@ -82,104 +82,121 @@ MCCDAQ: # sensor DAC hats, Max 8 channels per hat
 #   ]
 
 relayBoard: # solenoid relay board - 16 channels
+- channelID: 0
+  name: BVOTP 
+  relay_type: "NO"
+  actuator_type: servo # actuator_type: solenoid, servo, poweredDevice, or poweredGpioDevice
 
-#- channelID: 1
-#  name: MFV
+- channelID: 1 # Shared with MFV
+  name: IMC-V
+  relay_type: "NO"
+  actuator_type: poweredDevice # poweredDevice is a device that is powered on/off by a relay, like a pump or fan
 
-#- channelID: 0
-#  name: 
-
-#- channelID: 2
-#  name: 
-
-#- channelID: 3
-#  name: 
-
-#- channelID: 4
-#  name: 
-
-#- channelID: 5
-#  name: ch5
-
-#- channelID: 6
-#  name: ch6
-
-#- channelID: 7
-#  name: ch7
-
-- channelID: 9
-  name: SVGSD
-  type: NC # Normally open (NO) or normally closed (NC)
+- channelID: 6
+  name: IMC-G 
+  relay_type: "NO"
+  actuator_type: poweredDevice
 
 - channelID: 8
   name: SVBVGS
-  type: NC
+  relay_type: "NO"
+  actuator_type: solenoid
+  solenoid_type: NC
+
+- channelID: 9
+  name: SVGSD
+  relay_type: 'NO' # Whether the relay is wired normally open (NO) or normally closed (NC) when unpowered
+  actuator_type: solenoid
+  solenoid_type: "NC" # Whether the solenoid is normally open (NO) or normally closed (NC) when unpowered
 
 - channelID: 11
   name: SVMOVP
-  type: NC
-
-#- channelID: 11
-#  name: ch11
+  relay_type: "NO"
+  actuator_type: solenoid
+  solenoid_type: "NC"
 
 - channelID: 10
   name: SVPP   # injector purge, newly added
-  type: NC
+  relay_type: "NO"
+  actuator_type: solenoid
+  solenoid_type: NC
 
 - channelID: 12
   name: SVFTV
-  type: NC    # Fix later, should be NO but software should know
+  relay_type: NC
+  actuator_type: solenoid
+  solenoid_type: "NO"
 
 - channelID: 15
   name: SVOTV
-  type: NC
+  relay_type: NC
+  actuator_type: solenoid
+  solenoid_type: "NO"
 
 - channelID: 14
   name: SVOTD
   type: NC
+  relay_type: "NO"
+  actuator_type: solenoid
+  solenoid_type: NC
 
 PCA9685: # servo driver board - 16 channels
-# - channelID: 0
-#   name: SERVO0
-#   open_pos: 1300
-#   close_pos: 1700
-
-- channelID: 4
+- channelID: 5
   name: MFV
-  open_pos: 1300
-  open_over: 1700 # Optional
-  close_pos: 1700
-  close_over: 1300 # Optional
-  relayID: 1 # relay channel ID, controls servo power, optional
+  states: 2 # number of states, 2 for open/close valve, 3 for 3-way valve, etc.
+  open_pos: 1800
+  close_pos: 1050
+  relayID: 1
 
 - channelID: 6
   name: BVOTP
-  open_pos: 2030
-  open_over: 2060
+  open_pos: 2100
   close_pos: 1020
-  close_over: 990
   relayID: 0
 
 - channelID: 7
   name: BVFTP
-  open_pos: 2000
-  open_over: 2030
-  close_pos: 1060
-  close_over: 1030
+  open_pos: 2050
+  close_pos: 1090
   relayID: 3
 
 - channelID: 8
   name: BVGSP
   open_pos: 850
-  open_over: 850
-  close_pos: 1850
-  close_over: 1850
+  close_pos: 1900
   relayID: 2
 
 - channelID: 9
   name: BVGSO
-  open_pos: 1000
-  open_over: 1000
+  open_pos: 900
   close_pos: 1970
-  close_over: 1970
   relayID: 5
+
+
+GPIOs: # General Purpose Input/Output pins
+- pinID: 5
+  name: GPIO5
+  mode: input # input or output
+  default_state: high # low or high
+  relayID: 4 # Optional, if the device is powered by a relay
+
+- pinID: 6
+  name: GPIO6
+  mode: input # input or output
+  default_state: high # low or high
+
+- pinID: 17
+  name: TEST-DEVICE
+  mode: output # input or output
+  default_state: low # low or high
+  relayID: 6 # Optional, if the device is powered by a relay
+
+- pinID: 27
+  name: GPIO27
+  mode: output # input or output
+  default_state: low # low or high
+
+- pinID: 22
+  name: GPIO22
+  mode: output # input or output
+  default_state: high # low or high

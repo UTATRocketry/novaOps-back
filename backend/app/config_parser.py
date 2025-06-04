@@ -1,5 +1,6 @@
 import yaml
 import numpy as np
+import random
 from datetime import datetime
 
 CONFIG_FILE = 'configs/config.yml' 
@@ -25,12 +26,29 @@ def load_config():
     sensor_map = {(sensor['channelID'] + 8*sensor['hatID']): sensor for sensor in config.get('MCCDAQ', [])}
     relay_map = {relay['channelID']: relay for relay in config.get('relayBoard', [])}
     servo_map = {servo['channelID']: servo for servo in config.get('PCA9685', [])}
+    gpio_map = {gpio['pinID']: gpio for gpio in config.get('GPIOs', [])}
     
     config_data = {
         "sensors": sensor_map,
         "relays": relay_map,
-        "servos": servo_map
+        "servos": servo_map,
+        "gpios": gpio_map,
     }
+    # Add slope and intercept for each sensor
+    for sensor in config_data["sensors"].values():
+        calibration = sensor.get("calibration", [])
+        degree = sensor.get("degree", 1)
+        if calibration and len(calibration) > 0:
+            #voltages, readings = zip(*calibration)
+            calibration_points = np.array(calibration)
+            voltages, readings = calibration_points[:, 0], calibration_points[:, 1]
+            m, b = np.polyfit(voltages, readings, degree)
+            
+            sensor["slope"] = m
+            sensor["intercept"] = b
+        else:
+            sensor["slope"] = 1.0
+            sensor["intercept"] = 0.0
     #print("Loaded config:", config_data)
 
 def validate_config(config):
@@ -61,8 +79,8 @@ def validate_config(config):
             raise ValueError("Missing 'channelID' in relay entry: {relay}")
         if 'name' not in relay:
             raise ValueError("Missing 'name' in relay entry: {relay}")
-        if 'type' not in relay:
-            print(f"Warning: Missing 'type' in relay entry: {relay}")
+        #if 'type' not in relay:
+            #print(f"Warning: Missing 'type' in relay entry: {relay}")
     
     for servo in config.get('PCA9685', []):
         if 'channelID' not in servo:
@@ -73,10 +91,10 @@ def validate_config(config):
             raise ValueError("Missing 'open_pos' in servo entry: {servo}")
         if 'close_pos' not in servo:
             raise ValueError("Missing 'close_pos' in servo entry: {servo}")
-        if 'open_over' not in servo:
-            print(f"Warning: Missing 'open_over' in servo entry: {servo}")
-        if 'close_over' not in servo:
-            print(f"Warning: Missing 'close_over' in servo entry: {servo}")
+        #if 'open_over' not in servo:
+            #print(f"Warning: Missing 'open_over' in servo entry: {servo}")
+        #if 'close_over' not in servo:
+            #print(f"Warning: Missing 'close_over' in servo entry: {servo}")
     
 
 def update_config(config_filename, new_config):
@@ -106,11 +124,37 @@ def save_data(data):
             for sensor in get_config()["sensors"].values():
                 sensor_name = sensor["name"]
                 # find the sensor in the data
-                sensor_data = next((s for s in data if s["name"] == sensor_name), None)
+                sensor_data = next((s for s in data["sensors"] if s["name"] == sensor_name), None)
                 if sensor_data:
                     file.write(f"{sensor_data['value']},")
                 else:
                     file.write("N/A,")
+            """"
+            for gpio in get_config()["gpios"].values():
+                gpio_name = gpio["name"]
+                # find the gpio in the data
+                gpio_data = next((g for g in data["gpios"] if g["name"] == gpio_name), None)
+                if gpio_data:
+                    file.write(f"{gpio_data['state']},")
+                else:
+                    file.write("N/A,")
+            for actuator in data.get("actuators", []):
+                actuator_name = actuator["name"]
+                # find the actuator in the config
+                actuator_info = next((a for a in get_config()["relays"].values() if a["name"] == actuator_name), None)
+                if actuator_info:
+                    file.write(f"{actuator['state']},")
+                else:
+                    file.write("N/A,")
+            for thermocouple in data.get("thermocouples", []):
+                thermocouple_name = thermocouple["name"]
+                # find the thermocouple in the config
+                thermocouple_info = next((t for t in get_config()["thermocouples"].values() if t["name"] == thermocouple_name), None)
+                if thermocouple_info:
+                    file.write(f"{thermocouple['value']},")
+                else:
+                    file.write("N/A,")
+            """
             file.write("\n")
     
     
@@ -121,36 +165,59 @@ def interpolate(value, calibration_points, degree=1):
     m, b = np.polyfit(voltages, readings, degree)
     return m*value + b
 
-async def process_data(raw_data):
+async def process_data(raw_data, data_type):
     """Process incoming raw sensor and actuator data."""
     processed_data = []
     
     # Process sensors
-    for sensor in raw_data.get("sensors", []):
-        hat_id = sensor.get("hat_id")
-        channel_id = sensor.get("channel_id")
-        value = sensor.get("value")
-        timestamp = sensor.get("timestamp")
+    if data_type == "sensors":
+        for sensor in raw_data.get("sensors", []):
+            hat_id = sensor.get("hat_id")
+            channel_id = sensor.get("channel_id")
+            value = sensor.get("value")
+            timestamp = sensor.get("timestamp")
 
-        # Find the sensor in the config using hat_id and channel_id
-        sensor_info = next(
-            (s for s in get_config()["sensors"].values() if s["hatID"] == hat_id and s["channelID"] == channel_id),
-            None
-        )
-        if sensor_info:
-            calibration = sensor_info.get("calibration", [])
+            # Find the sensor in the config using hat_id and channel_id
+            sensor_info = next(
+                (s for s in get_config()["sensors"].values() if s["hatID"] == hat_id and s["channelID"] == channel_id),
+                None
+            )
+            if sensor_info:
+                
+                calibration = sensor_info.get("calibration", [])
 
-            # Apply interpolation only if calibration is non-empty
-            if calibration and len(calibration) > 0 and CALIBRATION_FLAG:
-                value = interpolate(value, calibration)
-            
-            processed_data.append({
-                "name": sensor_info["name"],
-                "value": f"{round(value, 2)}",
-                "unit": sensor_info.get("unit", ""),
-                "timestamp": timestamp
-            })
-    """
+                # generate fake data for testing
+                value = round(random.uniform(-5.0, 10.0), 3)
+                
+                # Apply interpolation only if calibration is non-empty
+                if calibration and len(calibration) > 0 and CALIBRATION_FLAG:
+                    value = sensor_info["slope"] * value + sensor_info["intercept"]
+                
+                processed_data.append({
+                    "name": sensor_info["name"],
+                    "value": f"{round(value, 2)}",
+                    "unit": sensor_info.get("unit", ""),
+                    "timestamp": timestamp
+                })
+
+    # Process GPIOs
+    if data_type == "gpios":
+        for gpio in raw_data.get("gpios", []):
+            pin_id = gpio.get("pin_id")
+            state = gpio.get("state")
+            timestamp = gpio.get("timestamp")
+
+            # Find the GPIO in the config using pin_id
+            gpio_info = next(
+                (g for g in get_config()["gpios"].values() if g["pinID"] == pin_id),
+                None
+            )
+            if gpio_info:
+                processed_data.append({
+                    "name": gpio_info["name"],
+                    "state": state
+                })
+        """
     # Process relays
     for relay in raw_data.get("relays", []):
         relay_info = get_config()["relays"].get(relay["id"])
@@ -171,8 +238,6 @@ async def process_data(raw_data):
                 "state": state
             })
     """
-    if SAVE_DATA_FLAG:
-        save_data(processed_data)  # Save the processed data to a file
     return processed_data
 
 
@@ -181,8 +246,8 @@ async def validate_command(command):
         raise ValueError("Command must be a dictionary.")
     if "type" not in command or "name" not in command or "state" not in command:
         raise ValueError("Command must contain 'type', 'name', and 'state' keys.")
-    if command["type"] not in ["solenoid", "servo"]:
-        raise ValueError("Command type must be either 'solenoid' or 'servo'.")
+    #if command["type"] not in ["solenoid", "servo", "poweredDevice", "gpioDevice", "poweredGpioDevice"]:
+       # raise ValueError("Command type must be either 'solenoid' or 'servo'.")
     if command["type"] == "solenoid":
         relay = next((r for r in get_config()["relays"].values() if r["name"] == command["name"]), None)
         if not relay:
@@ -214,33 +279,95 @@ async def convert_command(command):
     name = command["name"]
     state = command["state"]
     
-
-    if command_type == "solenoid":
+    if command_type in ["poweredDevice"] and state in ["on", "off"]:
         # Find the relay by name
         relay = next((r for r in config["relays"].values() if r["name"] == name), None)
         if not relay:
+            print(f"Relay with name '{name}' not found in config.")
+            raise ValueError(f"Relay with name '{name}' not found in config.")
+        
+        relay_state = 0 if (state == "on" and  relay["relay_type"] == "NO" ) or (state == "off" and relay["relay_type"] == "NC") else 1
+        
+        # Create the command
+        relay_command = {
+            "type": "relay",
+            "id": relay["channelID"],
+            "state": relay_state
+        }
+        return [relay_command]
+    
+    elif command_type in ["gpioDevice", "poweredGpioDevice"]:
+        # Find the GPIO by name
+        gpio = next((g for g in config["gpios"].values() if g["name"] == name), None)
+        if not gpio:
+            raise ValueError(f"GPIO with name '{name}' not found in config.")
+        
+        if state in ["on", "off"]:
+            relay_state = 0 if (state == "on") else 1
+            if "relayID" in gpio:
+                relay_command = {
+                    "type": "relay",
+                    "id": gpio["relayID"],
+                    "state": relay_state
+                }
+                return [relay_command]
+
+        if state  in ["armed", "disarmed"]:
+            # Convert state to GPIO state
+            gpio_state = 1 if state == "armed" else 0
+            
+            # Create the command
+            gpio_command = {
+                "type": "gpio",
+                "id": gpio["pinID"],
+                "mode": "output",
+                "state": gpio_state
+            }
+            return [gpio_command]
+    
+    elif command_type == "solenoid":
+        # Find the relay by name
+        relay = next((r for r in config["relays"].values() if r["name"] == name), None)
+        if not relay:
+            print(f"Relay with name '{name}' not found in config.")
             raise ValueError(f"Relay with name '{name}' not found in config.")
 
-        if (relay["type"]):
+        relay_type = relay.get("relay_type", None)
+        if relay_type is None:
+            print(f"Relay '{name}' does not have a 'relay_type' defined.")
+            raise ValueError(f"Relay '{name}' does not have a 'relay_type' defined.")
+        elif relay_type not in ["NO", "NC"]:
+            print(f"Invalid relay type '{relay_type}' for relay '{name}'.")
+            raise ValueError(f"Invalid relay type '{relay_type}' for relay '{name}'.")
+        
+        solenoid_type = relay["solenoid_type"]
+        if solenoid_type is None:
+            print(f"Relay '{name}' does not have a 'solenoid_type' defined.")
+            raise ValueError(f"Relay '{name}' does not have a 'solenoid_type' defined.")
+        elif solenoid_type not in ["NO", "NC"]:
+            print(f"Invalid solenoid type '{solenoid_type}' for relay '{name}'.")
+            raise ValueError(f"Invalid solenoid type '{solenoid_type}' for relay '{name}'.")
+        
+        # Convert state based on relay type
+        relay_state = None
+        if state == "open":
             # Convert state based on relay type
-            type = relay["type"]
-            if type not in ["NO", "NC"]:
-                raise ValueError(f"Invalid type '{type}' for relay '{name}'.")
-            # turn relay off if xyz else turn relay on
-            relay_state = 1 if (state == "open" and type == "NO") or (state == "closed" and type == "NC") else 0
-
-        elif (relay["relay_type"] & relay["solenoid_type"]):
-            # Convert state based on relay type
-            relay_type = relay["relay_type"]
-            solenoid_type = relay["solenoid_type"]
-
-            if relay_type not in ["NO", "NC"]:
-                raise ValueError(f"Invalid relay type '{type}' for relay '{name}'.")
-            if solenoid_type not in ["NO", "NC"]:
-                raise ValueError(f"Invalid solenoid type '{solenoid_type}' for relay '{name}'.")
-            
-            power_state = "on" if (state == "open" and solenoid_type == "NC") or (state == "closed" and solenoid_type == "NO") else "off"
-            relay_state = 0 if (power_state == "on" and  relay_type == "NO" ) or (power_state == "off" and relay_type == "NC") else 1
+            if solenoid_type == "NO":
+                relay_state = 0 if relay_type == "NO" else 1
+            elif solenoid_type == "NC":
+                relay_state = 1 if relay_type == "NO" else 0
+        elif state == "closed":
+            if solenoid_type == "NO":
+                relay_state = 1 if relay_type == "NO" else 0
+            elif solenoid_type == "NC":
+                relay_state = 0 if relay_type == "NO" else 1
+        
+        # power_state = "on" if (state == "open" and solenoid_type == "NC") or (state == "closed" and solenoid_type == "NO") else "off"
+        # relay_state = 0 if (power_state == "on" and  relay_type == "NO" ) or (power_state == "off" and relay_type == "NC") else 1
+        
+        if relay_state is None:
+            print(f"Invalid state '{state}' for relay '{name}'.")
+            raise ValueError(f"Invalid state '{state}' for relay '{name}'.")
         
         # Create the command
         relay_command = {
@@ -250,6 +377,7 @@ async def convert_command(command):
         }
 
         return [relay_command]
+
     elif command_type == "servo":
         mqtt_commands = []
         relay_state = None

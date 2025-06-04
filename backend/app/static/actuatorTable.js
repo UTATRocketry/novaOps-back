@@ -1,0 +1,149 @@
+
+const lockButton = document.getElementById('lock-button');
+lockButton.onclick = toggleActuatorsLock;
+
+let isLocked = false;
+function toggleActuatorsLock() {
+    isLocked = !isLocked;
+    lockButton.textContent = isLocked ? 'Unlock Actuators' : 'Lock Actuators';
+}
+async function fetchActuators() {
+    try {
+        const response = await fetch('http://192.168.0.1:8000/get_actuators', {
+            headers: { 'Accept': 'application/json' }
+        });
+        const actuators = await response.json();
+        const tableBody = document.getElementById('actuators-table');
+        tableBody.innerHTML = '';
+        actuators.forEach(actuator => {
+            // Ensure actuator has necessary properties
+            actuator.openState = actuator.openState || "closed";
+            actuator.powerState = actuator.powerState || 'off';
+            actuator.armingState = actuator.armingState || 'disarmed'; 
+            
+            const row = document.createElement('tr');
+            const nameCell = document.createElement('td');
+            nameCell.style.width = '200px';
+            nameCell.textContent = actuator.name;
+            nameCell.title = actuator.name; // Show full name on hover
+            row.appendChild(nameCell);
+
+            const stateCell = document.createElement('td');
+            stateCell.style.textAlign = 'center';
+            //stateCell.style.display = 'flex';
+            //stateCell.style.gap = '10px'; // Add some space between buttons
+            stateCell.style.justifyContent = 'center';
+            if (['servo', 'solenoid'].includes(actuator.type)) {
+                const openButton = document.createElement('button');
+                openButton.style.backgroundColor = actuator.openState === 'open' ? 'green' : 'red';
+                openButton.textContent = actuator.openState === 'open' ? 'open' : 'closed';
+                openButton.onclick = async () => {
+                    if (isLocked) {
+                        alert('Actuators are locked. Please unlock to change states.');
+                    }
+                    else if (actuator.type === 'servo' && actuator.powerState === 'off') {
+                        alert('Servo is disabled. Please enable it first.');
+                    }
+                    else {
+                        const newOpenState = actuator.openState === 'open' ? 'closed' : 'open';
+                        // sendCommand(actuator.name, actuator.type, newState);
+                        try {
+                            await fetch('http://192.168.0.1:8000/send_command', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ type: actuator.type, name: actuator.name, state: newOpenState })
+                            });
+                            // fetchActuators(); // Refresh the table after sending the command
+                        } catch (error) {
+                            console.error('Error sending command:', error);
+                        }
+                        actuator.openState = newOpenState; // Update the state locally
+                        openButton.style.backgroundColor = newOpenState === 'open' ? 'green' : 'red';
+                        openButton.textContent = newOpenState === 'open' ? 'open' : 'closed';
+                    }
+                };
+                stateCell.appendChild(openButton);
+            }
+            if (['gpioDevice', 'poweredGpioDevice'].includes(actuator.type)) {
+                const armingButton = document.createElement('button');
+                armingButton.style.backgroundColor = actuator.armingState === 'armed'  ? 'green' : 'red';
+                armingButton.textContent = actuator.armingState === 'armed' ? 'armed' : 'disarmed';
+                armingButton.onclick = async () => {
+                    if (isLocked) {
+                        alert('Actuators are locked. Please unlock to change states.');
+                    }
+                    else if (actuator.type === 'poweredGpioDevice' && actuator.powerState === 'off') {
+                        alert('Device is disabled. Please enable it first.');
+                    }
+                    else {
+                        const newArmingState = actuator.armingState === 'armed' ? 'disarmed' : 'armed';
+                        // sendCommand(actuator.name, actuator.type, newState);
+                        try {
+                            await fetch('http://192.168.0.1:8000/send_command', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ type: actuator.type, name: actuator.name, state: newArmingState })
+                            });
+                            // fetchActuators(); // Refresh the table after sending the command
+                        } catch (error) {
+                            console.error('Error sending command:', error);
+                        }
+                        actuator.armingState = newArmingState; // Update the state locally
+                        armingButton.style.backgroundColor = newArmingState === 'armed' ? 'green' : 'red';
+                        armingButton.textContent = newArmingState === 'armed' ? 'armed' : 'disarmed';
+                    }
+                };
+                stateCell.appendChild(armingButton);
+            }
+
+            if (['servo', 'poweredDevice', 'poweredGpioDevice'].includes(actuator.type)) {
+                const powerButton = document.createElement('button');
+                powerButton.style.backgroundColor = actuator.powerState === 'on' ? 'lightgrey' : 'gray';
+                powerButton.textContent = actuator.powerState === 'on' ? 'enabled' : 'disabled';
+                powerButton.onclick = async () => {
+                    if (isLocked) {
+                        alert('Actuators are locked. Please unlock to change states.');
+                    }
+                    else {
+                        const newPowerState = actuator.powerState === 'on' ? 'off' : 'on';
+                        // sendCommand(actuator.name, actuator.type, newState);
+                        try {
+                            await fetch('http://192.168.0.1:8000/send_command', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ type: actuator.type, name: actuator.name, state: newPowerState })
+                            });
+                            // fetchActuators(); // Refresh the table after sending the command
+                        } catch (error) {
+                            console.error('Error sending command:', error);
+                        }
+                        actuator.powerState = newPowerState; // Update the state locally
+                        powerButton.style.backgroundColor = newPowerState === 'on' ? 'lightgrey' : 'gray';
+                        powerButton.textContent = newPowerState === 'on' ? 'enabled' : 'disabled';
+                        
+                    }
+                };
+                stateCell.appendChild(powerButton);
+            }
+            row.appendChild(stateCell);
+
+            tableBody.appendChild(row);
+        });
+    } catch (error) {
+        console.error('Error fetching actuators:', error);
+    }
+}
+async function sendCommand(name, type, state) {
+    try {
+        await fetch('http://192.168.0.1:8000/send_command', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ type, name, state })
+        });
+        // fetchActuators(); // Refresh the table after sending the command
+    } catch (error) {
+        console.error('Error sending command:', error);
+    }
+}
+
+fetchActuators();

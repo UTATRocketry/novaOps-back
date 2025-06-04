@@ -6,10 +6,12 @@ import uvicorn
 import logging
 import threading
 import yaml
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException, status, UploadFile
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, Depends, HTTPException, status, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, FileResponse, RedirectResponse
 from fastapi.security import OAuth2PasswordRequestForm
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 from typing import List, Tuple
 import mqtt_interface as mqtt
@@ -25,6 +27,10 @@ FAKE_DATA_FLAG = True
 
 app = FastAPI()
 logger = logging.getLogger('uvicorn.error')
+
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+templates = Jinja2Templates(directory="templates")
 
 # Allow CORS for React frontend
 app.add_middleware(
@@ -44,29 +50,30 @@ async def get_token_from_websocket(websocket: WebSocket):
     except KeyError:
         raise WebSocketDisconnect(code=1008)
 
-@app.get("/")
-async def get():
-    return FileResponse("index2.html")
+@app.get("/", response_class=HTMLResponse)
+async def get(request: Request):
+    #return FileResponse("static/index.html")
+    return templates.TemplateResponse("index.html", {"request": request})
 
 @app.get("/view-json")
 async def get_dataUI():
-    return FileResponse("wsJSON.html")
+    return FileResponse("static/wsJSON.html")
 
 @app.get("/view-table")
 async def get_dataUI():
-    return FileResponse("wsTable.html")
+    return FileResponse("static/wsTable.html")
 
 @app.get("/view-table2")
 async def get_dataUI():
-    return FileResponse("table.html")
+    return FileResponse("static/table.html")
 
 @app.get("/view-commands")
 async def get_commandUI():
-    return FileResponse("commands.html")
+    return FileResponse("static/commands.html")
 
 @app.get("/view-gui")
 async def get_commandUI():
-    return FileResponse("index.html")
+    return FileResponse("static/index2.html")
 
 @app.get("/entry")  # Temporary route for testing for frontend and backend integration
 async def basic_test_endpoint():
@@ -81,7 +88,7 @@ async def toggle_calibration(command: dict):
     """
     Set the calibration flag to True or False.
     """
-    flag = command.get("flag")  # Default to toggling the current state
+    flag = command.get("calibration")  # Default to toggling the current state
     if flag is None:
         #flag = not config_parser.CALIBRATION_FLAG  # Toggle the current state if no flag is provided
         raise HTTPException(status_code=400, detail="Flag parameter is required")
@@ -175,12 +182,33 @@ async def get_actuators():
     config = config_parser.get_config()
     actuators = []
     for relay in config["relays"].values():
-        if relay.get("type") is None:
-            continue
-        actuator = {"type": "solenoid", "name": relay["name"]}
+        if relay.get("actuator_type") is None:
+            # Old format, check the type
+            if relay.get("type") == "NC":
+                actuator = {"type": "solenoid", "name": relay["name"]}
+            else:
+                continue  # Skip relays that do not have an actuator type defined
+        elif relay.get("actuator_type") == "servo":
+            #actuator = {"type": "servo", "name": relay["name"]}
+            continue  # Skip relays that are servos, as they are handled separately
+        elif relay.get("actuator_type") == "solenoid":
+            actuator = {"type": "solenoid", "name": relay["name"]}
+        elif relay.get("actuator_type") == "poweredDevice":
+            actuator = {"type": "poweredDevice", "name": relay["name"]}
+        else:
+            continue  # Skip any relays that do not match the expected types
         actuators.append(actuator)
     for servo in config["servos"].values():
         actuator = {"type": "servo", "name": servo["name"]}
+        actuators.append(actuator)
+    for gpio in config["gpios"].values():
+        if gpio.get("mode") == "output":
+            if "relayID" in gpio:
+                actuator = {"type": "poweredGpioDevice", "name": gpio["name"]} # "state": gpio["state"], 
+            else:
+                actuator = {"type": "gpioDevice", "name": gpio["name"]}
+        else:
+            continue  # Skip GPIOs that are not outputs
         actuators.append(actuator)
     return actuators
 
@@ -203,13 +231,24 @@ async def get_actuator_data():
     except:
         return {} 
 
-@app.websocket("/ws_basic")
+@app.websocket("/ws_raw_data")
 async def websocket_basic_endpoint(websocket: WebSocket):
     await websocket.accept()
     while True:
         #await mqtt.generate_sensor_data()
-        await websocket.send_json(mqtt.processed_data)
+        await websocket.send_json(mqtt.raw_data)
         await asyncio.sleep(0.1)
+
+@app.websocket("/ws_basic")
+async def websocket_basic_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    try:
+        while True:
+            #await mqtt.generate_sensor_data()
+            await websocket.send_json(mqtt.processed_data)
+            await asyncio.sleep(0.1)
+    except WebSocketDisconnect:
+        print(f"Client disconnected")
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
@@ -269,8 +308,9 @@ async def websocket_endpoint2(websocket: WebSocket):
 async def send_command(command: dict):
     # Servos: {"id": "1", "angle": 90}
     # Relays: {"id": "1", "state": "0"}
+    # print(f"Received command: {command}")
     try:
-        config_parser.validate_command(command)  # Validate command structure
+        #config_parser.validate_command(command)  # Validate command structure
         # Update processed data with the new actuator state
         commands = await config_parser.convert_command(command)  # Convert command based on config
         for command in commands:
@@ -281,8 +321,7 @@ async def send_command(command: dict):
             if "wait" in command:
                 # If the command has a wait time, handle it accordingly
                 wait_time = command.pop("wait", 0)
-                if wait_time > 0:
-                    await asyncio.sleep(wait_time)
+                
             mqtt.mqtt_client.publish(mqtt.COMMAND_TOPIC, json.dumps(command))
             asyncio.sleep(0.01)  # Add a small delay between commands to avoid flooding the broker
         return {"status": "Command sent"}
@@ -315,6 +354,16 @@ async def open_all_endpoint():
         time.sleep(0.1)  # Add a small delay between commands to avoid flooding the brokerr
     return {"status": "Commands sent"} 
 
+@app.get("/set_to_defaults")
+async def set_to_defaults_endpoint():
+    try:
+        mqtt.set_to_defaults()
+        return {"status": "Default commands sent"}
+    except Exception as e:
+        print(e)
+        raise HTTPException(status_code=500, detail=str(e))
+    
+    
 # Data model for calibration update
 class CalibrationRequest(BaseModel):
     sensor: str
