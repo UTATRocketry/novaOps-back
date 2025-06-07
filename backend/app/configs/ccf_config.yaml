@@ -214,39 +214,65 @@ PCA9685: # servo driver board - 16 channels
 - channelID: 5
   name: MFV
   open_pos: 1800
-  #open_over: 1800
   close_pos: 1050
-  #close_over: 1050
   relayID: 1
 
 - channelID: 6
   name: BVOTP
   open_pos: 2100
+  #open_over:
   close_pos: 1020
+  #close_over:
   relayID: 0
 
 - channelID: 7
   name: BVFTP
   open_pos: 2050
+  #open_over:
   close_pos: 1090
+  #close_over:
   relayID: 3
 
 - channelID: 8
   name: BVGSP
   open_pos: 850
-  #open_over: 850
-  close_pos: 1900
-  #close_over: 1900
+  #open_over:
+  close_pos: 1850
+  #close_over: 
   relayID: 2
 
 - channelID: 9
   name: BVGSO
   open_pos: 900
+  #open_over:
   close_pos: 1970
+  #close_over: 
   relayID: 5
 
-- channelID: 10
-  name: BVGSD
-  open_pos: 900
-  close_pos: 1970
-  relayID: 5
+GPIOs: # General Purpose Input/Output pins
+- pinID: 5
+  name: GPIO5
+  mode: input # input or output
+  default_state: high # low or high
+  relayID: 4 # Optional, if the device is powered by a relay
+
+- pinID: 6
+  name: GPIO6
+  mode: input # input or output
+  default_state: high # low or high
+
+- pinID: 17
+  name: TEST-DEVICE
+  mode: output # input or output
+  default_state: low # low or high
+  relayID: 6 # Optional, if the device is powered by a relay
+
+- pinID: 27
+  name: GPIO27
+  mode: output # input or output
+  default_state: low # low or high
+
+- pinID: 22
+  name: GPIO22
+  mode: output # input or output
+  default_state: high # low or high

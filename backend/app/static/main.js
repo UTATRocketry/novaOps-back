@@ -1,5 +1,6 @@
 document.getElementById("update-button").onclick = updateConfig;
 document.getElementById("save-button").onclick = toggleSaving;
+document.getElementById("download-button").onclick = downloadData;
 document.getElementById("calibration-button").onclick = toggleCalibration;
 
 function updateConfig() {
@@ -20,9 +21,11 @@ function toggleSaving() {
     .then(res => res.json())
     .then(data => console.log("Saving toggled:", data))
     .catch(err => console.error("Saving toggle error:", err));
+    
+}
 
-  if (!isSaving) {
-    fetch("/download_data_file")
+function downloadData(){
+  fetch("/download_data_file")
       .then(response => {
         const disposition = response.headers.get("Content-Disposition");
         let filename = "data_file.csv";
@@ -43,7 +46,6 @@ function toggleSaving() {
         a.remove();
       })
       .catch(err => console.error("Download error:", err));
-  }
 }
 
 let calibrationFlag = true;

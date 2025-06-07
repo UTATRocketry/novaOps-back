@@ -17,6 +17,8 @@ from typing import List, Tuple
 import mqtt_interface as mqtt
 import data_file
 import config_parser
+import data_interface
+import command_interface
 from html_generator import generate_html, new_html, calibration_html
 from auth import authenticate_user, create_access_token, get_current_user, ACCESS_TOKEN_EXPIRE_MINUTES
 import dummy_pi
@@ -107,24 +109,27 @@ async def toggle_calibration(command: dict):
     
 @app.get("/start_saving_data")
 async def start_saving_data():
-    config_parser.SAVE_DATA_FLAG = True
-    # create a CSV file with the current date and time in data folder
-    now = datetime.now()
-    timestamp = now.strftime("%Y-%m-%d_%H-%M-%S")
-    config_parser.DATA_FILE = f"{timestamp}_data.csv"
-    # write the header to the file: Timestamp then each sensor name in the config
-    with open(f"logs/{config_parser.DATA_FILE}", 'w') as file:
-        file.write("Timestamp,")
-        for sensor in config_parser.get_config()["sensors"].values():
-            file.write(f"{sensor['name']},")
-        file.write("\n")
-    return {"status": f"Saving data to {config_parser.DATA_FILE}"}
+    data_interface.new_data_file()
+    data_interface.SAVE_DATA_FLAG = True
+    return {"status": f"Saving data to {data_interface.DATA_FILE}"}
+
 
 @app.get("/stop_saving_data")
 async def stop_saving_data():
-    config_parser.SAVE_DATA_FLAG = False
+    data_interface.SAVE_DATA_FLAG = False
     #config_parser.DATA_FILE = None
     return {"status": "Stopped saving data"}
+
+
+@app.get("/toggle_saving_data")
+async def toggle_saving_data():
+    if not data_interface.SAVE_DATA_FLAG:
+        data_interface.new_data_file()
+        data_interface.SAVE_DATA_FLAG = True
+        return {"status": f"Saving data to {data_interface.DATA_FILE}"}
+    else:
+        data_interface.SAVE_DATA_FLAG = False
+        return {"status": "Stopped saving data"}
 
 @app.get("/download_data_file")
 async def download_data():
