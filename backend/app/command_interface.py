@@ -113,6 +113,7 @@ async def convert_command(command):
         
         # Convert state based on relay type
         relay_state = None
+        """
         if state == "open":
             # Convert state based on relay type
             if solenoid_type == "NO":
@@ -124,9 +125,9 @@ async def convert_command(command):
                 relay_state = 1 if relay_type == "NO" else 0
             elif solenoid_type == "NC":
                 relay_state = 0 if relay_type == "NO" else 1
-        
-        # power_state = "on" if (state == "open" and solenoid_type == "NC") or (state == "closed" and solenoid_type == "NO") else "off"
-        # relay_state = 0 if (power_state == "on" and  relay_type == "NO" ) or (power_state == "off" and relay_type == "NC") else 1
+        """
+        power_state = "on" if (state == "open" and solenoid_type == "NC") or (state == "closed" and solenoid_type == "NO") else "off"
+        relay_state = 0 if (power_state == "on" and  relay_type == "NO" ) or (power_state == "off" and relay_type == "NC") else 1
         
         if relay_state is None:
             print(f"Invalid state '{state}' for relay '{name}'.")

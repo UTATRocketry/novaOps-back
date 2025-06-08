@@ -92,16 +92,16 @@ async def toggle_calibration(command: dict):
     """
     flag = command.get("calibration")  # Default to toggling the current state
     if flag is None:
-        #flag = not config_parser.CALIBRATION_FLAG  # Toggle the current state if no flag is provided
+        #flag = not data_interface.CALIBRATION_FLAG  # Toggle the current state if no flag is provided
         raise HTTPException(status_code=400, detail="Flag parameter is required")
     if not isinstance(flag, bool):
         raise HTTPException(status_code=400, detail="Flag must be a boolean value")
     # Set the calibration flag in the config parser
-    if config_parser.CALIBRATION_FLAG == flag:
+    if data_interface.CALIBRATION_FLAG == flag:
         raise HTTPException(status_code=400, detail="Calibration mode is already set to this value")
     print(f"Setting calibration mode to {flag}")
-    #config_parser.CALIBRATION_FLAG = not config_parser.CALIBRATION_FLAG
-    config_parser.CALIBRATION_FLAG = flag
+    #data_interface.CALIBRATION_FLAG = not data_interface.CALIBRATION_FLAG
+    data_interface.CALIBRATION_FLAG = flag
     if flag:
         return {"status": "Calibration mode enabled"}
     else:
@@ -109,7 +109,16 @@ async def toggle_calibration(command: dict):
     
 @app.get("/start_saving_data")
 async def start_saving_data():
-    data_interface.new_data_file()
+    #data_interface.new_data_file()
+    date = datetime.now().strftime("%Y-%m-%d-%H")
+    data_interface.DATA_FILE = f"{date}_data_{data_interface.file_num}.csv"
+    # write the header to the file: Timestamp then each sensor name in the config
+    with open(f"logs/{data_interface.DATA_FILE}", 'w') as file:
+        file.write("Timestamp,")
+        for sensor in config_parser.get_config()["sensors"].values():
+            file.write(f"{sensor['name']},")
+        file.write("\n")
+    data_interface.file_num += 1
     data_interface.SAVE_DATA_FLAG = True
     return {"status": f"Saving data to {data_interface.DATA_FILE}"}
 
@@ -117,7 +126,7 @@ async def start_saving_data():
 @app.get("/stop_saving_data")
 async def stop_saving_data():
     data_interface.SAVE_DATA_FLAG = False
-    #config_parser.DATA_FILE = None
+    #data_interface.DATA_FILE = None
     return {"status": "Stopped saving data"}
 
 
@@ -134,8 +143,8 @@ async def toggle_saving_data():
 @app.get("/download_data_file")
 async def download_data():
     # Download the CSV file
-    if config_parser.DATA_FILE:
-        return FileResponse(f"logs/{config_parser.DATA_FILE}", media_type='text/csv', filename=config_parser.DATA_FILE,  headers={"Content-Disposition": f"attachment; filename={config_parser.DATA_FILE}"})
+    if data_interface.DATA_FILE:
+        return FileResponse(f"logs/{data_interface.DATA_FILE}", media_type='text/csv', filename=data_interface.DATA_FILE,  headers={"Content-Disposition": f"attachment; filename={data_interface.DATA_FILE}"})
     else:
         raise HTTPException(status_code=404, detail="No data file found")
 
@@ -232,7 +241,7 @@ async def get_actuator_data():
         while True:
             #await generate_sensor_data()
             #await get_timestamp()
-            return mqtt.processed_data 
+            return data_interface.processed_data 
     except:
         return {} 
 
@@ -250,7 +259,7 @@ async def websocket_basic_endpoint(websocket: WebSocket):
     try:
         while True:
             #await mqtt.generate_sensor_data()
-            await websocket.send_json(mqtt.processed_data)
+            await websocket.send_json(data_interface.processed_data)
             await asyncio.sleep(0.1)
     except WebSocketDisconnect:
         print(f"Client disconnected")
@@ -260,7 +269,7 @@ async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     try:
         while True:
-            await websocket.send_json(mqtt.processed_data)
+            await websocket.send_json(data_interface.processed_data)
             # Check if any commands are received
             try:
                 message = await asyncio.wait_for(websocket.receive_text(), timeout=0.5)
@@ -289,7 +298,7 @@ async def websocket_endpoint2(websocket: WebSocket):
     user = await get_current_user(token)
     try:
         while True:
-            await websocket.send_json(mqtt.processed_data)
+            await websocket.send_json(data_interface.processed_data)
             # Check if any commands are received
             try:
                 message = await asyncio.wait_for(websocket.receive_text(), timeout=1.0)
@@ -315,20 +324,16 @@ async def send_command(command: dict):
     # Relays: {"id": "1", "state": "0"}
     # print(f"Received command: {command}")
     try:
-        #config_parser.validate_command(command)  # Validate command structure
+        #command_interface.validate_command(command)  # Validate command structure
         # Update processed data with the new actuator state
-        commands = await config_parser.convert_command(command)  # Convert command based on config
+        commands = await command_interface.convert_command(command)  # Convert command based on config
         for command in commands:
             # Publish each command to the MQTT broker
             #mqtt.publish_command(command)
             if command is None:
                 raise HTTPException(status_code=400, detail="Invalid command format")
-            if "wait" in command:
-                # If the command has a wait time, handle it accordingly
-                wait_time = command.pop("wait", 0)
-                
             mqtt.mqtt_client.publish(mqtt.COMMAND_TOPIC, json.dumps(command))
-            asyncio.sleep(0.01)  # Add a small delay between commands to avoid flooding the broker
+            await asyncio.sleep(0.01)  # Add a small delay between commands to avoid flooding the broker
         return {"status": "Command sent"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

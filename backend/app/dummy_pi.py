@@ -3,7 +3,9 @@ import yaml
 import random
 from datetime import datetime
 from data_file import data_store
-from config_parser import get_config, process_data, convert_command, interpolate, save_data, SAVE_DATA_FLAG
+import config_parser
+import data_interface
+import command_interface
 
 fake_processed_data = {}
 
@@ -30,7 +32,7 @@ def generate_data():
 
         # Find the sensor in the config using hat_id and channel_id
         sensor_info = next(
-            (s for s in get_config()["sensors"].values() if s["hatID"] == hat_id and s["channelID"] == channel_id),
+            (s for s in config_parser.get_config()["sensors"].values() if s["hatID"] == hat_id and s["channelID"] == channel_id),
             None
         )
         if sensor_info:
@@ -38,15 +40,15 @@ def generate_data():
 
             # Apply interpolation only if calibration is non-empty
             if calibration and len(calibration) > 0:
-                value = interpolate(value, calibration)
+                value = data_interface.interpolate(value, calibration)
             
             processed_data["sensors"].append({
                 "name": sensor_info["name"],
                 "value": f"{value:.2f}",
                 "timestamp": timestamp
             })
-    if SAVE_DATA_FLAG:
-        save_data(processed_data)  # Save the processed data to a file
+    if data_interface.SAVE_DATA_FLAG:
+        data_interface.save_data(processed_data)  # Save the processed data to a file
     fake_processed_data = processed_data
     return processed_data
     """
