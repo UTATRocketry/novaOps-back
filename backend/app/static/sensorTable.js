@@ -12,24 +12,29 @@ const gpioTableBody = document.getElementById("gpio-table-body");
 function updateSensorTable(sensors) {
   sensorTableBody.innerHTML = "";
   if (!Array.isArray(sensors) || sensors.length === 0) {
-    sensorTableBody.innerHTML = "<tr><td colspan='2'>No sensor data available.</td></tr>";
+    sensorTableBody.innerHTML = "<tr><td colspan='4'>No sensor data available.</td></tr>";
     return;
   }
-
   sensors.forEach(sensor => {
     const row = document.createElement("tr");
     const nameCell = document.createElement("td");
     const valueCell = document.createElement("td");
+    const avgCell = document.createElement("td");
+    const rateCell = document.createElement("td");
 
     nameCell.textContent = sensor.name || "Unnamed";
     nameCell.style.width = '200px';
     nameCell.title = sensor.name;
-    valueCell.textContent = sensor.value || "N/A";
+    valueCell.textContent = sensor.value; // || "N/A";
     valueCell.style.width = '100px';
     valueCell.title = sensor.value;
+    avgCell.textContent = sensor.avg;
+    rateCell.textContent = sensor.rate;
 
     row.appendChild(nameCell);
     row.appendChild(valueCell);
+    row.appendChild(avgCell);
+    row.appendChild(rateCell);
     sensorTableBody.appendChild(row);
   });
 }
@@ -69,7 +74,7 @@ function connectWebSocket() {
     try {
       const jsonData = JSON.parse(event.data);
       if (jsonData && jsonData.sensors) updateSensorTable(jsonData.sensors);
-      else sensorTableBody.innerHTML = "<tr><td colspan='2'>Invalid data format.</td></tr>";
+      else sensorTableBody.innerHTML = "<tr><td colspan='4'>Invalid data format.</td></tr>";
       if (jsonData && jsonData.gpios) updateGpioTable(jsonData.gpios);
       else gpioTableBody.innerHTML = "<tr><td colspan='2'>Invalid GPIO data format.</td></tr>";
     } catch (err) {

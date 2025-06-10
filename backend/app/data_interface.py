@@ -6,6 +6,8 @@ import config_parser
 DATA_FILE = None
 SAVE_DATA_FLAG = False
 CALIBRATION_FLAG = True
+ROLLING_WINDOW_SIZE = 400  # number of samples to use for rolling average
+RATE_WINDOW_SIZE = 200
 test_start = datetime.now()
 file_num = 0
 file_length = 0
@@ -13,8 +15,8 @@ processed_data = {"sensors": []} #"gpios": []
 data_store = {}
 
 def new_data_file():
-    global file_num
-    date = datetime.now().strftime("%Y-%m-%d")
+    global file_num, DATA_FILE
+    date = datetime.now().strftime("%Y-%m-%d-%H")
     DATA_FILE = f"{date}_data_{file_num}.csv"
     # write the header to the file: Timestamp then each sensor name in the config
     with open(f"logs/{DATA_FILE}", 'w') as file:
@@ -76,7 +78,7 @@ def interpolate(value, calibration_points, degree=1):
 
 async def process_data(raw_data):
     """Process incoming raw sensor and actuator data."""
-    global processed_data
+    global processed_data, data_store
     sensor_data = []
     # Process sensors
     if "sensors" in raw_data:
@@ -92,7 +94,7 @@ async def process_data(raw_data):
                 None
             )
             if sensor_info:
-                
+                name = sensor_info["name"]
                 calibration = sensor_info.get("calibration", [])
 
                 # generate fake data for testing
@@ -102,12 +104,51 @@ async def process_data(raw_data):
                 if calibration and len(calibration) > 0 and CALIBRATION_FLAG:
                     value = sensor_info["slope"] * value + sensor_info["intercept"]
                 
-                #data_store[sensor_info["name"]]
+                # Initialize history for this sensor
+                if name not in data_store:
+                    data_store[name] = []
+
+                # Append new value with timestamp
+                data_store[name].append((timestamp, value))
+                if len(data_store[name]) > ROLLING_WINDOW_SIZE:
+                    data_store[name].pop(0)
+
+                # Compute rolling average
+                rolling_values = [v for t, v in data_store[name]]
+                avg_value = np.mean(rolling_values)
+
+                # Compute rate of change
+                if len(data_store[name]) >= RATE_WINDOW_SIZE:
+                    t0, v0 = data_store[name][0]
+                    t1, v1 = data_store[name][RATE_WINDOW_SIZE - 1]
+                    # Convert timestamps to datetime if needed
+                    #if isinstance(t0, str):
+                    #    t0 = datetime.fromisoformat(t0)
+                    #if isinstance(t1, str):
+                    #    t1 = datetime.fromisoformat(t1)
+                elif len(data_store[name]) >= 2:
+                    t0, v0 = data_store[name][0]
+                    t1, v1 = data_store[name][-1]
+                else:
+                    t1, t0 = 0
+                # Now compute the rate
+                if t1 != t0:
+                    dt = t1 - t0  # time difference in seconds
+                    rate = (v1 - v0) / dt
+                    # If the time span is less than 1 second, normalize to per second
+                    if dt < 1.0:
+                        rate *= (1.0 / dt)
+                    rate_str = f"{round(rate, 2)}"
+                else:
+                    rate_str = "N/A"
+
                 sensor_data.append({
                     "name": sensor_info["name"],
                     "value": f"{round(value, 2)}",
+                    "avg": f"{round(avg_value, 2)}",
+                    "rate": rate_str,
                     "unit": sensor_info.get("unit", ""),
-                    "timestamp": timestamp
+                    "timestamp": timestamp,
                 })
     processed_data["sensors"] = sensor_data
     if SAVE_DATA_FLAG:

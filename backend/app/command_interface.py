@@ -1,8 +1,89 @@
 import time
+import asyncio
+from datetime import datetime
 import config_parser
 import mqtt_interface
 
+LOG_FILE = None
+SAVE_LOG_FLAG = False
+test_start = datetime.now()
+file_num = 0
+file_length = 0
 actuator_states = {}
+
+def new_log_file():
+    global file_num, LOG_FILE
+    date = datetime.now().strftime("%Y-%m-%d-%H")
+    LOG_FILE = f"{date}_log_{file_num}.csv"
+
+    with open(f"logs/{LOG_FILE}", 'w') as file:
+        file.write("Timestamp,")
+        file.write("Name,")
+        file.write("State,")
+        """
+        for actuator in config_parser.get_actuators_config():
+            file.write(f"{actuator['name']},") 
+        """
+        file.write("\n")
+    file_num += 1
+    return
+
+def save_log(command):
+    """Save actuator states to a CSV file."""
+    #if LOG_FILE is None:
+    #    new_log_file()
+    if LOG_FILE is not None:
+        with open(f"logs/{LOG_FILE}", 'a') as file:
+            # write a global LOG_FILE to the file
+            now = datetime.now()
+            timedelta = now-test_start
+            timestamp = str(timedelta)
+            file.write(f"{timestamp},")
+            file.write(f"{command['name']},")
+            file.write(f"{command['state']},")
+            """
+            for actuator in config_parser.get_actuators_config():
+                name = actuator["name"]
+                if name in actuator_states:
+                    state = actuator_states[name]
+                    if state is not None:
+                        file.write(f"{state},")
+                    else:
+                        file.write("N/A,")
+                else:
+                    file.write("N/A,")
+            """
+            
+            file.write("\n")
+
+
+def update_actuator_state(name, state):
+    """
+    Update the state of an actuator and save it to the log file.
+    """
+    global actuator_states
+
+    try:
+        if name not in actuator_states:
+            actuator_states[name] = None
+
+        actuator_states[name] = state
+        #print(f"Updated {name} to {state}")  # Debugging statement
+
+        #if SAVE_LOG_FLAG:
+         #   save_log()
+    except Exception as e:
+        print(f"Error updating actuator state: {e}")
+    
+def initialize_actuator_states():
+    for actuator in config_parser.get_actuators_config():
+        name = actuator["name"]
+        default_state = actuator.get("default_state", None)
+        if default_state is not None:
+            update_actuator_state(name, default_state)
+        else:
+            update_actuator_state(name, "unknown")
+        
 
 async def validate_command(command):
     if not isinstance(command, dict):
@@ -32,11 +113,11 @@ async def validate_command(command):
             raise ValueError(f"Servo '{command['name']}' must have 'open_pos' and 'close_pos' for 'open'/'closed' state.")
     return True
 
-
 async def convert_command(command):
     """
     Convert and send command values based on config.yml values.
     """
+    # print(f"Received command: {command}")
     config = config_parser.get_config()  # Load the configuration
     command_type = command["type"]
     name = command["name"]
@@ -141,8 +222,8 @@ async def convert_command(command):
         }
 
         return [relay_command]
-
-    elif command_type == "servo":
+    
+    elif command_type in ["servo", "servo3"]:
         mqtt_commands = []
         relay_state = None
         angle = None
@@ -152,12 +233,25 @@ async def convert_command(command):
             raise ValueError(f"Servo with name '{name}' not found in config.")
 
         # Determine the angle based on state
+        """
         if state == "open":
             angle = servo["open_pos"]
             over_angle = servo.get("open_over")
         elif state == "closed":
             angle = servo["close_pos"]
-            over_angle = servo.get("close_over")   
+            over_angle = servo.get("close_over")
+        """
+        if state in ["open", "closed"]:
+            angle = servo["open_pos"] if state == "open" else servo["close_pos"]
+            over_angle = servo.get("open_over") if state == "open" else servo.get("close_over")
+        elif state in ["pos_1", "pos_2", "pos_3"]:
+            angle = servo[state]
+            servo_command = {
+                "type": "servo",
+                "id": servo["channelID"],
+                "angle": angle
+            }
+            return [servo_command]
         elif state in ["on", "off"]:
             relay_state = 0 if (state == "on") else 1
             if "relayID" in servo:
@@ -260,10 +354,10 @@ async def set_all_to_closed():
     
     for command in commands:
         if command == wait:
-            time.sleep(2)
+            await asyncio.sleep(2)
         else:
-            mqtt_interface.publish_command(command)
-            time.sleep(0.1)  # Add a small delay between commands to avoid flooding the broker
+            await mqtt_interface.publish_command(command)
+            await asyncio.sleep(0.1)  # Add a small delay between commands to avoid flooding the broker
     return {"status": "Commands sent"}
 
 async def set_to_defaults():
@@ -393,7 +487,7 @@ async def set_to_defaults():
     
     for command in commands:
         if command == wait:
-            time.sleep(2)
+            await asyncio.sleep(2)
         else:
-            mqtt_interface.publish_command(command)
-            time.sleep(0.1)  # Add a small delay between commands to avoid flooding the broker
+            await mqtt_interface.publish_command(command)
+            await asyncio.sleep(0.1)

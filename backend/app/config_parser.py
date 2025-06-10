@@ -128,8 +128,12 @@ def get_actuators_config():
             continue  # Skip any relays that do not match the expected types
         actuators.append(actuator)
     for servo in config["servos"].values():
-        actuator = {"type": "servo", "name": servo["name"]}
-        actuators.append(actuator)
+        if "open_pos" in servo or "close_pos" in servo:
+            actuator = {"type": "servo", "name": servo["name"]}
+            actuators.append(actuator)
+        elif "pos_1" in servo:
+            actuator = {"type": "servo3", "name": servo["name"]}
+            actuators.append(actuator)
     for gpio in config["gpios"].values():
         if gpio.get("mode") == "output":
             if "relayID" in gpio:

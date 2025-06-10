@@ -43,6 +43,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+config_parser.load_config()  # Load the initial configuration
+# Initialize MQTT client
+#mqtt.init_mqtt_client()
+# Initialize data interface
+#data_interface.init_data_interface()
+# Initialize command interface
+#command_interface.init_command_interface()
+#command_interface.initialize_actuator_states()
+# Initialize dummy data generation if enabled
+#if FAKE_DATA_FLAG:
 
 # Function to get token from WebSocket query parameters
 async def get_token_from_websocket(websocket: WebSocket):
@@ -102,6 +112,7 @@ async def toggle_calibration(command: dict):
     print(f"Setting calibration mode to {flag}")
     #data_interface.CALIBRATION_FLAG = not data_interface.CALIBRATION_FLAG
     data_interface.CALIBRATION_FLAG = flag
+    data_interface.data_store = {}
     if flag:
         return {"status": "Calibration mode enabled"}
     else:
@@ -109,17 +120,10 @@ async def toggle_calibration(command: dict):
     
 @app.get("/start_saving_data")
 async def start_saving_data():
-    #data_interface.new_data_file()
-    date = datetime.now().strftime("%Y-%m-%d-%H")
-    data_interface.DATA_FILE = f"{date}_data_{data_interface.file_num}.csv"
-    # write the header to the file: Timestamp then each sensor name in the config
-    with open(f"logs/{data_interface.DATA_FILE}", 'w') as file:
-        file.write("Timestamp,")
-        for sensor in config_parser.get_config()["sensors"].values():
-            file.write(f"{sensor['name']},")
-        file.write("\n")
-    data_interface.file_num += 1
+    data_interface.new_data_file()
     data_interface.SAVE_DATA_FLAG = True
+    command_interface.new_log_file()
+    command_interface.SAVE_LOG_FLAG = True
     return {"status": f"Saving data to {data_interface.DATA_FILE}"}
 
 
@@ -192,6 +196,7 @@ async def update_config_enpoint():
 
 @app.get("/get_actuators")
 async def get_actuators():
+    """
     # Get the actuators from the config
     config = config_parser.get_config()
     actuators = []
@@ -225,6 +230,8 @@ async def get_actuators():
             continue  # Skip GPIOs that are not outputs
         actuators.append(actuator)
     return actuators
+    """
+    return config_parser.get_actuators_config()
 
 @app.get("/get_sensors")
 async def get_sensors():
@@ -259,6 +266,7 @@ async def websocket_basic_endpoint(websocket: WebSocket):
     try:
         while True:
             #await mqtt.generate_sensor_data()
+            ws_data = data_interface.format_for_ws()
             await websocket.send_json(data_interface.processed_data)
             await asyncio.sleep(0.1)
     except WebSocketDisconnect:
@@ -326,21 +334,31 @@ async def send_command(command: dict):
     try:
         #command_interface.validate_command(command)  # Validate command structure
         # Update processed data with the new actuator state
-        commands = await command_interface.convert_command(command)  # Convert command based on config
-        for command in commands:
+        command_list = await command_interface.convert_command(command)  # Convert command based on config
+        for parsed_command in command_list:
             # Publish each command to the MQTT broker
             #mqtt.publish_command(command)
-            if command is None:
+            if parsed_command is None:
                 raise HTTPException(status_code=400, detail="Invalid command format")
-            mqtt.mqtt_client.publish(mqtt.COMMAND_TOPIC, json.dumps(command))
+            mqtt.mqtt_client.publish(mqtt.COMMAND_TOPIC, json.dumps(parsed_command))
             await asyncio.sleep(0.01)  # Add a small delay between commands to avoid flooding the broker
+
+        # Update the actuator states with the new command
+        #try:
+        #    command_interface.update_actuator_state(command['name'], command['state'])
+        #except Exception as e:
+        #    print(f"Error updating actuator state: {e}")
+
+        if command_interface.SAVE_LOG_FLAG:
+            command_interface.save_log(command)
         return {"status": "Command sent"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/close_all")
 async def close_all_endpoint():
-    #status = mqtt.set_all_to_closed()
+    status = await command_interface.set_all_to_closed()
+    """
     for i in range(16):
         command = {
             "type": "relay",
@@ -349,6 +367,7 @@ async def close_all_endpoint():
         }
         mqtt.mqtt_client.publish(mqtt.COMMAND_TOPIC, json.dumps(command))
         time.sleep(0.1)  # Add a small delay between commands to avoid flooding the broker
+    """
     return {"status": "Commands sent"}
     
 @app.get("/open_all")

@@ -123,7 +123,7 @@ PCA9685: # servo driver board - 16 channels
   relayID: 1
   
 - channelID: 10
-  name: THREE_WAY_VALVE # Example of a 3-way valve
+  name: SERVO3 # Example of a 3-way valve
   states: 3 # 3-way valve
   pos_1: 1800 # position for state 1
   pos_2: 1200 # position for state 2

@@ -33,6 +33,8 @@ async function fetchActuators() {
             //stateCell.style.display = 'flex';
             //stateCell.style.gap = '10px'; // Add some space between buttons
             stateCell.style.justifyContent = 'center';
+
+            // devices that need a “open / closed” button
             if (['servo', 'solenoid'].includes(actuator.type)) {
                 const openButton = document.createElement('button');
                 openButton.style.backgroundColor = actuator.openState === 'open' ? 'green' : 'red';
@@ -48,24 +50,35 @@ async function fetchActuators() {
                         const newOpenState = actuator.openState === 'open' ? 'closed' : 'open';
                         // sendCommand(actuator.name, actuator.type, newState);
                         try {
-                            await fetch('http://192.168.0.1:8000/send_command', {
+                            const response = await fetch('http://192.168.0.1:8000/send_command', {
                                 method: 'POST',
                                 headers: { 'Content-Type': 'application/json' },
                                 body: JSON.stringify({ type: actuator.type, name: actuator.name, state: newOpenState })
                             });
+                            if (!response.ok) {
+                                alert('Failed to send command. Please try again.');
+                            }
+                            else if (response.status === 200) {
+                                // Command was sent successfully
+                                console.log(`Command sent successfully for ${actuator.name}`);
+                                actuator.openState = newOpenState; // Update the state locally
+                                openButton.style.backgroundColor = newOpenState === 'open' ? 'green' : 'red';
+                                openButton.textContent = newOpenState === 'open' ? 'open' : 'closed';
+                            }
                             // fetchActuators(); // Refresh the table after sending the command
                         } catch (error) {
                             console.error('Error sending command:', error);
                         }
-                        actuator.openState = newOpenState; // Update the state locally
-                        openButton.style.backgroundColor = newOpenState === 'open' ? 'green' : 'red';
-                        openButton.textContent = newOpenState === 'open' ? 'open' : 'closed';
+                        
                     }
                 };
                 stateCell.appendChild(openButton);
             }
+
+            // devices that need an arming button
             if (['gpioDevice', 'poweredGpioDevice'].includes(actuator.type)) {
                 const armingButton = document.createElement('button');
+                armingButton.setAttribute("id", `${actuator.name}-armingButton`)
                 armingButton.style.backgroundColor = actuator.armingState === 'armed'  ? 'green' : 'red';
                 armingButton.textContent = actuator.armingState === 'armed' ? 'armed' : 'disarmed';
                 armingButton.onclick = async () => {
@@ -79,25 +92,92 @@ async function fetchActuators() {
                         const newArmingState = actuator.armingState === 'armed' ? 'disarmed' : 'armed';
                         // sendCommand(actuator.name, actuator.type, newState);
                         try {
-                            await fetch('http://192.168.0.1:8000/send_command', {
+                            const response = await fetch('http://192.168.0.1:8000/send_command', {
                                 method: 'POST',
                                 headers: { 'Content-Type': 'application/json' },
                                 body: JSON.stringify({ type: actuator.type, name: actuator.name, state: newArmingState })
                             });
+                            if (!response.ok) {
+                                alert('Failed to send command. Please try again.');
+                            }
+                            else if (response.status === 200) {
+                                // Command was sent successfully
+                                actuator.armingState = newArmingState; // Update the state locally
+                                armingButton.style.backgroundColor = newArmingState === 'armed' ? 'green' : 'red';
+                                armingButton.textContent = newArmingState === 'armed' ? 'armed' : 'disarmed';
                             // fetchActuators(); // Refresh the table after sending the command
+                            }
                         } catch (error) {
                             console.error('Error sending command:', error);
                         }
-                        actuator.armingState = newArmingState; // Update the state locally
-                        armingButton.style.backgroundColor = newArmingState === 'armed' ? 'green' : 'red';
-                        armingButton.textContent = newArmingState === 'armed' ? 'armed' : 'disarmed';
+                        
                     }
                 };
                 stateCell.appendChild(armingButton);
             }
 
-            if (['servo', 'poweredDevice', 'poweredGpioDevice'].includes(actuator.type)) {
+            /* ---------- 3-way servo valve ---------- */
+            if (actuator.type === 'servo3') {
+                // ensure backend sent a current state
+                actuator.valveState = actuator.valveState || '1';
+            
+                const positions = ['1', '2', '3'];                // label each port
+                const colours   = { active: 'green', idle: 'grey' };
+            
+                positions.forEach(position => {
+                const btn = document.createElement('button');
+                btn.setAttribute("id", `${actuator.name}-btn${position}`)
+                btn.textContent = position;
+                btn.style.margin = '0 4px';
+                btn.style.backgroundColor =
+                    (actuator.valveState === position ? colours.active : colours.idle);
+            
+                btn.onclick = async () => {
+                    if (isLocked) {
+                        alert('Actuators are locked. Please unlock to change states.'); return;
+                    }
+                    if (actuator.powerState === 'off') {
+                        alert('Servo is disabled. Please enable it first.'); return;
+                    }
+            
+                    try {
+                        const response = await fetch('http://192.168.0.1:8000/send_command', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                            type: actuator.type,          // "servo3"
+                            name: actuator.name,
+                            state: `pos_${position}`               // "1" | "2" | "3"
+                            })
+                        });
+                        if (!response.ok) {
+                            alert('Failed to send command. Please try again.');
+                        }
+                        else if (response.status === 200) {
+                            console.log(`Command sent successfully for ${actuator.name} to position ${position}`);
+                        
+                            // update local shadow copy & button colours
+                            actuator.valveState = position;
+                            // repaint all three buttons
+                            Array.from(stateCell.children).forEach(el => {
+                                if (el.id !== `${actuator.name}-powerButton`) {
+                                    el.style.backgroundColor =
+                                        (el.textContent === position ? colours.active : colours.idle);
+                                }
+                            });
+                        }
+                    } catch (err) {
+                    console.error('Error sending command:', err);
+                    }
+                };
+            
+                stateCell.appendChild(btn);
+                });
+            }
+            // devices that need a power-enable button
+            if (['servo', 'servo3', 'poweredDevice', 'poweredGpioDevice'].includes(actuator.type)) {
                 const powerButton = document.createElement('button');
+                powerButton.setAttribute("id", `${actuator.name}-powerButton`)
                 powerButton.style.backgroundColor = actuator.powerState === 'on' ? 'lightgrey' : 'gray';
                 powerButton.textContent = actuator.powerState === 'on' ? 'enabled' : 'disabled';
                 powerButton.onclick = async () => {
@@ -108,18 +188,26 @@ async function fetchActuators() {
                         const newPowerState = actuator.powerState === 'on' ? 'off' : 'on';
                         // sendCommand(actuator.name, actuator.type, newState);
                         try {
-                            await fetch('http://192.168.0.1:8000/send_command', {
+                            const response = await fetch('http://192.168.0.1:8000/send_command', {
                                 method: 'POST',
                                 headers: { 'Content-Type': 'application/json' },
                                 body: JSON.stringify({ type: actuator.type, name: actuator.name, state: newPowerState })
                             });
+                            if (!response.ok) {
+                                alert('Failed to send command. Please try again.');
+                            }
+                            else if (response.status === 200) {
+                                // Command was sent successfully
+                                console.log(`Command sent successfully for ${actuator.name}`);
+                                actuator.powerState = newPowerState; // Update the state locally
+                                powerButton.style.backgroundColor = newPowerState === 'on' ? 'lightgrey' : 'gray';
+                                powerButton.textContent = newPowerState === 'on' ? 'enabled' : 'disabled';
+                            }
                             // fetchActuators(); // Refresh the table after sending the command
                         } catch (error) {
                             console.error('Error sending command:', error);
                         }
-                        actuator.powerState = newPowerState; // Update the state locally
-                        powerButton.style.backgroundColor = newPowerState === 'on' ? 'lightgrey' : 'gray';
-                        powerButton.textContent = newPowerState === 'on' ? 'enabled' : 'disabled';
+                        
                         
                     }
                 };
@@ -135,11 +223,15 @@ async function fetchActuators() {
 }
 async function sendCommand(name, type, state) {
     try {
-        await fetch('http://192.168.0.1:8000/send_command', {
+        const response = await fetch('http://192.168.0.1:8000/send_command', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ type, name, state })
         });
+        if (!response.ok) {
+            alert('Failed to send command. Please try again.');
+            throw new Error('Network response was not ok');
+        }
         // fetchActuators(); // Refresh the table after sending the command
     } catch (error) {
         console.error('Error sending command:', error);
