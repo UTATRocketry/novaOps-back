@@ -5,6 +5,7 @@ const maxReconnectAttempts = 10;
 const reconnectInterval = 2000;
 
 const statusElem = document.getElementById("status");
+const delayElem = document.getElementById("delay");
 const reconnectStatusElem = document.getElementById("reconnect-status");
 const sensorTableBody = document.getElementById("sensor-table-body");
 const gpioTableBody = document.getElementById("gpio-table-body");
@@ -28,9 +29,9 @@ function updateSensorTable(sensors) {
     valueCell.textContent = sensor.value; // || "N/A";
     valueCell.style.width = '100px';
     valueCell.title = sensor.value;
-    avgCell.textContent = sensor.avg;
-    rateCell.textContent = sensor.rate;
-
+    avgCell.textContent = sensor.avg || "N/A";
+    rateCell.textContent = sensor.rate || "N/A";
+ 
     row.appendChild(nameCell);
     row.appendChild(valueCell);
     row.appendChild(avgCell);
@@ -73,7 +74,12 @@ function connectWebSocket() {
   socket.onmessage = event => {
     try {
       const jsonData = JSON.parse(event.data);
-      if (jsonData && jsonData.sensors) updateSensorTable(jsonData.sensors);
+      if (jsonData && jsonData.sensors) {
+        let receivedTime = Date.now() * 0.001//performance.timeOrigin + performance.now();
+        let delay = receivedTime - (jsonData.sensors[0].timestamp);
+        delayElem.textContent = `${delay.toFixed(2)} s`;//`${receivedTime}-${jsonData.sensors[0].timestamp}`// `${delay.toFixed(2)} ms`;
+        updateSensorTable(jsonData.sensors);
+      }
       else sensorTableBody.innerHTML = "<tr><td colspan='4'>Invalid data format.</td></tr>";
       if (jsonData && jsonData.gpios) updateGpioTable(jsonData.gpios);
       else gpioTableBody.innerHTML = "<tr><td colspan='2'>Invalid GPIO data format.</td></tr>";

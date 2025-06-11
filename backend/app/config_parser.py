@@ -3,7 +3,7 @@ import numpy as np
 import random
 from datetime import datetime
 
-CONFIG_FILE = 'configs/config.yml'
+CONFIG_FILE = 'configs/hotfire_config.yml'
 config_data = None
 
 
@@ -83,10 +83,11 @@ def validate_config(config):
             raise ValueError("Missing 'channelID' in servo entry: {servo}")
         if 'name' not in servo:
             raise ValueError("Missing 'name' in servo entry: {servo}")
-        if 'open_pos' not in servo:
-            raise ValueError("Missing 'open_pos' in servo entry: {servo}")
-        if 'close_pos' not in servo:
-            raise ValueError("Missing 'close_pos' in servo entry: {servo}")
+        if 'open_pos' in servo or 'close_pos' in servo:
+            if 'open_pos' not in servo:
+                raise ValueError("Missing 'open_pos' in servo entry: {servo}")
+            if 'close_pos' not in servo:
+                raise ValueError("Missing 'close_pos' in servo entry: {servo}")
         #if 'open_over' not in servo:
             #print(f"Warning: Missing 'open_over' in servo entry: {servo}")
         #if 'close_over' not in servo:
@@ -128,11 +129,11 @@ def get_actuators_config():
             continue  # Skip any relays that do not match the expected types
         actuators.append(actuator)
     for servo in config["servos"].values():
-        if "open_pos" in servo or "close_pos" in servo:
+        if servo["states"] == 2:
             actuator = {"type": "servo", "name": servo["name"]}
             actuators.append(actuator)
-        elif "pos_1" in servo:
-            actuator = {"type": "servo3", "name": servo["name"]}
+        elif servo["states"] == 3:
+            actuator = {"type": "servo3", "name": servo["name"], "positions": servo.get("position_aliases", [])}
             actuators.append(actuator)
     for gpio in config["gpios"].values():
         if gpio.get("mode") == "output":

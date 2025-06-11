@@ -37,6 +37,8 @@ async function fetchActuators() {
             // devices that need a “open / closed” button
             if (['servo', 'solenoid'].includes(actuator.type)) {
                 const openButton = document.createElement('button');
+                openButton.style.border = '2px outset';
+                openButton.style.borderColor = actuator.openState === 'open' ? 'darkgreen' : 'darkred';
                 openButton.style.backgroundColor = actuator.openState === 'open' ? 'green' : 'red';
                 openButton.textContent = actuator.openState === 'open' ? 'open' : 'closed';
                 openButton.onclick = async () => {
@@ -62,6 +64,7 @@ async function fetchActuators() {
                                 // Command was sent successfully
                                 console.log(`Command sent successfully for ${actuator.name}`);
                                 actuator.openState = newOpenState; // Update the state locally
+                                openButton.style.borderColor = newOpenState === 'open' ? 'darkgreen' : 'darkred';
                                 openButton.style.backgroundColor = newOpenState === 'open' ? 'green' : 'red';
                                 openButton.textContent = newOpenState === 'open' ? 'open' : 'closed';
                             }
@@ -79,6 +82,8 @@ async function fetchActuators() {
             if (['gpioDevice', 'poweredGpioDevice'].includes(actuator.type)) {
                 const armingButton = document.createElement('button');
                 armingButton.setAttribute("id", `${actuator.name}-armingButton`)
+                armingButton.style.border = '2px outset';
+                armingButton.style.borderColor = actuator.armingState === 'armed' ? 'darkgreen' : 'darkred';
                 armingButton.style.backgroundColor = actuator.armingState === 'armed'  ? 'green' : 'red';
                 armingButton.textContent = actuator.armingState === 'armed' ? 'armed' : 'disarmed';
                 armingButton.onclick = async () => {
@@ -103,6 +108,8 @@ async function fetchActuators() {
                             else if (response.status === 200) {
                                 // Command was sent successfully
                                 actuator.armingState = newArmingState; // Update the state locally
+                                console.log(`Command sent successfully for ${actuator.name}`);
+                                armingButton.style.borderColor = newArmingState === 'armed' ? 'darkgreen' : 'darkred';
                                 armingButton.style.backgroundColor = newArmingState === 'armed' ? 'green' : 'red';
                                 armingButton.textContent = newArmingState === 'armed' ? 'armed' : 'disarmed';
                             // fetchActuators(); // Refresh the table after sending the command
@@ -119,19 +126,22 @@ async function fetchActuators() {
             /* ---------- 3-way servo valve ---------- */
             if (actuator.type === 'servo3') {
                 // ensure backend sent a current state
-                actuator.valveState = actuator.valveState || '1';
-            
-                const positions = ['1', '2', '3'];                // label each port
-                const colours   = { active: 'green', idle: 'grey' };
+                const positions = actuator.positions || ['1', '2', '3'];  // label each port
+                actuator.valveState = actuator.valveState || positions[0]; // default to first position if not set
+                const borderColours = { active: 'darkgreen', idle: "black" }; // border colours for each button
+                const colours   = { active: 'green', idle: 'gray' }; // lightsteelblue steelblue cornflowerblue DodgerBlue
             
                 positions.forEach(position => {
                 const btn = document.createElement('button');
-                btn.setAttribute("id", `${actuator.name}-btn${position}`)
+                btn.setAttribute("id", `${actuator.name}-btn-${position}`)
                 btn.textContent = position;
-                btn.style.margin = '0 4px';
+                btn.style.margin = '0 1px';
+                btn.style.border = '2px outset';
+                btn.style.borderColor = 
+                    (actuator.valveState === position ? borderColours.active : borderColours.idle);
                 btn.style.backgroundColor =
                     (actuator.valveState === position ? colours.active : colours.idle);
-            
+
                 btn.onclick = async () => {
                     if (isLocked) {
                         alert('Actuators are locked. Please unlock to change states.'); return;
@@ -147,7 +157,7 @@ async function fetchActuators() {
                             body: JSON.stringify({
                             type: actuator.type,          // "servo3"
                             name: actuator.name,
-                            state: `pos_${position}`               // "1" | "2" | "3"
+                            state: position               // "1" | "2" | "3"
                             })
                         });
                         if (!response.ok) {
@@ -163,6 +173,8 @@ async function fetchActuators() {
                                 if (el.id !== `${actuator.name}-powerButton`) {
                                     el.style.backgroundColor =
                                         (el.textContent === position ? colours.active : colours.idle);
+                                    el.style.borderColor =
+                                        (el.textContent === position ? borderColours.active : borderColours.idle);
                                 }
                             });
                         }
@@ -178,6 +190,8 @@ async function fetchActuators() {
             if (['servo', 'servo3', 'poweredDevice', 'poweredGpioDevice'].includes(actuator.type)) {
                 const powerButton = document.createElement('button');
                 powerButton.setAttribute("id", `${actuator.name}-powerButton`)
+                powerButton.style.border = '2px outset';
+                powerButton.style.borderColor = 'black';
                 powerButton.style.backgroundColor = actuator.powerState === 'on' ? 'lightgrey' : 'gray';
                 powerButton.textContent = actuator.powerState === 'on' ? 'enabled' : 'disabled';
                 powerButton.onclick = async () => {

@@ -223,7 +223,7 @@ async def convert_command(command):
 
         return [relay_command]
     
-    elif command_type in ["servo", "servo3"]:
+    elif command_type in ["servo", "servo2", "servo3"]:
         mqtt_commands = []
         relay_state = None
         angle = None
@@ -244,8 +244,14 @@ async def convert_command(command):
         if state in ["open", "closed"]:
             angle = servo["open_pos"] if state == "open" else servo["close_pos"]
             over_angle = servo.get("open_over") if state == "open" else servo.get("close_over")
-        elif state in ["pos_1", "pos_2", "pos_3"]:
-            angle = servo[state]
+        elif state in servo["position_aliases"] or state in  ['1', '2', '3']:
+            # If the state is a position alias, get the index of the alias
+            if state in servo["position_aliases"]:
+                index = servo["position_aliases"].index(state)
+                if index < len(servo["positions"]):
+                    angle = servo["positions"][index]
+            elif state in ['1', '2', '3']:
+                angle = servo["positions"][int(state)-1] 
             servo_command = {
                 "type": "servo",
                 "id": servo["channelID"],

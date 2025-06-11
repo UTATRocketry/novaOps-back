@@ -15,14 +15,14 @@
   <button id="lock-button">Lock Actuators</button>
   <button id="calibration-button">Get Uncalibrated values</button>
   <p id="update-status"></p>
-  <p>WebSocket Status: <span id="status">Connecting...</span></p>
+  <p>WebSocket Status: <span id="status">Connecting...</span> Lag:<span id="delay">Measuring...</span> </p>
   <p id="reconnect-status"></p>
 
   <div class="tables-wrapper">
     <div>
       <table id="sensor-table">
         <thead>
-          <tr><th>Sensor Name</th><th>Value</th><th>Averaged Value</th><th>Rate</th></tr>
+          <tr><th>Sensor Name</th><th>Value</th><th>Averaged Value</th><th>Rate</th></tr><!-- -->
         </thead>
         <tbody id="sensor-table-body">
           <tr><td colspan="4">Waiting for data...</td></tr>

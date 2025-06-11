@@ -267,7 +267,7 @@ async def websocket_basic_endpoint(websocket: WebSocket):
         while True:
             #await mqtt.generate_sensor_data()
             ws_data = data_interface.format_for_ws()
-            await websocket.send_json(data_interface.processed_data)
+            await websocket.send_json(ws_data)
             await asyncio.sleep(0.1)
     except WebSocketDisconnect:
         print(f"Client disconnected")
