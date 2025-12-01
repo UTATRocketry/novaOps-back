@@ -6,19 +6,20 @@ import uvicorn
 import logging
 import threading
 import yaml
+import os
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, Depends, HTTPException, status, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, FileResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, FileResponse, RedirectResponse, JSONResponse
 from fastapi.security import OAuth2PasswordRequestForm
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 import mqtt_interface as mqtt
-import data_file
 import config_parser
 import data_interface
 import command_interface
+import plotting
 from html_generator import generate_html, new_html, calibration_html
 from auth import authenticate_user, create_access_token, get_current_user, ACCESS_TOKEN_EXPIRE_MINUTES
 import dummy_pi
@@ -121,7 +122,9 @@ async def toggle_calibration(command: dict):
 @app.get("/start_saving_data")
 async def start_saving_data():
     data_interface.new_data_file()
-    data_interface.SAVE_DATA_FLAG = True
+    #data_interface.SAVE_DATA_FLAG = True
+    data_command = {"type":"logger","action":"start_logging","filename":f"/home/admin/Desktop/novaOps-back/backend/app/logs/{data_interface.DATA_FILE}"}
+    mqtt.mqtt_client.publish(mqtt.COMMAND_TOPIC, json.dumps(data_command))
     command_interface.new_log_file()
     command_interface.SAVE_LOG_FLAG = True
     return {"status": f"Saving data to {data_interface.DATA_FILE}"}
@@ -129,7 +132,10 @@ async def start_saving_data():
 
 @app.get("/stop_saving_data")
 async def stop_saving_data():
-    data_interface.SAVE_DATA_FLAG = False
+    #data_interface.SAVE_DATA_FLAG = False
+    data_command = {"type":"logger","action":"stop_logging"}
+    mqtt.mqtt_client.publish(mqtt.COMMAND_TOPIC, json.dumps(data_command))
+    command_interface.SAVE_LOG_FLAG = False
     #data_interface.DATA_FILE = None
     return {"status": "Stopped saving data"}
 
@@ -154,7 +160,7 @@ async def download_data():
 
 @app.get("/dummy_data")
 async def dummy_data_endpoint():
-    return generate_data() 
+    return generate_data()
 
 @app.get("/dummy_command")
 async def dummy_command_endpoint(command: dict):
@@ -253,7 +259,7 @@ async def get_actuator_data():
         return {} 
 
 @app.websocket("/ws_raw_data")
-async def websocket_basic_endpoint(websocket: WebSocket):
+async def websocket_data_endpoint(websocket: WebSocket):
     await websocket.accept()
     while True:
         #await mqtt.generate_sensor_data()
@@ -392,7 +398,60 @@ async def set_to_defaults_endpoint():
         print(e)
         raise HTTPException(status_code=500, detail=str(e))
     
-    
+class PlotRequest(BaseModel):
+    csv_file: str
+    time_bounds: Optional[List[str]] = None
+    y1_cols: List[str]
+    y2_cols: Optional[List[str]] = None
+    smooth_cols: Optional[List[str]] = None
+    smoothing_window: Optional[int] = 10
+    y1_unit: Optional[str] = None
+    y2_unit: Optional[str] = None
+    show: Optional[bool] = False
+
+@app.post("/generate_plot")
+async def generate_plot(req: PlotRequest):
+    try:
+        plot_path = plotting.plot_from_csv(
+            csv_file=req.csv_file,
+            time_bounds=req.time_bounds,
+            y1_cols=req.y1_cols,
+            y2_cols=req.y2_cols,
+            smooth_cols=req.smooth_cols,
+            smoothing_window=req.smoothing_window,
+            y1_unit=req.y1_unit,
+            y2_unit=req.y2_unit,
+            show=req.show
+        )
+        # Option 1: Return the file directly
+        return FileResponse(plot_path, media_type="image/png", filename=os.path.basename(plot_path))
+        # Option 2: Return just the path
+        # return JSONResponse({"plot_path": plot_path})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+@app.get("/get_csv_files")
+async def get_csv_files():
+    """
+    Get a list of all CSV files in the logs directory.
+    """
+    try:
+        csv_files = [f for f in os.listdir("logs") if f.endswith(".csv")]
+        return {"csv_files": plotting.get_csv_data()}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/get_plot_files")
+async def get_plot_files():
+    """
+    Get a list of all plot images in the logs directory.
+    """
+    try:
+        plot_files = [f for f in os.listdir("logs") if f.endswith(".png")]
+        return {"plot_files": plot_files}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 # Data model for calibration update
 class CalibrationRequest(BaseModel):
     sensor: str

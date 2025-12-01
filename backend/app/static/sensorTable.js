@@ -76,7 +76,8 @@ function connectWebSocket() {
       const jsonData = JSON.parse(event.data);
       if (jsonData && jsonData.sensors) {
         let receivedTime = Date.now() * 0.001//performance.timeOrigin + performance.now();
-        let delay = receivedTime - (jsonData.sensors[0].timestamp);
+        let sampleTime = jsonData.sensors[0].timestamp * 0.001
+        let delay = receivedTime - sampleTime
         delayElem.textContent = `${delay.toFixed(2)} s`;//`${receivedTime}-${jsonData.sensors[0].timestamp}`// `${delay.toFixed(2)} ms`;
         updateSensorTable(jsonData.sensors);
       }

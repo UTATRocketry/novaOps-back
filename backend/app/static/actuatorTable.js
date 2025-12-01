@@ -127,7 +127,7 @@ async function fetchActuators() {
             if (actuator.type === 'servo3') {
                 // ensure backend sent a current state
                 const positions = actuator.positions || ['1', '2', '3'];  // label each port
-                actuator.valveState = actuator.valveState || positions[0]; // default to first position if not set
+                actuator.valveState = actuator.valveState || positions[1]; // default to first position if not set
                 const borderColours = { active: 'darkgreen', idle: "black" }; // border colours for each button
                 const colours   = { active: 'green', idle: 'gray' }; // lightsteelblue steelblue cornflowerblue DodgerBlue
             

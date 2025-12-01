@@ -8,7 +8,7 @@ SAVE_DATA_FLAG = False
 CALIBRATION_FLAG = True
 DATA_STORE_SIZE = 300  # maximum number of samples to store in memory
 ROLLING_WINDOW_SIZE = 100  # number of samples to use for rolling average
-RATE_WINDOW_SIZE = 100  # number of samples to use for rate of change
+RATE_WINDOW_SIZE = 50  # number of samples to use for rate of change
 test_start = datetime.now()
 file_num = 0
 file_length = 0
@@ -20,11 +20,11 @@ def new_data_file():
     date = datetime.now().strftime("%Y-%m-%d-%H")
     DATA_FILE = f"{date}_data_{file_num}.csv"
     # write the header to the file: Timestamp then each sensor name in the config
-    with open(f"logs/{DATA_FILE}", 'w') as file:
-        file.write("Timestamp,")
-        for sensor in config_parser.get_config()["sensors"].values():
-            file.write(f"{sensor['name']},")
-        file.write("\n")
+    #with open(f"logs/{DATA_FILE}", 'w') as file:
+    #    file.write("Timestamp,")
+    #    for sensor in config_parser.get_config()["sensors"].values():
+    #        file.write(f"{sensor['name']},")
+    #    file.write("\n")
     file_num += 1
     return
 
@@ -212,7 +212,8 @@ async def process_data(raw_data):
                     t0, v0 = data_store[name][0]
                     t1, v1 = data_store[name][-1]
                 else:
-                    t1, t0 = 0
+                    t1, t0, v1, v0 = 0, 0, 0, 0
+
                 # Now compute the rate
                 if t1 != t0:
                     dt = t1 - t0  # time difference in seconds
