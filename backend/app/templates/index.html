@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>NovaOps Backend GUI</title>
+  <link href="{{ url_for('static', path='/styles.css') }}" rel="stylesheet">
+</head>
+<body>
+  <h1>NovaOps Backend GUI</h1>
+  <p>This is a simple interface for interacting with the backend services.</p>
+  <button id="update-button">Update Config</button>
+  <button id="save-button">Start saving data</button>
+  <button id="download-button">Download data</button>
+  <button id="lock-button">Lock Actuators</button>
+  <button id="calibration-button">Get Uncalibrated values</button>
+  <p id="update-status"></p>
+  <p>WebSocket Status: <span id="status">Connecting...</span> Lag:<span id="delay">Measuring...</span> </p>
+  <p id="reconnect-status"></p>
+
+  <div class="tables-wrapper">
+    <div>
+      <table id="sensor-table">
+        <thead>
+          <tr><th>Sensor Name</th><th>Value</th><th>Averaged Value</th><th>Rate</th></tr><!-- -->
+        </thead>
+        <tbody id="sensor-table-body">
+          <tr><td colspan="4">Waiting for data...</td></tr>
+        </tbody>
+      </table>
+      <table id="gpio-table">
+        <thead>
+          <tr><th>GPIO Pin</th><th>State</th></tr>
+        </thead>
+        <tbody id="gpio-table-body">
+          <tr><td colspan="2">Waiting for GPIO data...</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div>
+      <table>
+        <thead>
+          <tr><th>Actuator Name</th><th>State</th></tr>
+        </thead>
+        <tbody id="actuators-table">
+          <tr><td colspan="2">Waiting for Actuators...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Scripts -->
+  <script src="{{ url_for('static', path='/main.js') }}"></script>
+  <script src="{{ url_for('static', path='/actuatorTable.js') }}"></script>
+  <script src="{{ url_for('static', path='/sensorTable.js') }}"></script>
+</body>
+</html>

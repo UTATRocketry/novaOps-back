@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <title>Sensor Data Viewer</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        table { border-collapse: collapse; width: 100%; margin-top: 20px; }
+        th, td { border: 1px solid #ddd; padding: 8px; text-align: center; }
+        th { background-color: #f2f2f2; }
+        #status { color: green; }
+        #slider-container { margin-top: 10px; }
+        #reconnect-status { color: orange; font-style: italic; }
+    </style>
+</head>
+<body>
+    <p>Status: <span id="status">Connecting...</span></p>
+    <p id="reconnect-status"></p>
+    <div id="slider-container">
+        <label for="timeWindowSlider">Averaging Sample Window: <span id="slider-window-label">20</span></label><br>
+        <input type="range" id="timeWindowSlider" min="5" max="30" value="20" step="1">
+    </div>
+    <table id="sensor-table">
+        <thead>
+            <tr>
+                <th>Sensor Name</th>
+                <th>Value</th>
+                <th>Avg (<span id="avg-window-label">2</span>s)</th>
+                <th>Rate (Δ/s over <span id="rate-window-label">2</span>s)</th>
+            </tr>
+        </thead>
+        <tbody id="sensor-table-body">
+            <tr><td colspan="2">Waiting for data...</td></tr>
+        </tbody>
+    </table>
+
+    <script>
+        const wsUrl = "ws://192.168.0.1:8000/ws_basic";
+        let socket;
+        let reconnectAttempts = 0;
+        const maxReconnectAttempts = 10;
+        const reconnectInterval = 2000;
+
+        const statusElem = document.getElementById("status");
+        const reconnectStatusElem = document.getElementById("reconnect-status");
+        const tableBody = document.getElementById("sensor-table-body");
+
+        const slider = document.getElementById("timeWindowSlider");
+        const sliderLabel = document.getElementById("slider-window-label");
+        const avgLabel = document.getElementById("avg-window-label");
+        const rateLabel = document.getElementById("rate-window-label");
+        const sensorHistory = {}; // Tracks values with timestamps
+        let AVG_TIME_WINDOW = 20; // Default value
+
+        slider.addEventListener("input", () => {
+            AVG_TIME_WINDOW = parseInt(slider.value);
+            sliderLabel.textContent = AVG_TIME_WINDOW;
+            avgLabel.textContent = AVG_TIME_WINDOW;
+            rateLabel.textContent = AVG_TIME_WINDOW;
+        });
+
+        function updateTable(sensors) {
+            const now = Date.now();
+            tableBody.innerHTML = ""; // Clear table body
+            if (!Array.isArray(sensors) || sensors.length === 0) {
+                tableBody.innerHTML = "<tr><td colspan='2'>No sensor data available.</td></tr>";
+                return;
+            }
+
+            sensors.forEach(sensor => {
+                const rawValue = parseFloat(sensor.value);
+
+                // Initialize history
+                if (!sensorHistory[sensor.name]) {
+                    sensorHistory[sensor.name] = {values:[], timestamps:[]};
+                }
+                
+                if (!isNaN(rawValue)) {
+                    // Add current value with timestamp
+                    sensorHistory[sensor.name]["values"].unshift(rawValue);
+                    sensorHistory[sensor.name]["timestamps"].unshift(sensor.timestamp);
+
+                    if (sensorHistory[sensor.name]["values"].length > AVG_TIME_WINDOW) {
+                        sensorHistory[sensor.name]["values"].pop();
+                        sensorHistory[sensor.name]["timestamps"].pop();
+                    }
+                }
+                
+                const values = sensorHistory[sensor.name]["values"];
+                const times = sensorHistory[sensor.name]["timestamps"];
+                const avg = values.reduce((sum, value) => sum + value, 0) / values.length;
+                //const roundedAverage = Math.round(average);
+
+                // Keep only the last 10 seconds of data
+                //sensorHistory[name] = sensorHistory[name].filter(entry => now - entry.time <= 10*1000);
+                //const entries = sensorHistory[name].filter(entry => now - entry.time <= AVG_TIME_WINDOW*1000);
+                //const avg = entries.reduce((sum, e) => sum + e.value, 0) / entries.length;
+
+                // Calculate rate of change (delta per second)
+                let rate = "N/A";
+                if (values.length >= 2) {
+                   const dt = (times[times.length - 1] - times[0]) / 1000;
+                   const dv = values[values.length - 1] - values[0];
+                   rate = dt > 0 ? (dv / dt).toFixed(2) : "0.00";
+                }
+                const row = document.createElement("tr");
+                row.innerHTML = `
+                  <td>${sensor.name || "Unnamed"}</td>
+                  <td>${sensor.value || "N/A"} ${sensor.unit || ""}</td>
+                  <td>${avg.toFixed(2)}</td>
+                  <td>${rate}</td>
+                `;
+                tableBody.appendChild(row);
+            });
+        }
+
+        function connectWebSocket() {
+            socket = new WebSocket(wsUrl);
+
+            socket.onopen = () => {
+                statusElem.textContent = "Connected";
+                statusElem.style.color = "green";
+                reconnectStatusElem.textContent = "";
+                reconnectAttempts = 0;
+            };
+
+            socket.onmessage = (event) => {
+                try {
+                    const jsonData = JSON.parse(event.data);
+                    if (jsonData && jsonData.sensors) {
+                        try {
+                            updateTable(jsonData.sensors);
+                        } catch (err) {
+                            console.error("Error updating table:", err);
+                            tableBody.innerHTML = "<tr><td colspan='2'>Error updating table.</td></tr>";
+                        }
+
+                    } else {
+                        tableBody.innerHTML = "<tr><td colspan='2'>Invalid data format.</td></tr>";
+                    }
+                } catch (err) {
+                    console.error("Error parsing JSON:", err);
+                    tableBody.innerHTML = "<tr><td colspan='2'>Invalid JSON received.</td></tr>";
+                }
+            };
+
+            socket.onerror = (error) => {
+                statusElem.textContent = "Error";
+                statusElem.style.color = "red";
+                console.error("WebSocket error:", error);
+            };
+
+            socket.onclose = () => {
+                statusElem.textContent = "Disconnected";
+                statusElem.style.color = "orange";
+                attemptReconnect();
+            };
+        }
+
+        function attemptReconnect() {
+            if (reconnectAttempts < maxReconnectAttempts) {
+                reconnectAttempts++;
+                reconnectStatusElem.textContent = `Reconnecting... (Attempt ${reconnectAttempts} of ${maxReconnectAttempts})`;
+                setTimeout(() => {
+                    connectWebSocket();
+                }, reconnectInterval);
+            } else {
+                reconnectStatusElem.textContent = "Failed to reconnect after multiple attempts.";
+                reconnectStatusElem.style.color = "red";
+            }
+        }
+
+        connectWebSocket();
+    </script>
+</body>
+</html>

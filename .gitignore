@@ -1,0 +1,30 @@
+.DS_Store
+
+# Virtualenv related
+bin/
+include/
+pip-selfcheck.json
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# pyenvS
+.python-version
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+venv
+
+# log files
+*.log
+
+# Ignore all files in the logs directory
+# but keep the .gitkeep file
+backend/app/logs/*
+!backend/app/logs/.gitkeep

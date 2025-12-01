@@ -1,0 +1,261 @@
+Settings: # overall settings
+- 
+
+MCCDAQ: # sensor DAC hats, Max 8 channels per hat
+- hatID: 0 # DAQ hat address
+  channelID: 0 # Channel ID on the DAQ hat, CH0H
+  name: PGSO
+  unit: psi
+  type: PT # apply different regression formula + other things based on this? 
+  calibration: [
+    [0.99,0],
+    [1.32,100],
+    [1.70,200],
+    [2.10,300],
+    [2.51,400],
+    [2.95,510],
+    [3.34,600],
+    [3.77,700],
+    [4.08,775]
+  ]
+
+
+- hatID: 0
+  channelID: 2 # CH1H
+  name: PFT
+  unit: psi
+  type: PT
+  calibration: [
+    [1.98,0],
+    [2.68,100],
+    [3.53,200],
+    [4.35,300],
+    [5.19,400],
+    [5.92,500],
+    [6.74,600],
+    [7.57,700],
+    [8.25,800]
+  ]
+
+- hatID: 1
+  channelID: 1
+  name: PVO
+  unit: psi
+  type: PT
+  calibration: [
+    [1.98,0],
+    [2.68,100],
+    [3.53,200],
+    [4.35,300],
+    [5.19,400],
+    [5.92,500],
+    [6.74,600],
+    [7.57,700],
+    [8.25,800]
+  ]
+
+- hatID: 0
+  channelID: 6 # CH3H
+  name: MOT
+  unit: kg
+  type: LC
+  calibration: [
+    [3.72,0],
+    [5.98,4.5],
+    [7.15,6.8]
+  ]
+
+- hatID: 0
+  channelID: 1 # CH0L
+  name: PGS
+  unit: psi
+  calibration: [
+    [0.99,0],
+    [1.32,100],
+    [1.71,200],
+    [2.11,300],
+    [2.52,400],
+    [2.96,510],
+    [3.34,600],
+    [3.78,700],
+    [4.10,775]
+  ]
+
+- hatID: 0
+  channelID: 3 # CH1L
+  name: POT
+  unit: psi
+  calibration: [
+    [2.01,0],
+    [2.67,100],
+    [3.43,200],
+    [4.24,300],
+    [5.04,400],
+    [5.93,510],
+    [6.69,600],
+    [7.55,700],
+    [8.17,775]
+  ]
+
+- hatID: 0
+  channelID: 5 # CH2L
+  name: PCC
+  unit: psi
+  calibration: [
+    [2.00,0],
+    [2.70,100],
+    [3.55,200],
+    [4.37,300],
+    [5.18,400],
+    [5.93,500],
+    [6.74,600],
+    [7.58,700],
+    [8.26,800]
+  ]
+
+- hatID: 0
+  channelID: 7 # CH3L
+  name: MFT
+  unit: kg
+  type: LC
+  calibration: [
+    [5.2, 2.901],
+    [5.01, 2.442],
+    [4.72, 1.945],
+    [4.45, 1.464],
+    [4.11, 0.962],
+    [3.84, 0.454],
+    [3.59, 0]
+  ]
+
+- hatID: 0
+  channelID: 4
+  name: PFM
+  unit: psi
+  calibration: [
+    [2.01, 4.00],
+    [9.14, 633],
+  ]
+
+- hatID: 1
+  channelID: 0
+  name: CC-LC
+  unit: kg
+  type: LC
+  calibration: [
+    [1.925, 0],
+    [1.995, 177.9],
+    [2.06, 355.6]
+  ]
+  
+relayBoard: # solenoid relay board - 16 channels
+- channelID: 0
+  name: BVOTP 
+  relay_type: "NO"
+  actuator_type: servo # actuator_type: solenoid, servo, poweredDevice, or poweredGpioDevice
+
+- channelID: 1 # Shared with MFV
+  name: IMC-V
+  relay_type: "NO"
+  actuator_type: poweredDevice # a device that is powered on/off by a relay
+
+- channelID: 6
+  name: IMC-G 
+  relay_type: "NO"
+  actuator_type: poweredDevice
+
+- channelID: 8
+  name: SVBVGS
+  relay_type: "NO"
+  actuator_type: solenoid
+  solenoid_type: NC
+
+- channelID: 9
+  name: SVGSD
+  relay_type: 'NO' # Whether the relay is wired normally open (NO) or normally closed (NC) when unpowered
+  actuator_type: solenoid
+  solenoid_type: "NC" # Whether the solenoid is normally open (NO) or normally closed (NC) when unpowered
+
+# - channelID: 10
+#   name: SVPP   # injector purge, newly added
+#   relay_type: "NO"
+#   actuator_type: solenoid
+#   solenoid_type: NC
+
+# - channelID: 11
+#   name: SVMOVP
+#   relay_type: "NO"
+#   actuator_type: solenoid
+#   solenoid_type: "NC"
+
+- channelID: 12
+  name: SVFTV
+  relay_type: NC
+  actuator_type: solenoid
+  solenoid_type: "NO"
+
+- channelID: 14
+  name: SVOTD
+  type: NC
+  relay_type: "NO"
+  actuator_type: solenoid
+  solenoid_type: NC
+
+- channelID: 15
+  name: SVOTV
+  relay_type: NC
+  actuator_type: solenoid
+  solenoid_type: "NO"
+
+
+PCA9685: # servo driver board - 16 channels
+- channelID: 4
+  name: BVGSD
+  states: 2 # number of states, 2 for open/close valve, 3 for 3-way valve, etc.
+  position_aliases: [open, closed] # aliases for each position
+  positions: [1300, 1900] # positions for each state
+  open_pos: 1300
+  close_pos: 1900
+  relayID: 4
+
+- channelID: 5
+  name: MFV
+  states: 2
+  open_pos: 1800
+  close_pos: 1050
+  relayID: 1
+
+- channelID: 6
+  name: BVOTP
+  states: 2
+  open_pos: 2100
+  close_pos: 1020
+  relayID: 0
+
+- channelID: 7
+  name: BVFTP
+  states: 2
+  open_pos: 2050
+  close_pos: 1090
+  relayID: 3
+
+- channelID: 8
+  name: BVGSP
+  states: 2
+  open_pos: 850
+  close_pos: 1900
+  relayID: 2
+
+- channelID: 9
+  name: BVGSO
+  states: 2
+  open_pos: 900
+  close_pos: 2000
+  relayID: 5
+
+- channelID: 10
+  name: BVOTDF #Example of a 3-way valve
+  states: 3 # number of states, 2 for open/close valve, 3 for 3-way valve, etc.
+  position_aliases: [N, F, D] # aliases for each position
+  positions: [1800, 1200, 600] # positions for each state
+  relayID: 7

@@ -1,0 +1,131 @@
+Settings: # overall settings
+- 
+
+MCCDAQ: # sensor DAC hats, Max 8 channels per hat
+- hatID: 0 # DAQ hat address
+  channelID: 0 # Channel ID on the DAQ hat, CH0H
+  name: PGSO
+  unit: psi
+  type: PT # apply different regression formula + other things based on this? 
+  offset: 0 # offset to apply to the raw value before calibration
+  scale: 1 # scale to apply to the raw value before calibration
+  min: 0 # minimum raw value
+  max: 10 # maximum raw value
+  calibration: [
+    [0, 0], # [raw value, physical value]
+    [1.8, 100] # example calibration points
+  ]
+
+- hatID: 0
+  channelID: 1 # CH1H
+  name: PFT
+  unit: psi
+  type: PT
+  calibration: [
+  ]
+
+- hatID: 0
+  channelID: 2 # CH2H
+  name: PVO
+  unit: psi
+  type: PT
+  calibration: [
+  ]
+
+- hatID: 0
+  channelID: 3 # CH3H
+  name: MOT
+  unit: kg
+  type: LC
+  calibration: [
+  ]
+
+- hatID: 0
+  channelID: 4 # CH0L
+  name: PGS
+  unit: psi
+  calibration: [
+  ]
+
+- hatID: 0
+  channelID: 5 # CH1L
+  name: POT
+  unit: psi
+  calibration: [
+  ]
+
+- hatID: 0
+  channelID: 6 # CH2L
+  name: PCC
+  unit: psi
+  calibration: [
+  ]
+
+- hatID: 0
+  channelID: 7 # CH3L
+  name: MFT
+  unit: kg
+  type: LC
+  calibration: [
+  ]
+
+# - hatID: 1
+#   channelID: 0
+#   name: MFT
+#   unit: kg
+#   type: LC
+#   calibration: [
+#   ]
+
+# - hatID: 1
+#   channelID: 1
+#   name: CC-LC
+#   unit: kg
+#   type: LC
+#   calibration: [
+#   ]
+
+# turn relay off if xyz else turn relay on
+# relay_state = 1 if (state == "open" and relay_type == "NO") or (state == "closed" and relay_type == "NC") else 0
+
+
+relayBoard: # solenoid relay board - 16 channels
+- channelID: 0
+  name: BVOTP 
+  relay_type: NO
+  actuator_type: servo
+
+- channelID: 6
+  name: IMC-G
+  relay_type: NO
+  actuator_type: device
+
+- channelID: 15
+  name: SVOTV
+  type: NC
+  relay_type: NC # Whether the relay is wired normally open (NO) or normally closed (NC) when unpowered
+  actuator_type: solenoid
+  solenoid_type: NO # Whether the solenoid is normally open (NO) or normally closed (NC) when unpowered
+
+- channelID: 14
+  name: SVOTD
+  type: NC
+  relay_type: NO
+  actuator_type: solenoid
+  solenoid_type: NC 
+
+PCA9685: # servo driver board - 16 channels
+- channelID: 5
+  name: MFV
+  states: 2 # number of states, 2 for open/close valve, 3 for 3-way valve, etc.
+  open_pos: 1800
+  close_pos: 1050
+  relayID: 1
+  
+- channelID: 10
+  name: SERVO3 # Example of a 3-way valve
+  states: 3 # 3-way valve
+  pos_1: 1800 # position for state 1
+  pos_2: 1200 # position for state 2
+  pos_3: 600 # position for state 3
+  relayID: 4

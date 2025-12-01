@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NovaOps Backend GUI</title>
+    <style>
+        iframe {
+            width: 100%;
+            height: 500px;
+            border: 1px solid #ccc;
+        }
+        #update-button { margin-top: 10px; padding: 8px 12px; font-size: 16px; cursor: pointer; }
+        #save-button { margin-top: 10px; padding: 8px 12px; font-size: 16px; cursor: pointer; }
+        #stop-button { margin-top: 10px; padding: 8px 12px; font-size: 16px; cursor: pointer; }
+    </style>
+</head>
+<body>
+    <h1>NovaOps Backend GUI</h1>
+    <p>This is a simple interface for interacting with the backend services.</p>
+    <button id="update-button" onclick="updateConfig()">Update Config</button>
+    <button id="save-button" onclick="startSaving()"> Start saving data </button>
+    <button id="stop-button" onclick="stopSaving()"> Stop saving data </button>
+    <p id="update-status"></p>
+    <div style="display: flex; gap: 20px;">
+        <div style="flex: 1;">
+            <h2>Sensor Data Viewer</h2>
+            <iframe src="http://192.168.0.1:8000/view-table" title="Sensor Data Viewer"></iframe>
+        </div>
+        <div style="flex: 1;">
+            <h2>Actuator Commands Viewer</h2>
+            <iframe src="http://192.168.0.1:8000/view-commands" title="Actuator Commands Viewer"></iframe>
+        </div>
+    </div>
+    <script>
+        const updateStatusElem = document.getElementById("update-status");
+        function updateConfig() {
+            fetch("/update_config")
+                .then(response => response.json())
+                .then(data => {
+                    updateStatusElem.textContent = data.status;
+                    updateStatusElem.style.color = "green";
+                })
+                .catch(error => {
+                    updateStatusElem.textContent = "Error updating config";
+                    updateStatusElem.style.color = "red";
+                    console.error("Update config error:", error);
+                });
+        }
+        function startSaving() {
+            fetch("/start_saving_data")
+                .then(response => response.json())
+                .then(data => {
+                    console.log("Started saving data:", data);
+                })
+                .catch(error => {
+                    console.error("Error starting saving:", error);
+                });
+        }
+        function stopSaving() {
+            fetch("/stop_saving_data")
+                .then(response => response.json())
+                .then(data => {
+                    console.log("Stopped saving data:", data);
+                })
+                .catch(error => {
+                    console.error("Error stopping saving:", error);
+                });
+            fetch("/download_data_file")
+                .then(response => {
+                    if (response.ok) {
+                        const contentDisposition = response.headers.get("Content-Disposition");
+                        let filename = "data_file.csv"; // Default filename
+                        if (contentDisposition) {
+                            const match = contentDisposition.match(/filename="?(.+)"?/);
+                            if (match && match[1]) {
+                                filename = match[1];
+                            }
+                        }
+                        return response.blob().then(blob => ({ blob, filename }));
+                    } else {
+                        throw new Error("Network response was not ok.");
+                    }
+                })
+                .then(({ blob, filename }) => {
+                    const url = window.URL.createObjectURL(blob);
+                    const a = document.createElement("a");
+                    a.style.display = "none";
+                    a.href = url;
+                    a.download = filename; // Use the filename from the server
+                    document.body.appendChild(a);
+                    a.click();
+                    window.URL.revokeObjectURL(url);
+                })
+                .catch(error => {
+                    console.error("Error downloading file:", error);
+                });
+
+        }
+    </script>            
+</body>
+</html>

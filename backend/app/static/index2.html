@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NovaOps Backend GUI</title>
+    <style>
+        iframe {
+            width: 100%;
+            height: 500px;
+            border: 1px solid #ccc;
+        }
+        table { 
+            border-collapse: collapse;
+            white-space: nowrap; /* Prevent text wrapping */
+            overflow: hidden; /* Hide overflow */
+            text-overflow: ellipsis; /* Add ellipsis for overflow text */
+            table-layout: fixed; /* Ensure fixed layout for consistent column widths */
+            /*justify-self: center;*/
+            width: 100%; /* Make table full width */
+         }
+        th,td {  border: 1px solid #ddd; text-align: center; }
+        th { padding: 8px; background-color: #f2f2f2; }
+        #sensor-table td { padding: 8px; border: 1px solid #ddd; }
+        #status { color: green; }
+        #reconnect-status { color: orange; font-style: italic; }
+        #update-button, #save-button, #lock-button, #calibration-button { 
+            margin-top: 10px; 
+            padding: 8px 12px; 
+            font-size: 16px; 
+            cursor: pointer; 
+            background-color: rgb(207, 207, 207);
+            border: #2d2c2c solid 1px;
+            border-radius: 3px;
+        }
+        #update-button:hover, #save-button:hover, #lock-button:hover, #calibration-button:hover { 
+            background-color: gray; }
+    </style>
+</head>
+<body>
+    <h1>NovaOps Backend GUI</h1>
+    <p>This is a simple interface for interacting with the backend services.</p>
+    <button id="update-button" onclick="updateConfig()">Update Config</button>
+    <button id="save-button" onclick="toggleSaving()"> Start saving data </button>
+    <button id="lock-button" onclick="toggleActuatorsLock()">Lock Actuators</button>
+    <button id="calibration-button" onclick="toggleCalibration()">Get Uncalibrated values</button>
+    <p id="update-status"></p>
+    <p>WebSocket Status: <span id="status">Connecting...</span></p>
+            <p id="reconnect-status"></p>
+    <div style="display: flex; flex-direction: row; gap: 20px;">
+        <div style="flex: 1;">
+            <!-- <h2>Sensor Data Viewer</h2> -->
+            <table id="sensor-table">
+                <thead>
+                    <tr>
+                        <th>Sensor Name</th>
+                        <th>Value</th>
+                    </tr>
+                </thead>
+                <tbody id="sensor-table-body">
+                    <tr><td colspan="2">Waiting for data...</td></tr>
+                </tbody>
+            </table>
+        </div>
+        <div style="flex: 1;">
+              <!-- <h2>Actuator Commands Viewer</h2> -->
+            <table>
+                <thead>
+                    <tr>
+                        <th>Name</th>
+                        <th>State</th>
+                    </tr>
+                </thead>
+                <tbody id="actuators-table">
+                    <!-- Actuators will be dynamically loaded here -->
+                    <tr><td colspan="2">Waiting for Actuators...</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+    <script>
+        //const updateStatusElem = document.getElementById("update-status");
+        
+        function updateConfig() {
+            fetch("/update_config")
+                .then(response => response.json())
+                .then(data => {
+                    //updateStatusElem.textContent = data.status;
+                    //updateStatusElem.style.color = "green";
+                })
+                .catch(error => {
+                   // updateStatusElem.textContent = "Error updating config";
+                    //updateStatusElem.style.color = "red";
+                    console.error("Update config error:", error);
+                });
+        }
+        let isSaving = false; // Global variable to track saving state
+        function toggleSaving() {
+            const saveButton = document.getElementById('save-button');
+            isSaving = !isSaving; // Toggle saving state
+            saveButton.textContent = isSaving ? 'Stop Saving Data' : 'Start Saving Data';
+            if (isSaving) {
+                fetch("/start_saving_data")
+                .then(response => response.json())
+                .then(data => {
+                    console.log("Started saving data:", data);
+                })
+                .catch(error => {
+                    console.error("Error starting saving:", error);
+                });
+            } else {
+                fetch("/stop_saving_data")
+                .then(response => response.json())
+                .then(data => {
+                    console.log("Stopped saving data:", data);
+                })
+                .catch(error => {
+                    console.error("Error stopping saving:", error);
+                });
+            fetch("/download_data_file")
+                .then(response => {
+                    if (response.ok) {
+                        const contentDisposition = response.headers.get("Content-Disposition");
+                        let filename = "data_file.csv"; // Default filename
+                        if (contentDisposition) {
+                            const match = contentDisposition.match(/filename="?(.+)"?/);
+                            if (match && match[1]) {
+                                filename = match[1];
+                            }
+                        }
+                        return response.blob().then(blob => ({ blob, filename }));
+                    } else {
+                        throw new Error("Network response was not ok.");
+                    }
+                })
+                .then(({ blob, filename }) => {
+                    const url = window.URL.createObjectURL(blob);
+                    const a = document.createElement("a");
+                    a.style.display = "none";
+                    a.href = url;
+                    a.download = filename; // Use the filename from the server
+                    document.body.appendChild(a);
+                    a.click();
+                    window.URL.revokeObjectURL(url);
+                })
+                .catch(error => {
+                    console.error("Error downloading file:", error);
+                });
+            }
+        }
+        let calibrationFlag = true; // Global variable to track calibration state
+        // Function to toggle calibration state
+        function toggleCalibration() {
+            const calibrationButton = document.getElementById('calibration-button');
+            calibrationFlag = !calibrationFlag; // Toggle calibration state
+            calibrationButton.textContent = calibrationFlag ? 'Get Uncalibrated Values' : 'Get Calibrated Values';
+            fetch('/toggle_calibration', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ calibration: calibrationFlag })
+            })
+            .then(response => response.json())
+            .then(data => {
+                console.log("Calibration toggled:", data);
+            })
+            .catch(error => {
+                console.error("Error toggling calibration:", error);
+            });
+        }
+        // WebSocket connection for sensor data
+        const wsUrl = "ws://192.168.0.1:8000/ws_basic";
+        let socket;
+        let reconnectAttempts = 0;
+        const maxReconnectAttempts = 10;
+        const reconnectInterval = 2000;
+
+        const statusElem = document.getElementById("status");
+        const reconnectStatusElem = document.getElementById("reconnect-status");
+        const tableBody = document.getElementById("sensor-table-body");
+
+        function updateTable(sensors, gpios) {
+            tableBody.innerHTML = ""; // Clear table body
+            if (!Array.isArray(sensors) || (sensors.length === 0 && gpios.length === 0)) {
+                tableBody.innerHTML = "<tr><td colspan='2'>No sensor data available.</td></tr>";
+                return;
+            }
+
+            sensors.forEach(sensor => {
+                const row = document.createElement("tr");
+                const nameCell = document.createElement("td");
+                const valueCell = document.createElement("td");
+
+                nameCell.textContent = sensor.name || "Unnamed";
+                nameCell.style.width = '200px'; // Set width for name column
+                nameCell.title = sensor.name; // Show full name on hover
+                valueCell.textContent = sensor.value || "N/A";
+                valueCell.style.width = '100px'; // Set width for value column
+                valueCell.title = sensor.value; // Show full value on hover
+                row.appendChild(nameCell);
+                row.appendChild(valueCell);
+                tableBody.appendChild(row);
+            });
+            gpios.forEach(gpio => {
+                const row = document.createElement("tr");
+                const nameCell = document.createElement("td");
+                const valueCell = document.createElement("td");
+
+                nameCell.textContent = gpio.name || "Unnamed GPIO";
+                nameCell.style.width = '200px'; // Set width for name column
+                nameCell.title = gpio.name; // Show full name on hover
+                valueCell.textContent = gpio.state;
+                valueCell.style.width = '100px'; // Set width for value column
+                valueCell.title = gpio.state; // Show full value on hover
+                row.appendChild(nameCell);
+                row.appendChild(valueCell);
+                tableBody.appendChild(row);
+            });
+        }
+
+        function connectWebSocket() {
+            socket = new WebSocket(wsUrl);
+
+            socket.onopen = () => {
+                statusElem.textContent = "Connected";
+                statusElem.style.color = "green";
+                reconnectStatusElem.textContent = "";
+                reconnectAttempts = 0;
+            };
+
+            socket.onmessage = (event) => {
+                try {
+                    const jsonData = JSON.parse(event.data);
+                    if (jsonData && jsonData.sensors) {
+                        updateTable(jsonData.sensors, jsonData.gpios || []);
+                    } else {
+                        tableBody.innerHTML = "<tr><td colspan='2'>Invalid data format.</td></tr>";
+                    }
+                } catch (err) {
+                    console.error("Error parsing JSON:", err);
+                    tableBody.innerHTML = "<tr><td colspan='2'>Invalid JSON received.</td></tr>";
+                }
+            };
+
+            socket.onerror = (error) => {
+                statusElem.textContent = "Error";
+                statusElem.style.color = "red";
+                console.error("WebSocket error:", error);
+            };
+
+            socket.onclose = () => {
+                statusElem.textContent = "Disconnected";
+                statusElem.style.color = "orange";
+                attemptReconnect();
+            };
+        }
+
+        function attemptReconnect() {
+            if (reconnectAttempts < maxReconnectAttempts) {
+                reconnectAttempts++;
+                reconnectStatusElem.textContent = `Reconnecting... (Attempt ${reconnectAttempts} of ${maxReconnectAttempts})`;
+                setTimeout(() => {
+                    connectWebSocket();
+                }, reconnectInterval);
+            } else {
+                reconnectStatusElem.textContent = "Failed to reconnect after multiple attempts.";
+                reconnectStatusElem.style.color = "red";
+            }
+        }
+
+        // Actuators lock functionality
+        let isLocked = false; // Global variable to track lock state
+        async function toggleActuatorsLock() {
+            const lockButton = document.getElementById('lock-button');
+            isLocked = !isLocked; // Toggle lock state
+            lockButton.textContent = isLocked ? 'Unlock Actuators' : 'Lock Actuators';
+            //lockButton.style.backgroundColor = isLocked ?  'gray' : 'lightgrey';
+        }
+        // Actuators fetching and command sending
+        async function fetchActuators() {
+            try {
+                const response = await fetch('http://192.168.0.1:8000/get_actuators', {
+                    headers: { 'Accept': 'application/json' }
+                });
+                const actuators = await response.json();
+                const tableBody = document.getElementById('actuators-table');
+                tableBody.innerHTML = '';
+
+                actuators.forEach(actuator => {
+                    // Ensure actuator has necessary properties
+                    actuator.openState = actuator.openState || "closed";
+                    actuator.powerState = actuator.powerState || 'off';
+                    actuator.armingState = actuator.armingState || 'disarmed'; 
+                    
+                    const row = document.createElement('tr');
+                    const nameCell = document.createElement('td');
+                    nameCell.style.width = '200px';
+                    nameCell.textContent = actuator.name;
+                    nameCell.title = actuator.name; // Show full name on hover
+                    row.appendChild(nameCell);
+
+                    const stateCell = document.createElement('td');
+                    stateCell.style.textAlign = 'center';
+                    //stateCell.style.display = 'flex';
+                    //stateCell.style.gap = '10px'; // Add some space between buttons
+                    stateCell.style.justifyContent = 'center';
+                    if (['servo', 'solenoid'].includes(actuator.type)) {
+                        const openButton = document.createElement('button');
+                        openButton.style.backgroundColor = actuator.openState === 'open' ? 'green' : 'red';
+                        openButton.textContent = actuator.openState === 'open' ? 'open' : 'closed';
+                        openButton.onclick = async () => {
+                            if (isLocked) {
+                                alert('Actuators are locked. Please unlock to change states.');
+                            }
+                            else if (actuator.type === 'servo' && actuator.powerState === 'off') {
+                                alert('Servo is disabled. Please enable it first.');
+                            }
+                            else {
+                                const newOpenState = actuator.openState === 'open' ? 'closed' : 'open';
+                                // sendCommand(actuator.name, actuator.type, newState);
+                                try {
+                                    await fetch('http://192.168.0.1:8000/send_command', {
+                                        method: 'POST',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({ type: actuator.type, name: actuator.name, state: newOpenState })
+                                    });
+                                    // fetchActuators(); // Refresh the table after sending the command
+                                } catch (error) {
+                                    console.error('Error sending command:', error);
+                                }
+                                actuator.openState = newOpenState; // Update the state locally
+                                openButton.style.backgroundColor = newOpenState === 'open' ? 'green' : 'red';
+                                openButton.textContent = newOpenState === 'open' ? 'open' : 'closed';
+                            }
+                        };
+                        stateCell.appendChild(openButton);
+                    }
+                    if (['gpioDevice', 'poweredGpioDevice'].includes(actuator.type)) {
+                        const armingButton = document.createElement('button');
+                        armingButton.style.backgroundColor = actuator.armingState === 'armed'  ? 'green' : 'red';
+                        armingButton.textContent = actuator.armingState === 'armed' ? 'armed' : 'disarmed';
+                        armingButton.onclick = async () => {
+                            if (isLocked) {
+                                alert('Actuators are locked. Please unlock to change states.');
+                            }
+                            else if (actuator.type === 'poweredGpioDevice' && actuator.powerState === 'off') {
+                                alert('Device is disabled. Please enable it first.');
+                            }
+                            else {
+                                const newArmingState = actuator.armingState === 'armed' ? 'disarmed' : 'armed';
+                                // sendCommand(actuator.name, actuator.type, newState);
+                                try {
+                                    await fetch('http://192.168.0.1:8000/send_command', {
+                                        method: 'POST',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({ type: actuator.type, name: actuator.name, state: newArmingState })
+                                    });
+                                    // fetchActuators(); // Refresh the table after sending the command
+                                } catch (error) {
+                                    console.error('Error sending command:', error);
+                                }
+                                actuator.armingState = newArmingState; // Update the state locally
+                                armingButton.style.backgroundColor = newArmingState === 'armed' ? 'green' : 'red';
+                                armingButton.textContent = newArmingState === 'armed' ? 'armed' : 'disarmed';
+                            }
+                        };
+                        stateCell.appendChild(armingButton);
+                    }
+
+                    if (['servo', 'poweredDevice', 'poweredGpioDevice'].includes(actuator.type)) {
+                        const powerButton = document.createElement('button');
+                        powerButton.style.backgroundColor = actuator.powerState === 'on' ? 'lightgrey' : 'gray';
+                        powerButton.textContent = actuator.powerState === 'on' ? 'enabled' : 'disabled';
+                        powerButton.onclick = async () => {
+                            if (isLocked) {
+                                alert('Actuators are locked. Please unlock to change states.');
+                            }
+                            else {
+                                const newPowerState = actuator.powerState === 'on' ? 'off' : 'on';
+                                // sendCommand(actuator.name, actuator.type, newState);
+                                try {
+                                    await fetch('http://192.168.0.1:8000/send_command', {
+                                        method: 'POST',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({ type: actuator.type, name: actuator.name, state: newPowerState })
+                                    });
+                                    // fetchActuators(); // Refresh the table after sending the command
+                                } catch (error) {
+                                    console.error('Error sending command:', error);
+                                }
+                                actuator.powerState = newPowerState; // Update the state locally
+                                powerButton.style.backgroundColor = newPowerState === 'on' ? 'lightgrey' : 'gray';
+                                powerButton.textContent = newPowerState === 'on' ? 'enabled' : 'disabled';
+                                
+                            }
+                        };
+                        stateCell.appendChild(powerButton);
+                    }
+                    row.appendChild(stateCell);
+
+                    tableBody.appendChild(row);
+                });
+            } catch (error) {
+                console.error('Error fetching actuators:', error);
+            }
+        }
+        async function sendCommand(name, type, state) {
+            try {
+                await fetch('http://192.168.0.1:8000/send_command', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ type, name, state })
+                });
+                // fetchActuators(); // Refresh the table after sending the command
+            } catch (error) {
+                console.error('Error sending command:', error);
+            }
+        }
+        
+        async function reload() {
+            try {
+                // await fetch('http://192.168.0.1:8000/close_all');
+                connectWebSocket();
+                fetchActuators();
+            }
+            catch (error) {
+                console.error('Error reloading actuators:', error);
+            }
+
+        }
+        // Load actuators on page load
+        window.onload = reload;
+    </script>            
+</body>
+</html>
