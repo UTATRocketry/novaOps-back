@@ -1,16 +1,17 @@
 import time
 import yaml
 import random
+import asyncio
 from datetime import datetime
 from data_file import data_store
 import config_parser
 import data_interface
-import command_interface
 
 fake_processed_data = {}
+raw_data = {}  # Make this global
 
 def generate_data():
-    global fake_processed_data
+    global fake_processed_data, raw_data
     #return {"dummmy":"data"}
     #new_data = {"timestamp": datetime.now().strftime("%H:%M:%S,%d-%m-%Y"), "sensors": [], "actuators":[]}
     raw_data = {"sensors": []}
@@ -71,3 +72,23 @@ async def handle_dummy_command(command):
             if actuator["name"] == command["name"]:
                 actuator["status"] = "on" if actuator["status"] == "off" else "off"
                 break"""
+
+async def publish_command(command):
+    """Replacement for mqtt.mqtt_client.publish()"""
+    print(f"Publishing command (dummy mode): {command}")
+    await handle_dummy_command(command)
+    return {"status": "Command sent (dummy mode)"}
+
+async def set_to_defaults():
+    """Replacement for mqtt.set_to_defaults()"""
+    # This should call command_interface.set_to_defaults() which will use our publish_command
+    return await command_interface.set_to_defaults()
+
+async def start_dummy_data():
+    """Background task to continuously generate data"""
+    while True:
+        generate_data()
+        # Process raw_data through data_interface like MQTT does
+        if raw_data:
+            await data_interface.process_data(raw_data)
+        await asyncio.sleep(0.1)

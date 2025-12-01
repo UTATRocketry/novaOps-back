@@ -33,7 +33,6 @@ def on_message(client, userdata, msg):
     global processed_data
     # Decode the payload from bytes to string
     payload_str = msg.payload.decode('utf-8', errors='replace').strip()
-
     # Debugging: print the raw payload
     # print(f"Received payload: {payload_str}")
     try:

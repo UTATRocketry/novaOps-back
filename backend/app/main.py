@@ -15,11 +15,11 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 from typing import List, Tuple, Optional
-import mqtt_interface as mqtt
+# import mqtt_interface as mqtt
 import config_parser
 import data_interface
-import command_interface
-import plotting
+# import command_interface
+# import plotting
 from html_generator import generate_html, new_html, calibration_html
 from auth import authenticate_user, create_access_token, get_current_user, ACCESS_TOKEN_EXPIRE_MINUTES
 import dummy_pi
@@ -94,7 +94,7 @@ async def basic_test_endpoint():
 
 @app.get("/raw_data")
 async def data_test_endpoint():
-    return {"data" : mqtt.raw_data}  
+    return {"data" : dummy_pi.raw_data}
 
 @app.post("/toggle_calibration")
 async def toggle_calibration(command: dict):
@@ -124,9 +124,10 @@ async def start_saving_data():
     data_interface.new_data_file()
     #data_interface.SAVE_DATA_FLAG = True
     data_command = {"type":"logger","action":"start_logging","filename":f"/home/admin/Desktop/novaOps-back/backend/app/logs/{data_interface.DATA_FILE}"}
-    mqtt.mqtt_client.publish(mqtt.COMMAND_TOPIC, json.dumps(data_command))
-    command_interface.new_log_file()
-    command_interface.SAVE_LOG_FLAG = True
+    # mqtt.mqtt_client.publish(mqtt.COMMAND_TOPIC, json.dumps(data_command))
+    await dummy_pi.publish_command(data_command)
+    # command_interface.new_log_file()
+    # command_interface.SAVE_LOG_FLAG = True
     return {"status": f"Saving data to {data_interface.DATA_FILE}"}
 
 
@@ -134,8 +135,9 @@ async def start_saving_data():
 async def stop_saving_data():
     #data_interface.SAVE_DATA_FLAG = False
     data_command = {"type":"logger","action":"stop_logging"}
-    mqtt.mqtt_client.publish(mqtt.COMMAND_TOPIC, json.dumps(data_command))
-    command_interface.SAVE_LOG_FLAG = False
+    # mqtt.mqtt_client.publish(mqtt.COMMAND_TOPIC, json.dumps(data_command))
+    await dummy_pi.publish_command(data_command)
+    # command_interface.SAVE_LOG_FLAG = False
     #data_interface.DATA_FILE = None
     return {"status": "Stopped saving data"}
 
@@ -263,7 +265,7 @@ async def websocket_data_endpoint(websocket: WebSocket):
     await websocket.accept()
     while True:
         #await mqtt.generate_sensor_data()
-        await websocket.send_json(mqtt.raw_data)
+        await websocket.send_json(dummy_pi.raw_data)
         await asyncio.sleep(0.1)
 
 @app.websocket("/ws_basic")
@@ -332,49 +334,50 @@ async def websocket_endpoint2(websocket: WebSocket):
         print(f"Client {user['username']} disconnected")
 
 
-@app.post("/send_command")
-async def send_command(command: dict):
-    # Servos: {"id": "1", "angle": 90}
-    # Relays: {"id": "1", "state": "0"}
-    # print(f"Received command: {command}")
-    try:
-        #command_interface.validate_command(command)  # Validate command structure
-        # Update processed data with the new actuator state
-        command_list = await command_interface.convert_command(command)  # Convert command based on config
-        for parsed_command in command_list:
-            # Publish each command to the MQTT broker
-            #mqtt.publish_command(command)
-            if parsed_command is None:
-                raise HTTPException(status_code=400, detail="Invalid command format")
-            mqtt.mqtt_client.publish(mqtt.COMMAND_TOPIC, json.dumps(parsed_command))
-            await asyncio.sleep(0.01)  # Add a small delay between commands to avoid flooding the broker
+# @app.post("/send_command")
+# async def send_command(command: dict):
+#     # Servos: {"id": "1", "angle": 90}
+#     # Relays: {"id": "1", "state": "0"}
+#     # print(f"Received command: {command}")
+#     try:
+#         #command_interface.validate_command(command)  # Validate command structure
+#         # Update processed data with the new actuator state
+#         command_list = await command_interface.convert_command(command)  # Convert command based on config
+#         for parsed_command in command_list:
+#             # Publish each command to the MQTT broker
+#             #mqtt.publish_command(command)
+#             if parsed_command is None:
+#                 raise HTTPException(status_code=400, detail="Invalid command format")
+#             # mqtt.mqtt_client.publish(mqtt.COMMAND_TOPIC, json.dumps(parsed_command))
+#             await dummy_pi.publish_command()
+#             await asyncio.sleep(0.01)  # Add a small delay between commands to avoid flooding the broker
 
-        # Update the actuator states with the new command
-        #try:
-        #    command_interface.update_actuator_state(command['name'], command['state'])
-        #except Exception as e:
-        #    print(f"Error updating actuator state: {e}")
+#         # Update the actuator states with the new command
+#         #try:
+#         #    command_interface.update_actuator_state(command['name'], command['state'])
+#         #except Exception as e:
+#         #    print(f"Error updating actuator state: {e}")
 
-        if command_interface.SAVE_LOG_FLAG:
-            command_interface.save_log(command)
-        return {"status": "Command sent"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+#         if command_interface.SAVE_LOG_FLAG:
+#             command_interface.save_log(command)
+#         return {"status": "Command sent"}
+#     except Exception as e:
+#         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/close_all")
-async def close_all_endpoint():
-    status = await command_interface.set_all_to_closed()
-    """
-    for i in range(16):
-        command = {
-            "type": "relay",
-            "id": i,
-            "state": 1
-        }
-        mqtt.mqtt_client.publish(mqtt.COMMAND_TOPIC, json.dumps(command))
-        time.sleep(0.1)  # Add a small delay between commands to avoid flooding the broker
-    """
-    return {"status": "Commands sent"}
+# @app.get("/close_all")
+# async def close_all_endpoint():
+#     status = await command_interface.set_all_to_closed()
+#     """
+#     for i in range(16):
+#         command = {
+#             "type": "relay",
+#             "id": i,
+#             "state": 1
+#         }
+#         mqtt.mqtt_client.publish(mqtt.COMMAND_TOPIC, json.dumps(command))
+#         time.sleep(0.1)  # Add a small delay between commands to avoid flooding the broker
+#     """
+#     return {"status": "Commands sent"}
     
 @app.get("/open_all")
 async def open_all_endpoint():
@@ -385,14 +388,16 @@ async def open_all_endpoint():
             "id": i,
             "state": 0
         }
-        mqtt.mqtt_client.publish(mqtt.COMMAND_TOPIC, json.dumps(command))
+        # mqtt.mqtt_client.publish(mqtt.COMMAND_TOPIC, json.dumps(command))
+        await dummy_pi.publish_command(command)
         time.sleep(0.1)  # Add a small delay between commands to avoid flooding the brokerr
     return {"status": "Commands sent"} 
 
 @app.get("/set_to_defaults")
 async def set_to_defaults_endpoint():
     try:
-        mqtt.set_to_defaults()
+        # mqtt.set_to_defaults()
+        await dummy_pi.set_to_defaults()
         return {"status": "Default commands sent"}
     except Exception as e:
         print(e)
@@ -409,37 +414,37 @@ class PlotRequest(BaseModel):
     y2_unit: Optional[str] = None
     show: Optional[bool] = False
 
-@app.post("/generate_plot")
-async def generate_plot(req: PlotRequest):
-    try:
-        plot_path = plotting.plot_from_csv(
-            csv_file=req.csv_file,
-            time_bounds=req.time_bounds,
-            y1_cols=req.y1_cols,
-            y2_cols=req.y2_cols,
-            smooth_cols=req.smooth_cols,
-            smoothing_window=req.smoothing_window,
-            y1_unit=req.y1_unit,
-            y2_unit=req.y2_unit,
-            show=req.show
-        )
-        # Option 1: Return the file directly
-        return FileResponse(plot_path, media_type="image/png", filename=os.path.basename(plot_path))
-        # Option 2: Return just the path
-        # return JSONResponse({"plot_path": plot_path})
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=400)
+# @app.post("/generate_plot")
+# async def generate_plot(req: PlotRequest):
+#     try:
+#         plot_path = plotting.plot_from_csv(
+#             csv_file=req.csv_file,
+#             time_bounds=req.time_bounds,
+#             y1_cols=req.y1_cols,
+#             y2_cols=req.y2_cols,
+#             smooth_cols=req.smooth_cols,
+#             smoothing_window=req.smoothing_window,
+#             y1_unit=req.y1_unit,
+#             y2_unit=req.y2_unit,
+#             show=req.show
+#         )
+#         # Option 1: Return the file directly
+#         return FileResponse(plot_path, media_type="image/png", filename=os.path.basename(plot_path))
+#         # Option 2: Return just the path
+#         # return JSONResponse({"plot_path": plot_path})
+#     except Exception as e:
+#         return JSONResponse({"error": str(e)}, status_code=400)
 
-@app.get("/get_csv_files")
-async def get_csv_files():
-    """
-    Get a list of all CSV files in the logs directory.
-    """
-    try:
-        csv_files = [f for f in os.listdir("logs") if f.endswith(".csv")]
-        return {"csv_files": plotting.get_csv_data()}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+# @app.get("/get_csv_files")
+# async def get_csv_files():
+#     """
+#     Get a list of all CSV files in the logs directory.
+#     """
+#     try:
+#         csv_files = [f for f in os.listdir("logs") if f.endswith(".csv")]
+#         return {"csv_files": plotting.get_csv_data()}
+#     except Exception as e:
+#         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/get_plot_files")
 async def get_plot_files():
@@ -484,6 +489,16 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
         data={"sub": user['username']}, expires_delta=access_token_expires
     )
     return {"access_token": access_token, "token_type": "bearer"}
+
+
+# Start dummy data generation
+@app.on_event("startup")
+async def startup_event():
+    """Initialize background tasks when the server starts"""
+    if FAKE_DATA_FLAG:
+        # Start a background task for dummy generation
+        asyncio.create_task(dummy_pi.start_dummy_data())
+        print("Started dummy data generation")
 
 
 if __name__ == "__main__":
