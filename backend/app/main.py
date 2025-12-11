@@ -273,9 +273,14 @@ async def websocket_basic_endpoint(websocket: WebSocket):
     await websocket.accept()
     try:
         while True:
+            # This happens every ≤0.11 seconds
+            # We know that raw data is rewriting every time ==> processed_data current ==> ws_data current
             #await mqtt.generate_sensor_data()
             ws_data = data_interface.format_for_ws()
-            await websocket.send_json(ws_data)
+            await websocket.send_json(ws_data)  # ≤ few ms (systematic delay)
+            # Since ws_data is getting the latest stuff every time
+            # send json takes a few ms
+            # Get Latest data [few ms] Send. Every 0.1 second. Normal behaviour
             await asyncio.sleep(0.1)
     except WebSocketDisconnect:
         print(f"Client disconnected")
