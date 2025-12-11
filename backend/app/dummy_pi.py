@@ -97,4 +97,4 @@ async def start_dummy_data():
         if raw_data:
             # Therefore processed_data gets updated every ~0.001 seconds
             await data_interface.process_data(raw_data)
-        await asyncio.sleep(0.001)
+        await asyncio.sleep(0.1)
