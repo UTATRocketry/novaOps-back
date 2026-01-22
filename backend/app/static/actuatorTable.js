@@ -1,3 +1,4 @@
+const BASE_URL = window.APP_CONFIG?.BASE_URL || "http://localhost:8000";
 
 const lockButton = document.getElementById('lock-button');
 lockButton.onclick = toggleActuatorsLock;
@@ -9,7 +10,7 @@ function toggleActuatorsLock() {
 }
 async function fetchActuators() {
     try {
-        const response = await fetch('http://192.168.0.1:8000/get_actuators', {
+        const response = await fetch(`${BASE_URL}/get_actuators`, {
             headers: { 'Accept': 'application/json' }
         });
         const actuators = await response.json();
@@ -52,7 +53,7 @@ async function fetchActuators() {
                         const newOpenState = actuator.openState === 'open' ? 'closed' : 'open';
                         // sendCommand(actuator.name, actuator.type, newState);
                         try {
-                            const response = await fetch('http://192.168.0.1:8000/send_command', {
+                            const response = await fetch(`${BASE_URL}/send_command`, {
                                 method: 'POST',
                                 headers: { 'Content-Type': 'application/json' },
                                 body: JSON.stringify({ type: actuator.type, name: actuator.name, state: newOpenState })
@@ -97,7 +98,7 @@ async function fetchActuators() {
                         const newArmingState = actuator.armingState === 'armed' ? 'disarmed' : 'armed';
                         // sendCommand(actuator.name, actuator.type, newState);
                         try {
-                            const response = await fetch('http://192.168.0.1:8000/send_command', {
+                            const response = await fetch(`${BASE_URL}/send_command`, {
                                 method: 'POST',
                                 headers: { 'Content-Type': 'application/json' },
                                 body: JSON.stringify({ type: actuator.type, name: actuator.name, state: newArmingState })
@@ -151,7 +152,7 @@ async function fetchActuators() {
                     }
             
                     try {
-                        const response = await fetch('http://192.168.0.1:8000/send_command', {
+                        const response = await fetch(`${BASE_URL}/send_command`, {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify({
@@ -202,7 +203,7 @@ async function fetchActuators() {
                         const newPowerState = actuator.powerState === 'on' ? 'off' : 'on';
                         // sendCommand(actuator.name, actuator.type, newState);
                         try {
-                            const response = await fetch('http://192.168.0.1:8000/send_command', {
+                            const response = await fetch(`${BASE_URL}/send_command`, {
                                 method: 'POST',
                                 headers: { 'Content-Type': 'application/json' },
                                 body: JSON.stringify({ type: actuator.type, name: actuator.name, state: newPowerState })
@@ -237,7 +238,7 @@ async function fetchActuators() {
 }
 async function sendCommand(name, type, state) {
     try {
-        const response = await fetch('http://192.168.0.1:8000/send_command', {
+        const response = await fetch(`${BASE_URL}/send_command`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ type, name, state })

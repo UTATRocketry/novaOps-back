@@ -21,6 +21,7 @@
         #json-data-button:hover { 
             background-color: gray; }
     </style>
+    <script src="/static/config.js"></script>
 </head>
 <body>
     <p>Status: <span id="status">Connecting...</span></p>
@@ -30,7 +31,7 @@
     <script>
         let isMqttData = false;
         let wsEndpoint = isMqttData ? "ws_raw_data": "ws_basic";
-        let wsUrl = `ws://192.168.0.1:8000/${wsEndpoint}`;
+        let wsUrl = `${window.APP_CONFIG?.WS_URL || "ws://192.168.0.1:8000"}/${wsEndpoint}`;
 
         let socket;
         let reconnectAttempts = 0;
@@ -48,7 +49,7 @@
             isMqttData = !isMqttData;
             btn.textContent = isMqttData ? "Get Backend Data" : "Get MQTT Data";
             wsEndpoint = isMqttData ? "ws_raw_data": "ws_basic";
-            wsUrl = `ws://192.168.0.1:8000/${wsEndpoint}`;
+            let wsUrl = `${window.APP_CONFIG?.WS_URL || "ws://192.168.0.1:8000"}/${wsEndpoint}`;
         }
 
         function connectWebSocket() {

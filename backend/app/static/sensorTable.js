@@ -1,4 +1,6 @@
-const wsUrl = "ws://192.168.0.1:8000/ws_basic";
+const WS_URL = window.APP_CONFIG?.WS_URL || "ws://localhost:8000";
+
+const wsUrl = `${WS_URL}/ws_basic`;
 let socket;
 let reconnectAttempts = 0;
 const maxReconnectAttempts = 10;
