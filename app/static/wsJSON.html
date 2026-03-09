@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebSocket JSON Viewer</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        pre { background: #f4f4f4; border: 1px solid #ddd; padding: 10px; overflow-x: auto; }
+        #status { color: green; }
+        #reconnect-status { color: orange; font-style: italic; }
+    </style>
+    <script src="/static/config.js"></script>
+</head>
+<body>
+    <p>Status: <span id="status">Connecting...</span></p>
+    <p id="reconnect-status"></p>
+    <pre id="json-data">Waiting for data...</pre>
+    <script>
+        const wsBase = window.APP_CONFIG?.WS_URL || `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}`;
+        const wsUrl = `${wsBase}/ws?role=viewer`;
+
+        let socket;
+        let reconnectAttempts = 0;
+        const maxReconnectAttempts = 10;
+        const reconnectInterval = 2000;
+
+        const statusElem = document.getElementById("status");
+        const dataElem = document.getElementById("json-data");
+        const reconnectStatusElem = document.getElementById("reconnect-status");
+
+        function connectWebSocket() {
+            socket = new WebSocket(wsUrl);
+
+            socket.onopen = () => {
+                statusElem.textContent = "Connected";
+                statusElem.style.color = "green";
+                reconnectStatusElem.textContent = "";
+                reconnectAttempts = 0;
+            };
+
+            socket.onmessage = (event) => {
+                try {
+                    const jsonData = JSON.parse(event.data);
+                    dataElem.textContent = JSON.stringify(jsonData, null, 2);
+                } catch (err) {
+                    console.error("Error parsing JSON:", err);
+                    dataElem.textContent = "Invalid JSON received.";
+                }
+            };
+
+            socket.onerror = (error) => {
+                statusElem.textContent = "Error";
+                statusElem.style.color = "red";
+                console.error("WebSocket error:", error);
+            };
+
+            socket.onclose = () => {
+                statusElem.textContent = "Disconnected";
+                statusElem.style.color = "orange";
+                attemptReconnect();
+            };
+        }
+
+        function attemptReconnect() {
+            if (reconnectAttempts < maxReconnectAttempts) {
+                reconnectAttempts++;
+                reconnectStatusElem.textContent = `Reconnecting... (Attempt ${reconnectAttempts} of ${maxReconnectAttempts})`;
+                setTimeout(connectWebSocket, reconnectInterval);
+            } else {
+                reconnectStatusElem.textContent = "Failed to reconnect after multiple attempts.";
+                reconnectStatusElem.style.color = "red";
+            }
+        }
+
+        connectWebSocket();
+    </script>
+</body>
+</html>
