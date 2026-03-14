@@ -1,16 +1,18 @@
 version: '3.3'
 
 services:
-  backend:
+  novaops-backend:
     build:
-      context: ./backend
+      context: .
       dockerfile: Dockerfile
+    container_name: novaops-backend
     restart: unless-stopped
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
       - "8000:8000"
-    volumes:
-      - ./backend/app:/app
+    environment:
+      NOVA_MQTT_BROKER: host.docker.internal
+      NOVA_MQTT_PORT: "1883"
     environment:
       - PYTHONPATH=/app

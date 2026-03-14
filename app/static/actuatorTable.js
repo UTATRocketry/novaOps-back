@@ -23,6 +23,10 @@ function isGpioType(type) {
   return type === "gpioDevice" || type === "poweredGpioDevice";
 }
 
+function needsEnableButton(actuator) {
+  return isServoType(actuator.actuator_type);
+}
+
 function hasRelayPower(actuator) {
   return actuator.relayID !== null && actuator.relayID !== undefined;
 }
@@ -70,7 +74,8 @@ function defaultUiState(actuator) {
     openState: supportsOpenClose(actuator) ? openClose.closed : null,
     powerState: needsPowerButton(actuator) ? "off" : null,
     armingState: isGpioType(actuator.actuator_type) ? "disarmed" : null,
-    positionState: aliases.length > 0 ? aliases[0] : null
+    positionState: aliases.length > 0 ? aliases[0] : null,
+    enableState: needsEnableButton(actuator) ? "disabled" : null
   };
 }
 
@@ -98,6 +103,14 @@ function syncUiStateWithConfig(actuators) {
 function applyStateUpdate(actuator, stateValue) {
   if (!actuator || !stateValue) return;
 
+  if (typeof stateValue === "object") {
+    const { power, enable, arming, position } = stateValue;
+    if (power) applyStateUpdate(actuator, power);
+    if (enable) applyStateUpdate(actuator, enable);
+    if (arming) applyStateUpdate(actuator, arming);
+    if (position) applyStateUpdate(actuator, position);
+    return;
+  }
   const state = String(stateValue);
   const lower = state.toLowerCase();
   const ui = ensureUiState(actuator);
@@ -105,6 +118,13 @@ function applyStateUpdate(actuator, stateValue) {
   if (lower === "on" || lower === "off") {
     if (ui.powerState !== null) {
       ui.powerState = lower;
+    }
+    return;
+  }
+
+  if (lower === "enable" || lower === "enabled" || lower === "disable" || lower === "disabled") {
+    if (ui.enableState !== null) {
+      ui.enableState = lower === "enable" || lower === "enabled" ? "enabled" : "disabled";
     }
     return;
   }
@@ -153,7 +173,8 @@ async function sendCommand(actuator, state) {
   }
 }
 
-async function onStateAction(actuator, nextState, requiresPower = false) {
+async function onStateAction(actuator, nextState, options = {}) {
+  const { requiresPower = false, requiresEnable = false } = options;
   if (isLocked) {
     alert("Actuators are locked. Please unlock to change states.");
     return;
@@ -161,7 +182,11 @@ async function onStateAction(actuator, nextState, requiresPower = false) {
 
   const ui = ensureUiState(actuator);
   if (requiresPower && ui.powerState === "off") {
-    alert("Device is disabled. Please enable it first.");
+    alert("Device power is off. Please turn it on first.");
+    return;
+  }
+  if (requiresEnable && ui.enableState === "disabled") {
+    alert("Servo is disabled. Please enable PWM first.");
     return;
   }
 
@@ -206,7 +231,10 @@ function renderActuators(actuators) {
       const openCloseBtn = document.createElement("button");
       openCloseBtn.textContent = isOpen ? open : closed;
       setButtonStyle(openCloseBtn, isOpen, "green", "darkgreen", "red", "darkred");
-      openCloseBtn.onclick = () => onStateAction(actuator, isOpen ? closed : open, isServoType(actuator.actuator_type));
+      openCloseBtn.onclick = () => onStateAction(actuator, isOpen ? closed : open, {
+        requiresEnable: isServoType(actuator.actuator_type),
+        requiresPower: isServoType(actuator.actuator_type) && needsPowerButton(actuator)
+      });
       stateCell.appendChild(openCloseBtn);
     }
 
@@ -218,10 +246,21 @@ function renderActuators(actuators) {
           const active = ui.positionState === alias;
           btn.textContent = alias;
           setButtonStyle(btn, active, "green", "darkgreen", "gray", "black");
-          btn.onclick = () => onStateAction(actuator, alias, true);
+          btn.onclick = () => onStateAction(actuator, alias, {
+            requiresEnable: true,
+            requiresPower: needsPowerButton(actuator)
+          });
           stateCell.appendChild(btn);
         });
       }
+      const enabled = ui.enableState === "enabled";
+      const enableBtn = document.createElement("button");
+      enableBtn.textContent = enabled ? "enabled" : "disabled";
+      setButtonStyle(enableBtn, enabled, "#5d7cb8", "#1f3257", "gray", "black");
+      enableBtn.onclick = () => onStateAction(actuator, enabled ? "disable" : "enable",{
+        requiresPower: needsPowerButton(actuator)
+      });
+      stateCell.appendChild(enableBtn);
     }
 
     if (isGpioType(actuator.actuator_type)) {
@@ -229,15 +268,17 @@ function renderActuators(actuators) {
       const armBtn = document.createElement("button");
       armBtn.textContent = armed ? "armed" : "disarmed";
       setButtonStyle(armBtn, armed, "green", "darkgreen", "red", "darkred");
-      armBtn.onclick = () => onStateAction(actuator, armed ? "disarmed" : "armed", actuator.actuator_type === "poweredGpioDevice");
+      armBtn.onclick = () => onStateAction(actuator, armed ? "disarmed" : "armed", {
+        requiresPower: actuator.actuator_type === "poweredGpioDevice"
+      });
       stateCell.appendChild(armBtn);
     }
 
     if (needsPowerButton(actuator)) {
       const enabled = ui.powerState === "on";
       const powerBtn = document.createElement("button");
-      powerBtn.textContent = enabled ? "enabled" : "disabled";
-      setButtonStyle(powerBtn, enabled, "#5d7cb8", "#1f3257", "gray", "black");
+      powerBtn.textContent = enabled ? "on" : "off";
+      setButtonStyle(powerBtn, enabled, "green", "darkgreen", "red", "darkred");
       powerBtn.onclick = () => onStateAction(actuator, enabled ? "off" : "on");
       stateCell.appendChild(powerBtn);
     }
@@ -280,3 +321,5 @@ window.addEventListener("nova:actuator_states", (event) => {
 fetchActuators();
 
 })();
+
+

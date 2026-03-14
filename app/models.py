@@ -3,7 +3,7 @@
 from enum import Enum
 from typing import Any
 
-from pydantic import AliasChoices, BaseModel, Field, model_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 
 
 class ActuatorType(str, Enum):
@@ -31,6 +31,7 @@ class ActuatorConfig(BaseModel):
     relay_id: int | None = Field(default=None, validation_alias=AliasChoices("relayID", "relayId", "relay_id"), serialization_alias="relayID")
     position_aliases: list[str] = Field(default_factory=list)
     positions: list[int] = Field(default_factory=list)
+    default_position: str | int | None = Field(default=None, validation_alias=AliasChoices("default_position", "defaultPosition"), serialization_alias="defaultPosition")
 
     @model_validator(mode="before")
     @classmethod
@@ -39,15 +40,21 @@ class ActuatorConfig(BaseModel):
             return data
 
         normalized = dict(data)
+        actuator_type_hint = str(
+            normalized.get("actuator_type", normalized.get("actuatorType", ""))
+        ).strip().lower()
+
+        if "solenoid_type" not in normalized:
+            if "solenoidType" in normalized:
+                normalized["solenoid_type"] = normalized["solenoidType"]
+            elif actuator_type_hint == "solenoid" and "type" in normalized:
+                normalized["solenoid_type"] = normalized["type"]
 
         if "relay_type" not in normalized:
             if "relayType" in normalized:
                 normalized["relay_type"] = normalized["relayType"]
             elif "type" in normalized:
                 normalized["relay_type"] = normalized["type"]
-
-        if "solenoid_type" not in normalized and "solenoidType" in normalized:
-            normalized["solenoid_type"] = normalized["solenoidType"]
 
         if "position_aliases" not in normalized and "positionAliases" in normalized:
             normalized["position_aliases"] = normalized["positionAliases"]
@@ -114,13 +121,29 @@ class SystemConfig(BaseModel):
 
 
 class FlagPayload(BaseModel):
-    enabled: bool
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {"enabled": True}
+        }
+    )
+
+    enabled: bool = Field(description="Boolean flag value")
 
 
 class CommandPayload(BaseModel):
-    type: str
-    name: str
-    state: str
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "type": "solenoid",
+                "name": "SVOTV",
+                "state": "open"
+            }
+        }
+    )
+
+    type: str = Field(description="Frontend actuator type label")
+    name: str = Field(description="Actuator name from config")
+    state: str = Field(description="Requested state (e.g., open/closed/on/off/alias)")
 
 
 class IncomingSensorPacket(BaseModel):

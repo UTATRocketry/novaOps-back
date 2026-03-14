@@ -181,8 +181,7 @@ relayBoard: # solenoid relay board - 16 channels
 - channelID: 11
   name: TANKHEAT
   relay_type: "NO"
-  actuator_type: solenoid
-  solenoid_type: "NC"
+  actuator_type: poweredDevice
 
 - channelID: 12
   name: MOV
@@ -193,8 +192,7 @@ relayBoard: # solenoid relay board - 16 channels
 - channelID: 13
   name: TANKHEATPWR
   relay_type: "NO"
-  actuator_type: solenoid
-  solenoid_type: "NC"
+  actuator_type: poweredDevice
 
 #- channelID: 14
  # name: SVOTD
@@ -214,50 +212,47 @@ PCA9685: # servo driver board - 16 channels
 - channelID: 3
   name: BVOTFD #Example of a 3-way valve
   states: 3 # number of states, 2 for open/close valve, 3 for 3-way valve, etc.
-  position_aliases: [F, N, D] # aliases for each position
-  positions: [500, 1500, 2500] # positions for each state
+  position_aliases: [F, N, D]
+  positions: [500, 1500, 2500]
+  defaultPosition: "N"
   relayID: 7
 
 - channelID: 4
   name: BVGSD
   states: 2 # number of states, 2 for open/close valve, 3 for 3-way valve, etc.
-  position_aliases: [open, closed] # aliases for each position
-  positions: [1300, 1900] # positions for each state
+  position_aliases: [open, closed]
+  positions: [1300, 1900]
+  defaultPosition: "closed"
   relayID: 4
 
 - channelID: 5
   name: MFV
   states: 2
-  position_aliases: [open, closed] # aliases for each position
-  positions: [1800, 1050] # positions for each state
+  position_aliases: [open, closed]
+  positions: [1800, 1050]
+  defaultPosition: "closed"
   relayID: 1
 
 - channelID: 6
   name: BVOTP
   states: 2
-  position_aliases: [open, closed] # aliases for each position
-  positions: [1980, 980] # positions for each state
+  position_aliases: [open, closed]
+  positions: [1980, 980]
+  defaultPosition: "closed"
   relayID: 0
 
 - channelID: 7
   name: BVFTP
   states: 2
-  position_aliases: [open, closed] # aliases for each position
-  positions: [2050, 1090] # positions for each state
+  position_aliases: [open, closed]
+  positions: [2050, 1090]
+  defaultPosition: "closed"
   relayID: 3
 
 - channelID: 8
   name: BVGSO
   states: 2
-  position_aliases: [open, closed] # aliases for each position
-  positions: [900, 1900] # positions for each stateS
+  position_aliases: [open, closed] 
+  positions: [900, 1900]
+  defaultPosition: "closed"
   relayID: 2
-
-#- channelID: 9
-#  name: BVGSO
-#  states: 2
-#  position_aliases: [open, closed] # aliases for each position
-#  positions: [900, 1900] # positions for each state
-#  open_pos: 900
-#  close_pos: 1900
-#  relayID: 5

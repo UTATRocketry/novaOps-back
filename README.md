@@ -1,5 +1,5 @@
-
 # NovaOps Backend
+
 ## Overview
 TBD
 
@@ -7,37 +7,92 @@ TBD
 ```bash
 /novaOps
 │
-├── backend/
-│   └── app/
-│       ├── __init__.py            # Marks this directory as a Python package
-│       ├── main.py                # Main application entry point for FastAPI
-│       ├── auth.py                # Handles authentication using OAuth2 and JWT tokens
-│       ├── data_file.py           # Stores mock sensor and actuator data used in the system
-│       ├── html_generator.py      # Temporary generator for the HTML for the sensor and actuator dashboard
-├── docker-compose.yml              # Defines services and configurations for running Docker containers
+├── app/
+│   ├── 
+│   └── static/
+├── config/
 ├── Dockerfile                      # Docker instructions for building the FastAPI app image
 └── README.md                       # This README file
 ```
 
+
+## Features
+
+- MQTT subscribe/publish integration
+- WebSocket channel for parsed sensor data and actuator states
+- Config-driven sensor and actuator parsing
+- Linear interpolation calibration and rolling average
+- REST API for config, flags, data files, sensors, and actuators
+- Logging to console and rotating file logs
+- Unit tests for parsing and command translation
+
+
 ## Important Notes
 
-1. The `html_generator.py` file is currently used as a small simple ui for backend testing but it will be replaced soon
 
-2. The server is not currently connected to any ground hardware so the `dummy_pi.py` file randomly generates new data and changes the actuator status in the data file. This will eventually be replaced by the MQTT hardware interface. 
+## API Summary
+
+- `GET /api/actuators`
+- `GET /api/sensors`
+- `GET /api/config`
+- `POST /api/config/upload`
+- `PUT /api/config`
+- `PATCH /api/config`
+- `POST /api/config/reload`
+- `POST /api/flags/calibration`
+- `POST /api/flags/data-saving`
+- `GET /api/data-files`
+- `GET /api/data-files/{file_name}`
+- `POST /api/commands`
+- `WS /ws?role=operator|pad|viewer|dev`
+
+## MQTT
+
+Environment variables:
+
+- `NOVA_MQTT_BROKER` (default `localhost`)
+- `NOVA_MQTT_PORT` (default `1883`)
+
+Topics:
+
+- Subscribe: `nova/telemetry`
+- Publish commands: `nova/commands`
+- Publish controls: `nova/control`
 
 ## Requirements
-
 To run this project, you will need Docker and Docker Compose installed on your machine. Installation guides for Docker can be found [here](https://docs.docker.com/get-docker/) and for Docker Compose [here](https://docs.docker.com/compose/install/).
 
-
 ## Running the Application
-
 1. **Clone the Repository:**
    ```bash
    git clone https://github.com/UTATRocketry/novaOps-back.git
    cd /path/to/novaOps-back
    git checkout fastapi_server
    ```
+
+### Without Docker
+Broker values:
+- `localhost` (or `local`)
+- `hivemq` (maps to `broker.hivemq.com`)
+- any custom host string
+
+2. **Run the dev scripts**
+#### Linux
+
+```bash
+bash scripts/run_dev_linux.sh --broker localhost
+bash scripts/run_dev_linux.sh --broker hivemq --with-dummy
+```
+
+#### Windows (PowerShell)
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/run_dev_windows.ps1 -Broker localhost
+powershell -ExecutionPolicy Bypass -File scripts/run_dev_windows.ps1 -Broker hivemq -WithDummy
+```
+
+
+### With Docker
 
 2. **Build and Run the Docker Containers:**
    ```bash
@@ -52,6 +107,7 @@ To run this project, you will need Docker and Docker Compose installed on your m
     ```
 4. **Stopping the Application:**
    To stop the application, use CTRL+C in the original terminal where you started the app or run `sudo docker-compose stop` in a second terminal within the novaOps-back directory.
+
 
 ## To setup a Raspberry Pi with the Config Scripts
 1. **Clone the Repository:**

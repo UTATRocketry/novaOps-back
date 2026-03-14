@@ -1,4 +1,5 @@
 **/__pycache__
+**/.pytest_cache/
 **/.venv
 **/.classpath
 **/.dockerignore
@@ -25,3 +26,5 @@
 **/values.dev.yaml
 LICENSE
 README.md
+logs/
+data/

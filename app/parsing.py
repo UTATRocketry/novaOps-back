@@ -8,7 +8,7 @@ from app.models import ActuatorConfig, ActuatorType, CommandPayload, SensorConfi
 
 
 def linear_interpolate(raw_value: float, points: list[tuple[float, float]], degree: int = 1) -> float:
-    calibration_points = np.array(calibration_points)
+    calibration_points = np.array(points)
     voltages, readings = calibration_points[:, 0], calibration_points[:, 1]
     m, b = np.polyfit(voltages, readings, degree)
     return m*raw_value + b
@@ -114,7 +114,6 @@ class CommandParser:
         else:
             power_on = CommandParser._is_on_state(state_lower)
 
-        # 1 for nominal relay state
         return 0 if ((power_on and relay_type_value == "NO") or ((not power_on) and relay_type_value == "NC")) else 1
 
     def _find_actuator(self, name: str) -> ActuatorConfig:
@@ -127,19 +126,23 @@ class CommandParser:
         actuator = self._find_actuator(payload.name)
         state = payload.state.strip()
         state_lower = state.lower()
+        
+        if actuator.name == "BVOTP": # temporary fix
+            actuator.relay_id = 0
 
         if actuator.actuator_type in self.RELAY_TYPES:
             relay_state = self._resolve_relay_state(state, actuator.relay_type, actuator.solenoid_type)
             command_type = "gpio" if actuator.actuator_type == ActuatorType.POWERED_GPIO_DEVICE else "relay"
             return [{"type": command_type, "id": actuator.channel_id, "state": relay_state}]
-
         if actuator.actuator_type in {ActuatorType.SERVO, ActuatorType.SERVO3}:
+            if state_lower in {"enable", "disable"}:
+                angle_state = "on" if state_lower == "enable" else "off"
+                return [{"type": "servo", "id": actuator.channel_id, "angle": angle_state}]
             if state_lower in {"on", "off"}:
                 if actuator.relay_id is None:
-                    actuator.relay_id = 0
-                    #raise ValueError(
-                    #    f"Servo '{payload.name}' does not define relayID, so state '{payload.state}' is invalid"
-                    #)
+                    raise ValueError(
+                        f"Servo '{payload.name}' does not define relayID, so state '{payload.state}' is invalid"
+                    )
                 relay_state = self._resolve_relay_state(state_lower, actuator.relay_type, None)
                 return [{"type": "relay", "id": int(actuator.relay_id), "state": relay_state}]
 
@@ -160,3 +163,4 @@ class CommandParser:
             return [{"type": "servo", "id": actuator.channel_id, "angle": int(angle)}]
 
         raise ValueError(f"Unsupported actuator type: {actuator.actuator_type}")
+

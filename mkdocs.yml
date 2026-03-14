@@ -1,0 +1,4 @@
+﻿site_name: NovaOps Backend
+nav:
+  - Home: index.md
+  - Backend Services: backend-services.md

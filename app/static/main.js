@@ -27,7 +27,7 @@
       setAssignedRole(detail.role);
     }
   });
-  
+
   let purgeState = "closed";
   if (purgeBtn) {
     purgeBtn.onclick = togglePurge;
@@ -35,7 +35,10 @@
 
     window.addEventListener("nova:actuator_states", (event) => {
       const states = event.detail || {};
-      const state = states.BVOTP;
+      const rawState = states.BVOTP;
+      if (!rawState) return;
+
+      const state = typeof rawState === "object" ? (rawState.position || rawState.state) : rawState;
       if (!state) return;
 
       const normalized = String(state).toLowerCase();
@@ -156,3 +159,4 @@
     }
   }
 })();
+
