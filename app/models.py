@@ -19,7 +19,7 @@ class SensorConfig(BaseModel):
     channel_id: int = Field(validation_alias=AliasChoices("channelID", "channelId", "channel_id"), serialization_alias="channelID")
     name: str
     unit: str = ""
-    calibration: list[tuple[float, float]] = Field(default_factory=list)
+    calibration: list[tuple[float, float]] | None = None
 
 
 class ActuatorConfig(BaseModel):

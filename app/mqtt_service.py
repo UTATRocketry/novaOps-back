@@ -66,8 +66,8 @@ class MqttService:
             return
 
         for command in commands:
-            #payload = {"source": "novaOps", "command": command}
-            payload = command
+            payload = {"source": "novaOps", "command": command}
+            #payload = command
             self._publish_json(self._command_topic, payload, label="device-command")
 
     def publish_data_saving(self, enabled: bool) -> None:
@@ -75,13 +75,16 @@ class MqttService:
             LOGGER.warning("MQTT unavailable, skipping data-saving publish enabled=%s", enabled)
             return
         
-        payload: dict[str, object] = {
-            "type": "logger",
-            "action": "start_logging" if enabled else "stop_logging",
+        command: dict[str, object] = {
+            "type": "data_file",
+            "action": "start_data_saving" if enabled else "stop_data_saving",
         }
 
         if enabled:
-            payload["filename"] = self._new_data_file()
+            command["filename"] = self._new_data_file()
+
+        payload = {"source": "novaOps", "command": command}
+        #payload = command
 
         self._publish_json(self._command_topic, payload, label="data-saving")
         if self._control_topic != self._command_topic:
@@ -93,7 +96,8 @@ class MqttService:
 
     def _new_data_file(self) -> str:
         date = datetime.now().strftime("%Y-%m-%d-%H")
-        self._data_file = f"{DATA_PATH}/{date}_data_{self._file_num}.csv"
+        #self._data_file = f"{DATA_PATH}/{date}_data_{self._file_num}.csv"
+        self._data_file = f"{date}_data_{self._file_num}"
         self._file_num += 1
         return self._data_file
 

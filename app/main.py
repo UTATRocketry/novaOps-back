@@ -118,7 +118,7 @@ def create_app() -> FastAPI:
 
     mqtt_service = MqttService(
         sensor_topic="nova/telemetry",
-        command_topic="nova/commands",
+        command_topic="nova/command",
         control_topic="nova/control",
         on_sensor_message=on_sensor_message,
     )
@@ -284,6 +284,17 @@ def create_app() -> FastAPI:
         if not file_path.exists() or file_path.suffix.lower() != ".csv":
             raise HTTPException(status_code=404, detail="CSV file not found")
         return FileResponse(file_path)
+
+    @app.post("/api/data-files/upload", tags=["Data"], summary="Upload data file", description="Upload a datafile.")
+    async def upload_data_file(file: UploadFile = File(...)) -> dict:
+        file_name = Path(file.filename or "").name
+        if not file_name:
+            raise HTTPException(status_code=400, detail="File name is required")
+
+        payload = await file.read()
+        target_path = data_dir / file_name
+        target_path.write_bytes(payload)
+        return {"file_name": file_name, "bytes_written": len(payload)}
 
     @app.post("/api/commands", tags=["Commands"], summary="Send actuator command", description="Translate and publish a client actuator command over MQTT.")
     async def post_command(payload: CommandPayload) -> dict:

@@ -7,11 +7,17 @@ import numpy as np
 from app.models import ActuatorConfig, ActuatorType, CommandPayload, SensorConfig, SystemConfig
 
 
-def linear_interpolate(raw_value: float, points: list[tuple[float, float]], degree: int = 1) -> float:
-    calibration_points = np.array(points)
+def linear_interpolate(raw_value: float, points: list[tuple[float, float]] | None, degree: int = 1) -> float:
+    if not points or len(points) <= degree:
+        return raw_value
+
+    calibration_points = np.asarray(points, dtype=float)
+    if calibration_points.ndim != 2 or calibration_points.shape[1] != 2:
+        raise ValueError("Calibration must be a list of [voltage, reading] pairs.")
+
     voltages, readings = calibration_points[:, 0], calibration_points[:, 1]
     m, b = np.polyfit(voltages, readings, degree)
-    return m*raw_value + b
+    return m * raw_value + b
 
 
 @dataclass
@@ -24,14 +30,14 @@ class ParsedSensor:
 
 
 class RollingAverageStore:
-    def __init__(self, window_size: int = 5) -> None:
+    def __init__(self, window_size: int = 100) -> None:
         self._window_size = window_size
         self._values: dict[str, deque[float]] = defaultdict(lambda: deque(maxlen=self._window_size))
 
     def add(self, key: str, value: float) -> float:
         bucket = self._values[key]
         bucket.append(value)
-        return sum(bucket) / len(bucket)
+        return np.mean(np.array(bucket))
 
 
 class SensorParser:

@@ -56,7 +56,7 @@ Environment variables:
 Topics:
 
 - Subscribe: `nova/telemetry`
-- Publish commands: `nova/commands`
+- Publish commands: `nova/command`
 - Publish controls: `nova/control`
 
 ## Requirements
