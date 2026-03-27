@@ -80,15 +80,15 @@ Broker values:
 #### Linux
 
 ```bash
-bash scripts/run_dev_linux.sh --broker localhost
-bash scripts/run_dev_linux.sh --broker hivemq --with-dummy
+bash scripts/dev_linux.sh --broker localhost
+bash scripts/dev_linux.sh --broker hivemq --with-dummy
 ```
 
 #### Windows (PowerShell)
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/run_dev_windows.ps1 -Broker localhost
-powershell -ExecutionPolicy Bypass -File scripts/run_dev_windows.ps1 -Broker hivemq -WithDummy
+powershell -ExecutionPolicy Bypass -File scripts/dev_windows.ps1 -Broker localhost
+powershell -ExecutionPolicy Bypass -File scripts/dev_windows.ps1 -Broker hivemq -WithDummy
 ```
 
 

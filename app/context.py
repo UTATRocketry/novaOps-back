@@ -23,7 +23,7 @@ class AppContext:
 
         self.mqtt_service = MqttService(
             sensor_topic="nova/telemetry",
-            command_topic="nova/commands",
+            command_topic="nova/command",
             control_topic="nova/control",
             on_sensor_message=self._on_sensor_message,
         )

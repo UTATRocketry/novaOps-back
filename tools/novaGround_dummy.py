@@ -59,6 +59,7 @@ def main():
         while True:
 
             payload = {
+                "source":"novaGround",
                 "sensors": generate_sensor_data(),
                 #"gpios": generate_gpio_data()
             }

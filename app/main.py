@@ -106,7 +106,6 @@ def create_app() -> FastAPI:
 
         message = {
             "type": "parsed_data",
-            "source": source,
             "sensors": runtime.latest_sensors,
         }
 

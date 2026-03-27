@@ -7,7 +7,7 @@ WITH_DUMMY="false"
 
 print_help() {
   cat <<'EOF'
-Usage: ./scripts/run_dev_linux.sh [options]
+Usage: ./scripts/dev_linux.sh [options]
 
 Options:
   --broker <localhost|hivemq|host>  MQTT broker host (default: localhost)

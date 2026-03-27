@@ -21,15 +21,14 @@ then
 	
 	
     # Start programs
-    tmux send-keys -t 'Main' 'mosquitto_sub -h localhost -t novaground/command' C-m
+    tmux send-keys -t 'Main' 'mosquitto_sub -h localhost -t nova/command' C-m
     
     tmux send-keys -t 'novaOps-back' 'cd novaOps-back' C-m
     #tmux send-keys -t 'novaOps-back' 'sudo docker-compose up --build' C-m
     #tmux send-keys -t 'novaOps-back' 'sudo systemctl stop docker' C-m
-    #tmux send-keys -t 'novaOps-back' 'source .venv/bin/activate' C-m
-    #tmux send-keys -t 'novaOps-back' 'python -m uvicorn app.main:app --reload --host 0.0.0.0' C-m
+    tmux send-keys -t 'novaOps-back' 'bash scripts/dev_linux.sh --broker localhost' C-m
 
-    tmux send-keys -t 'novaGround' 'cd novaground' C-m
+    tmux send-keys -t 'novaGround' 'cd novaGround' C-m
     tmux send-keys -t 'novaGround' './build/novaGround' C-m
 
     tmux send-keys -t 'novaOps-front' 'cd novaOps-front' C-m
