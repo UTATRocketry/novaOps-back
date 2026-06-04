@@ -430,7 +430,7 @@ def _build_uart_sensor_row(name, value, unit, timestamp):
         value = 0
 
     if timestamp is None:
-        timestamp = datetime.now().timestamp()
+        timestamp = int(datetime.now().timestamp() * 1000)
 
     try:
         numeric_value = float(value)
