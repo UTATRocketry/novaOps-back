@@ -166,7 +166,11 @@ def get_rolling_average(sensor_name):
 
 def get_rolling_rate(sensor_name):
     hist = data_store[sensor_name]
-    n    = len(hist)
+    hist = [
+        (t, v) for t, v in hist
+        if t is not None
+    ]
+    n = len(hist)
 
     if n >= RATE_WINDOW_SIZE:
         t0, v0 = hist[0]
@@ -424,6 +428,9 @@ def _replace_uart_rows_for_prefix(prefix, rows):
 def _build_uart_sensor_row(name, value, unit, timestamp):
     if value is None:
         value = 0
+
+    if timestamp is None:
+        timestamp = datetime.now().timestamp()
 
     try:
         numeric_value = float(value)
