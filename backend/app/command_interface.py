@@ -88,6 +88,9 @@ def initialize_actuator_states():
 async def validate_command(command):
     if not isinstance(command, dict):
         raise ValueError("Command must be a dictionary.")
+    if command.get("type") == "uart":
+        validate_uart_command(command)
+        return True
     if "type" not in command or "name" not in command or "state" not in command:
         raise ValueError("Command must contain 'type', 'name', and 'state' keys.")
     #if command["type"] not in ["solenoid", "servo", "poweredDevice", "gpioDevice", "poweredGpioDevice"]:
@@ -118,6 +121,9 @@ async def convert_command(command):
     Convert and send command values based on config.yml values.
     """
     # print(f"Received command: {command}")
+    if command.get("type") == "uart":
+        return [validate_uart_command(command)]
+
     config = config_parser.get_config()  # Load the configuration
     command_type = command["type"]
     name = command["name"]
@@ -292,6 +298,38 @@ async def convert_command(command):
         return mqtt_commands
     else:
         raise ValueError(f"Invalid command type '{command_type}'.")
+
+
+def validate_uart_command(command):
+    """Validate and normalize UART commands before publishing to novaGround."""
+    target = int(command.get("target", 0))
+    cmd_id = int(command.get("cmd_id", 0))
+    opcode = int(command.get("opcode", 0))
+    args = command.get("args", [])
+
+    if target not in (4, 5, 6, 7):
+        raise ValueError("UART target must be one of EPB1..EPB4.")
+    if cmd_id < 0 or cmd_id > 0xFFFFFFFF:
+        raise ValueError("UART cmd_id must fit in uint32.")
+    if opcode < 0 or opcode > 0xFFFF:
+        raise ValueError("UART opcode must fit in uint16.")
+    if not isinstance(args, list):
+        raise ValueError("UART args must be a list.")
+
+    normalized_args = []
+    for arg in args:
+        byte = int(arg)
+        if byte < 0 or byte > 0xFF:
+            raise ValueError("UART args entries must be bytes.")
+        normalized_args.append(byte)
+
+    return {
+        "type": "uart",
+        "target": target,
+        "cmd_id": cmd_id,
+        "opcode": opcode,
+        "args": normalized_args,
+    }
 
     
 async def set_all_to_closed():
