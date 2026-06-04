@@ -40,6 +40,17 @@ FMC_SCALAR_FIELDS = {
     "temp_pwr": "C",
 }
 
+CAN_NODE_NAMES = {
+    2: "FMC",
+    3: "PMB",
+    4: "EPB1",
+    5: "EPB2",
+    6: "EPB3",
+    7: "EPB4",
+}
+
+UART_SENSOR_PREFIXES = ("FMC ", "EPB1 ", "EPB2 ", "EPB3 ", "EPB4 ", "PMB ")
+
 def new_data_file():
     global file_num, DATA_FILE
     date = datetime.now().strftime("%Y-%m-%d-%H")
@@ -258,10 +269,7 @@ async def process_data(raw_data):
                     "unit": sensor_info.get("unit", ""),
                     "timestamp": timestamp,
                 })
-    uart_sensors = [
-        sensor for sensor in processed_data.get("sensors", [])
-        if sensor.get("name", "").startswith("FMC ")
-    ]
+    uart_sensors = _current_uart_sensor_rows()
     processed_data["sensors"] = sensor_data + uart_sensors
     if SAVE_DATA_FLAG:
         save_data(processed_data["sensors"])  # Save the processed data to a file
@@ -284,9 +292,18 @@ async def process_uart_data(raw_data):
         processed_data["uart_error"] = frame
         return
 
-    if msg_name != "telem" or frame.get("telem_schema") != "fmc_snapshot_v1":
+    if msg_name != "telem":
         return
 
+    if frame.get("telem_schema") == "fmc_snapshot_v1":
+        _process_fmc_telem(decoded)
+        return
+
+    if frame.get("telem_schema") == "can_bridge":
+        _process_can_bridge_telem(frame)
+        return
+
+def _process_fmc_telem(decoded):
     timestamp = decoded.get("timestamp_ms")
     uart_sensor_data = []
 
@@ -304,11 +321,105 @@ async def process_uart_data(raw_data):
         value = decoded.get(field)
         uart_sensor_data.append(_build_uart_sensor_row(name, value, unit, timestamp))
 
-    regular_sensors = [
-        sensor for sensor in processed_data.get("sensors", [])
-        if not sensor.get("name", "").startswith("FMC ")
-    ]
+    regular_sensors = _current_non_uart_sensor_rows()
     processed_data["sensors"] = regular_sensors + uart_sensor_data
+
+def _process_can_bridge_telem(frame):
+    payload = frame.get("payload", [])
+    if len(payload) < 3:
+        return
+
+    sender = frame.get("sender", payload[0])
+    telem_len = frame.get("telem_len", payload[2])
+    can_payload = payload[3:3 + telem_len]
+    node_name = CAN_NODE_NAMES.get(sender, f"node_{sender}")
+
+    processed_data.setdefault("uart_decoded", {})
+
+    if sender in (4, 5, 6, 7):
+        decoded = _decode_epb_telem(can_payload)
+        processed_data["uart_decoded"][node_name] = decoded
+        _replace_uart_rows_for_prefix(node_name, [
+            _build_uart_sensor_row(f"{node_name} pressure_one", decoded.get("pressure_one_kpa"), "kPa", None),
+            _build_uart_sensor_row(f"{node_name} pressure_two", decoded.get("pressure_two_kpa"), "kPa", None),
+            _build_uart_sensor_row(f"{node_name} act_cmd_mask", decoded.get("act_cmd_mask"), "", None),
+            _build_uart_sensor_row(f"{node_name} act_ok_mask", decoded.get("act_ok_mask"), "", None),
+            _build_uart_sensor_row(f"{node_name} board_temp", decoded.get("board_temp_cC", 0) / 100.0, "C", None),
+        ])
+        return
+
+    if sender == 3:
+        decoded = _decode_pmb_telem(can_payload)
+        processed_data["uart_decoded"][node_name] = decoded
+        _replace_uart_rows_for_prefix(node_name, [
+            _build_uart_sensor_row(f"{node_name} voltage_batt", decoded.get("voltage_batt"), "V", None),
+            _build_uart_sensor_row(f"{node_name} voltage_24v", decoded.get("voltage_24v"), "V", None),
+            _build_uart_sensor_row(f"{node_name} voltage_8v4", decoded.get("voltage_8v4"), "V", None),
+            _build_uart_sensor_row(f"{node_name} voltage_egse", decoded.get("voltage_egse"), "V", None),
+            _build_uart_sensor_row(f"{node_name} tempboost", decoded.get("tempboost_C"), "C", None),
+            _build_uart_sensor_row(f"{node_name} tempbuck", decoded.get("tempbuck_C"), "C", None),
+            _build_uart_sensor_row(f"{node_name} tempamb", decoded.get("tempamb_C"), "C", None),
+            _build_uart_sensor_row(f"{node_name} current_8v4", decoded.get("current_8v4"), "A", None),
+            _build_uart_sensor_row(f"{node_name} current_24v", decoded.get("current_24v"), "A", None),
+        ])
+
+def _decode_epb_telem(payload):
+    if len(payload) < 10:
+        return {"decode_error": "short_epb_telem", "raw": payload}
+    return {
+        "sender": payload[0],
+        "pressure_one_kpa": _u16_le(payload, 1),
+        "pressure_two_kpa": _u16_le(payload, 3),
+        "act_cmd_mask": payload[5],
+        "act_ok_mask": _u16_le(payload, 6),
+        "board_temp_cC": _u16_le(payload, 8),
+    }
+
+def _decode_pmb_telem(payload):
+    if len(payload) < 37:
+        return {"decode_error": "short_pmb_telem", "raw": payload}
+    return {
+        "sender": payload[0],
+        "voltage_batt": _f32_le(payload, 1),
+        "voltage_24v": _f32_le(payload, 5),
+        "voltage_8v4": _f32_le(payload, 9),
+        "voltage_egse": _f32_le(payload, 13),
+        "tempboost_C": _f32_le(payload, 17),
+        "tempbuck_C": _f32_le(payload, 21),
+        "tempamb_C": _f32_le(payload, 25),
+        "current_8v4": _f32_le(payload, 29),
+        "current_24v": _f32_le(payload, 33),
+    }
+
+def _u16_le(payload, offset):
+    return int(payload[offset]) | (int(payload[offset + 1]) << 8)
+
+def _f32_le(payload, offset):
+    import struct
+    return struct.unpack("<f", bytes(payload[offset:offset + 4]))[0]
+
+def _is_uart_sensor_row(sensor):
+    name = sensor.get("name", "")
+    return name.startswith(UART_SENSOR_PREFIXES)
+
+def _current_uart_sensor_rows():
+    return [
+        sensor for sensor in processed_data.get("sensors", [])
+        if _is_uart_sensor_row(sensor)
+    ]
+
+def _current_non_uart_sensor_rows():
+    return [
+        sensor for sensor in processed_data.get("sensors", [])
+        if not _is_uart_sensor_row(sensor)
+    ]
+
+def _replace_uart_rows_for_prefix(prefix, rows):
+    existing = [
+        sensor for sensor in processed_data.get("sensors", [])
+        if not sensor.get("name", "").startswith(f"{prefix} ")
+    ]
+    processed_data["sensors"] = existing + rows
 
 def _build_uart_sensor_row(name, value, unit, timestamp):
     if value is None:

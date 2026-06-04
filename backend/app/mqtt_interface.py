@@ -14,7 +14,7 @@ DATA_TOPIC = "novaground/telemetry"
 COMMAND_TOPIC = "novaground/command"
 UART_TOPIC = "novaground/uart"
 
-raw_data = {}
+raw_data = {"telemetry": {}, "uart": {}}
 raw_uart_data = {}
 processed_data = {"sensors": [], "actuators": [], "gpios": []}
 data_store = []
@@ -51,12 +51,10 @@ def on_message(client, userdata, msg):
             if isinstance(payload, dict):
                 if msg.topic == UART_TOPIC:
                     raw_uart_data = payload
-                    if not isinstance(raw_data, dict):
-                        raw_data = {}
                     raw_data["uart"] = payload
                     asyncio.run(data_interface.process_uart_data(payload))
                 else:
-                    raw_data = payload
+                    raw_data["telemetry"] = payload
                     asyncio.run(data_interface.process_data(payload))
             else:
                 print("Received payload is not a valid dictionary")
