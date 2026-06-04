@@ -1,14 +1,15 @@
 import paho.mqtt.client as mqtt
 from fastapi import HTTPException
 import json
+import os
 from datetime import datetime
 import asyncio
 import time
 import config_parser
 import data_interface
 
-MQTT_BROKER = "host.docker.internal" # use broker.hivemq.com for testing on PCs
-MQTT_PORT = 1883 # TCP Port
+MQTT_BROKER = os.getenv("MQTT_BROKER", "host.docker.internal") # use broker.hivemq.com for testing on PCs
+MQTT_PORT = int(os.getenv("MQTT_PORT", "1883")) # TCP Port
 DATA_TOPIC = "novaground/telemetry"
 COMMAND_TOPIC = "novaground/command"
 UART_TOPIC = "novaground/uart"
@@ -22,6 +23,7 @@ processed_gpios = []
 
 # MQTT client setup
 mqtt_client = mqtt.Client()
+mqtt_client.reconnect_delay_set(min_delay=1, max_delay=30)
 
 def on_connect(client, userdata, flags, rc):
     if rc == 0:
@@ -67,9 +69,12 @@ def on_message(client, userdata, msg):
 
 mqtt_client.on_connect = on_connect
 mqtt_client.on_message = on_message
-mqtt_client.connect(MQTT_BROKER, MQTT_PORT)
+try:
+    mqtt_client.connect_async(MQTT_BROKER, MQTT_PORT)
+except Exception as e:
+    print(f"MQTT initial connection setup failed: {e}")
 
-# Start the MQTT loop
+# Start the MQTT loop. connect_async will retry in the background.
 mqtt_client.loop_start()
 
 async def process_mqtt_message(payload):

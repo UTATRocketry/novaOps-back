@@ -19,7 +19,10 @@ import mqtt_interface as mqtt
 import config_parser
 import data_interface
 import command_interface
-import plotting
+try:
+    import plotting
+except ImportError:
+    plotting = None
 from html_generator import generate_html, new_html, calibration_html
 from auth import authenticate_user, create_access_token, get_current_user, ACCESS_TOKEN_EXPIRE_MINUTES
 import dummy_pi
@@ -411,6 +414,8 @@ class PlotRequest(BaseModel):
 
 @app.post("/generate_plot")
 async def generate_plot(req: PlotRequest):
+    if plotting is None:
+        raise HTTPException(status_code=503, detail="Plotting module is unavailable")
     try:
         plot_path = plotting.plot_from_csv(
             csv_file=req.csv_file,
@@ -437,6 +442,8 @@ async def get_csv_files():
     """
     try:
         csv_files = [f for f in os.listdir("logs") if f.endswith(".csv")]
+        if plotting is None:
+            return {"csv_files": csv_files}
         return {"csv_files": plotting.get_csv_data()}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
