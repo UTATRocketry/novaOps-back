@@ -11,8 +11,10 @@ MQTT_BROKER = "host.docker.internal" # use broker.hivemq.com for testing on PCs
 MQTT_PORT = 1883 # TCP Port
 DATA_TOPIC = "novaground/telemetry"
 COMMAND_TOPIC = "novaground/command"
+UART_TOPIC = "novaground/uart"
 
 raw_data = {}
+raw_uart_data = {}
 processed_data = {"sensors": [], "actuators": [], "gpios": []}
 data_store = []
 processed_gpios = []
@@ -25,11 +27,13 @@ def on_connect(client, userdata, flags, rc):
     if rc == 0:
         print("Connected to MQTT broker")
         client.subscribe(DATA_TOPIC)
+        client.subscribe(UART_TOPIC)
     else:
         print("Failed to connect to MQTT broker")
 
 def on_message(client, userdata, msg):
     global raw_data
+    global raw_uart_data
     global processed_data
     # Decode the payload from bytes to string
     payload_str = msg.payload.decode('utf-8', errors='replace').strip()
@@ -39,11 +43,19 @@ def on_message(client, userdata, msg):
     try:
         # Check if the payload is non-empty before attempting to decode as JSON
         if payload_str:
-            raw_data = json.loads(payload_str)  # Attempt to decode the payload into JSON
+            payload = json.loads(payload_str)  # Attempt to decode the payload into JSON
             # print(f"Decoded data: {data}"
             # Make sure payload is a dictionary before using it in the process
-            if isinstance(raw_data, dict):
-                asyncio.run(data_interface.process_data(raw_data))
+            if isinstance(payload, dict):
+                if msg.topic == UART_TOPIC:
+                    raw_uart_data = payload
+                    if not isinstance(raw_data, dict):
+                        raw_data = {}
+                    raw_data["uart"] = payload
+                    asyncio.run(data_interface.process_uart_data(payload))
+                else:
+                    raw_data = payload
+                    asyncio.run(data_interface.process_data(payload))
             else:
                 print("Received payload is not a valid dictionary")
         else:

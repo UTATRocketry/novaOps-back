@@ -12,8 +12,33 @@ RATE_WINDOW_SIZE = 50  # number of samples to use for rate of change
 test_start = datetime.now()
 file_num = 0
 file_length = 0
-processed_data = {"sensors": []} #"gpios": []
+processed_data = {"sensors": [], "uart": {}} #"gpios": []
 data_store = {}
+
+FMC_VECTOR_FIELDS = {
+    "accel": "m/s^2",
+    "imu_accel": "m/s^2",
+    "imu_gyro": "deg/s",
+    "mag": "",
+}
+
+FMC_SCALAR_FIELDS = {
+    "baro_temp": "C",
+    "baro_pressure": "Pa",
+    "baro_altitude": "m",
+    "gps_latitude": "deg",
+    "gps_longitude": "deg",
+    "gps_altitude": "m",
+    "gps_speed": "m/s",
+    "gps_course": "deg",
+    "gps_sats": "",
+    "gps_fix": "",
+    "gps_hour": "",
+    "gps_minute": "",
+    "gps_second": "",
+    "temp_h7": "C",
+    "temp_pwr": "C",
+}
 
 def new_data_file():
     global file_num, DATA_FILE
@@ -233,6 +258,82 @@ async def process_data(raw_data):
                     "unit": sensor_info.get("unit", ""),
                     "timestamp": timestamp,
                 })
-    processed_data["sensors"] = sensor_data
+    uart_sensors = [
+        sensor for sensor in processed_data.get("sensors", [])
+        if sensor.get("name", "").startswith("FMC ")
+    ]
+    processed_data["sensors"] = sensor_data + uart_sensors
     if SAVE_DATA_FLAG:
         save_data(processed_data["sensors"])  # Save the processed data to a file
+
+async def process_uart_data(raw_data):
+    """Process decoded UART frames published by novaGround."""
+    global processed_data, data_store
+
+    frame = raw_data.get("frame", {})
+    processed_data["uart"] = frame
+
+    msg_name = frame.get("msg_name")
+    decoded = frame.get("decoded", {})
+
+    if msg_name == "ack":
+        processed_data["uart_ack"] = decoded
+        return
+
+    if msg_name == "err":
+        processed_data["uart_error"] = frame
+        return
+
+    if msg_name != "telem" or frame.get("telem_schema") != "fmc_snapshot_v1":
+        return
+
+    timestamp = decoded.get("timestamp_ms")
+    uart_sensor_data = []
+
+    for field, unit in FMC_VECTOR_FIELDS.items():
+        vector = decoded.get(field)
+        if not isinstance(vector, dict):
+            continue
+        for axis in ["x", "y", "z"]:
+            name = f"FMC {field} {axis}"
+            value = vector.get(axis)
+            uart_sensor_data.append(_build_uart_sensor_row(name, value, unit, timestamp))
+
+    for field, unit in FMC_SCALAR_FIELDS.items():
+        name = f"FMC {field}"
+        value = decoded.get(field)
+        uart_sensor_data.append(_build_uart_sensor_row(name, value, unit, timestamp))
+
+    regular_sensors = [
+        sensor for sensor in processed_data.get("sensors", [])
+        if not sensor.get("name", "").startswith("FMC ")
+    ]
+    processed_data["sensors"] = regular_sensors + uart_sensor_data
+
+def _build_uart_sensor_row(name, value, unit, timestamp):
+    if value is None:
+        value = 0
+
+    try:
+        numeric_value = float(value)
+    except (TypeError, ValueError):
+        numeric_value = 0.0
+
+    if name not in data_store:
+        data_store[name] = []
+
+    data_store[name].append((timestamp, numeric_value))
+    if len(data_store[name]) > ROLLING_WINDOW_SIZE:
+        data_store[name].pop(0)
+
+    rolling_values = [v for _, v in data_store[name]]
+    avg_value = np.mean(rolling_values) if rolling_values else float("nan")
+
+    return {
+        "name": name,
+        "value": f"{round(numeric_value, 2)}",
+        "avg": f"{round(avg_value, 2)}",
+        "rate": get_rolling_rate(name),
+        "unit": unit,
+        "timestamp": timestamp,
+    }
