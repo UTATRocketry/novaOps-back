@@ -1,258 +1,317 @@
-﻿# 3/8/2026
-Settings: # overall settings
-- 
-
-MCCDAQ: # sensor DAC hats, Max 8 channels per hat
-- hatID: 0 # DAQ hat address
-  channelID: 0 # Channel ID on the DAQ hat, CH0H
-  name: PGSO
-  unit: psi
-  type: PT # apply different regression formula + other things based on this? 
-  calibration: [
-    [0.99,0],
-    [1.32,100],
-    [1.70,200],
-    [2.10,300],
-    [2.51,400],
-    [2.95,510],
-    [3.34,600],
-    [3.77,700],
-    [4.08,775]
-  ]
 
 
-- hatID: 0
-  channelID: 2 # CH2H
-  name: PFT
-  unit: psi
-  type: PT
-  calibration: [
-    [1.98,0],
-    [2.68,100],
-    [3.53,200],
-    [4.35,300],
-    [5.19,400],
-    [5.92,500],
-    [6.74,600],
-    [7.57,700],
-    [8.25,800]
-  ]
+Sensors:
+  - name: PGSO
+    type: PT
+    unit: psi
+    binding:
+      source: GCS
+      hat_id: 0
+      channel_id: 0
+    convert:
+      method: linear
+      calibration: [
+        [0.99,0],
+        [1.32,100],
+        [1.70,200],
+        [2.10,300],
+        [2.51,400],
+        [2.95,510],
+        [3.34,600],
+        [3.77,700],
+        [4.08,775]
+      ]
+  - name: PGS
+    type: PT
+    unit: psi
+    binding:
+      source: GCS
+      hat_id: 0
+      channel_id: 1
+    convert:
+      method: linear
+      calibration: [
+        [0.99,0],
+        [1.32,100],
+        [1.70,200],
+        [2.10,300],
+        [2.51,400],
+        [2.95,510],
+        [3.34,600],
+        [3.77,700],
+        [4.08,775]
+      ]
+  - name: MOT
+    type: LC
+    unit: kg
+    binding:
+      source: GCS
+      hat_id: 0
+      channel_id: 2
+    convert:
+      method: linear
+      calibration: [
+        [5.2, 2.901],
+        [5.01, 2.442],
+        [4.72, 1.945],
+        [4.45, 1.464],
+        [4.11, 0.962],
+        [3.84, 0.454],
+        [3.59, 0]
+      ]
+  - name: MFT
+    type: LC
+    unit: kg
+    binding:
+      source: GCS
+      hat_id: 0
+      channel_id: 7
+    convert:
+      method: linear
+      calibration: [
+        [5.2, 2.901],
+        [5.01, 2.442],
+        [4.72, 1.945],
+        [4.45, 1.464],
+        [4.11, 0.962],
+        [3.84, 0.454],
+        [3.59, 0]
+      ]
+  - name: CC-LC
+    type: LC
+    unit: kg
+    binding:
+      source: GCS
+      hat_id: 1
+      channel_id: 5
+    convert:
+      method: linear
+      calibration: [
+        [1.925, 0],
+        [1.995, 177.9],
+        [2.06, 355.6]
+      ]
 
-- hatID: 1
-  channelID: 4
-  name: PVO
-  unit: psi
-  type: PT
-  calibration: [
-    [1.98,0],
-    [2.68,100],
-    [3.53,200],
-    [4.35,300],
-    [5.19,400],
-    [5.92,500],
-    [6.74,600],
-    [7.57,700],
-    [8.25,800]
-  ]
+  - name: TOT
+    type: TC
+    unit: degC
+    binding:
+      source: TCS # thermocouple system
+      hat_id: 0
+      channel_id: 0
+    convert:
+      method: none
 
-- hatID: 0
-  channelID: 6 # CH3H
-  name: MOT
-  unit: kg
-  type: LC
-  calibration: [
-    [3.72,0],
-    [5.98,4.5],
-    [7.15,6.8]
-  ]
+  - name: PFT
+    type: PT
+    unit: psi
+    binding:
+      source: FAS
+      node: EPB_1
+      channel: 1
+    convert:
+      method: linear
+      calibration: [ [1, 1],]
 
-- hatID: 0
-  channelID: 1 # CH0L
-  name: PGS
-  unit: psi
-  calibration: [
-    [0.99,0],
-    [1.32,100],
-    [1.71,200],
-    [2.11,300],
-    [2.52,400],
-    [2.96,510],
-    [3.34,600],
-    [3.78,700],
-    [4.10,775]
-  ]
+  - name: POT
+    type: PT
+    unit: psi
+    binding:
+      source: FAS
+      node: EPB_2
+      channel: 1
+    convert:
+      method: linear
+      calibration: [ [1, 1],]
 
-- hatID: 0
-  channelID: 3 # CH1L
-  name: POT
-  unit: psi
-  calibration: [
-    [2.01,0],
-    [2.67,100],
-    [3.43,200],
-    [4.24,300],
-    [5.04,400],
-    [5.93,510],
-    [6.69,600],
-    [7.55,700],
-    [8.17,775]
-  ]
+  - name: PCC
+    type: PT
+    unit: psi
+    binding:
+      source: FAS
+      node: EPB_3
+      channel: 1
+    convert:
+      method: linear
+      calibration: [ [1, 1],]
 
-- hatID: 0
-  channelID: 5 # CH2L
-  name: PCC
-  unit: psi
-  calibration: [
-    [2.00,0],
-    [2.70,100],
-    [3.55,200],
-    [4.37,300],
-    [5.18,400],
-    [5.93,500],
-    [6.74,600],
-    [7.58,700],
-    [8.26,800]
-  ]
-
-- hatID: 0
-  channelID: 7 # CH3L
-  name: MFT
-  unit: kg
-  type: LC
-  calibration: [
-    [5.2, 2.901],
-    [5.01, 2.442],
-    [4.72, 1.945],
-    [4.45, 1.464],
-    [4.11, 0.962],
-    [3.84, 0.454],
-    [3.59, 0]
-  ]
-
-- hatID: 0
-  channelID: 4
-  name: PFM
-  unit: psi
-  calibration: [
-    [2.01, 4.00],
-    [9.14, 633],
-  ]
-
-- hatID: 1
-  channelID: 5
-  name: CC-LC
-  unit: kg
-  type: LC
-  calibration: [
-    [1.925, 0],
-    [1.995, 177.9],
-    [2.06, 355.6]
-  ]
-  
-relayBoard: # solenoid relay board - 16 channels
-- channelID: 1 # Shared with MFV
-  name: IMC-V
-  relay_type: "NO"
-  actuator_type: poweredDevice # a device that is powered on/off by a relay
-
-- channelID: 6
-  name: IMC-G 
-  relay_type: "NO"
-  actuator_type: poweredDevice
-
-- channelID: 8
-  name: SVBVGS
-  relay_type: "NO"
-  actuator_type: solenoid
-  solenoid_type: NC
-
-- channelID: 9
-  name: SVGSD
-  relay_type: 'NO' # Whether the relay is wired normally open (NO) or normally closed (NC) when unpowered
-  actuator_type: solenoid
-  solenoid_type: "NC" # Whether the solenoid is normally open (NO) or normally closed (NC) when unpowered
-
-- channelID: 10
-  name: SVPP   # injector purge, newly added
-  relay_type: "NO"
-  actuator_type: solenoid
-  solenoid_type: NC
-
-- channelID: 11
-  name: TANKHEAT
-  relay_type: "NO"
-  actuator_type: poweredDevice
-
-- channelID: 12
-  name: MOV
-  relay_type: "NO"
-  actuator_type: solenoid
-  solenoid_type: "NC"
-
-- channelID: 13
-  name: TANKHEATPWR
-  relay_type: "NO"
-  actuator_type: poweredDevice
-
-#- channelID: 14
- # name: SVOTD
- # type: NC
- # relay_type: "NO"
- # actuator_type: solenoid
- # solenoid_type: NC
-
-- channelID: 15
-  name: SVOTV
-  relay_type: NC
-  actuator_type: solenoid
-  solenoid_type: "NO"
+Actuators:
+  - name: BVGSO
+    type: servo
+    binding:
+      target: GCS
+      relay_channel: 2 # optional for servos
+      servo_channel: 8
+    actions:
+      position_aliases: [open, closed] 
+      positions: [900, 1900]
+      defaultPosition: "closed"
+  - name: BVGSD
+    type: servo
+    binding:
+      target: GCS
+      relay_channel: 4
+      servo_channel: 4
+    actions:
+      position_aliases: [open, closed] 
+      positions: [1300, 1900]
+      defaultPosition: "closed"
+  - name: SVBVGS
+    type: solenoid
+    binding:
+      target: GCS
+      relay_channel: 8
+    actions:
+      relay_type: "nominally_off"
+      solenoid_type: "nominally_closed"
+  - name: SVGSD
+    type: solenoid
+    binding:
+      target: GCS
+      relay_channel: 9
+    actions:
+      relay_type: "nominally_off"
+      solenoid_type: "nominally_closed"
+  - name: SVPP
+    type: solenoid
+    binding:
+      target: GCS
+      relay_channel: 10
+    actions:
+      relay_type: "nominally_off"
+      solenoid_type: "nominally_closed"
+  - name: IMC-G
+    type: powered_device
+    binding:
+      target: GCS
+      relay_channel: 1
+    actions:
+      relay_type: "nominally_off"
+  - name: TANK_HEAT
+    type: powered_device
+    binding:
+      target: GCS
+      relay_channel: 11
+    actions:
+      relay_type: "nominally_off"
+  - name: MOV
+    type: solenoid
+    binding:
+      target: GCS
+      relay_channel: 12
+    actions:
+      relay_type: "nominally_off"
+      solenoid_type: "nominally_closed"
+  - name: TANK_HEAT_PWR
+    type: powered_device
+    binding:
+      target: GCS
+      relay_channel: 13
+    actions:
+      relay_type: "nominally_off"
+  - name: SVFTV
+    type: solenoid
+    binding:
+      target: FAS
+      node: EPB_1
+      relay_channel: 2
+    actions:
+      relay_type: "nominally_off"
+      solenoid_type: "nominally_closed"
+  - name: SVOTV
+    type: solenoid
+    binding:
+      target: FAS
+      node: EPB_2
+      relay_channel: 2
+    actions:
+      relay_type: "nominally_off"
+      solenoid_type: "nominally_closed"
+  - name: BVFTP
+    type: servo
+    binding:
+      target: FAS
+      node: EPB_1
+      relay_channel: 1
+      servo_channel: 1
+    actions:
+      position_aliases: [open, closed] 
+      positions: [2050, 1090]
+      defaultPosition: "closed"
+  - name: BVOTFD
+    type: servo
+    binding:
+      target: FAS
+      node: EPB_3
+      relay_channel: 1
+      servo_channel: 1
+    actions:
+      position_aliases: ["F", "N", "D"]
+      positions: [500, 1500, 2500]
+      defaultPosition: "N"
+  - name: IMC-V
+    type: powered_gpio_device
+    binding:
+      target: FAS
+      node: EPB_3
+      relay_channel: 2
+    actions:
+      relay_type: "nominally_off"
+      gpio_commands: [ARM, DISARM]
 
 
-PCA9685: # servo driver board - 16 channels
-- channelID: 3
-  name: BVOTFD #Example of a 3-way valve
-  states: 3 # number of states, 2 for open/close valve, 3 for 3-way valve, etc.
-  position_aliases: [F, N, D]
-  positions: [500, 1500, 2500]
-  defaultPosition: "N"
-  relayID: 7
-
-- channelID: 4
-  name: BVGSD
-  states: 2 # number of states, 2 for open/close valve, 3 for 3-way valve, etc.
-  position_aliases: [open, closed]
-  positions: [1300, 1900]
-  defaultPosition: "closed"
-  relayID: 4
-
-- channelID: 5
-  name: MFV
-  states: 2
-  position_aliases: [open, closed]
-  positions: [1800, 1050]
-  defaultPosition: "closed"
-  relayID: 1
-
-- channelID: 6
-  name: BVOTP
-  states: 2
-  position_aliases: [open, closed]
-  positions: [1980, 980]
-  defaultPosition: "closed"
-  relayID: 0
-
-- channelID: 7
-  name: BVFTP
-  states: 2
-  position_aliases: [open, closed]
-  positions: [2050, 1090]
-  defaultPosition: "closed"
-  relayID: 3
-
-- channelID: 8
-  name: BVGSO
-  states: 2
-  position_aliases: [open, closed] 
-  positions: [900, 1900]
-  defaultPosition: "closed"
-  relayID: 2
+Commands:
+  START_DATA_SAVING:
+    binding:
+      target: GCS
+  STOP_DATA_SAVING:
+    binding:
+      target: GCS
+  GET_DATA_FILES:
+    binding:
+      target: GCS
+  POWER_CYCLE_SOFT:
+    binding:
+      target: FAS
+      node: PMB
+  SET_FLIGHT_STATE:
+    binding:
+      target: FAS
+      node: FMC
+    states: [STANDBY, ARMED]
+  GET_LOG_FILES:
+    binding:
+      target: FAS
+      node: FMC
+  GET_CONFIG_FILE:
+    binding:
+      target: FAS
+      node: FMC
+  SET_CONFIG_FILE:
+    binding:
+      target: FAS
+      node: FMC
+  LOAD_CONFIG_FILE:
+    binding:
+      target: FAS
+      node: FMC
+  START_CAMERA_RECORDING:
+    binding:
+      target: FAS
+      node: FMC
+  STOP_CAMERA_RECORDING:
+    binding:
+      target: FAS
+      node: FMC
+  SET_BLUE_RAVEN_STATE:
+    binding:
+      target: FAS
+      node: RAB
+      channel: 1
+    states: [ARM, DISARM]
+  SET_STRATO_STATE:
+    binding:
+      target: FAS
+      node: RAB
+      channel: 2
+    states: [ARM, DISARM]

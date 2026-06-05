@@ -1,123 +1,139 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 
 
+class SourceTarget(str, Enum):
+    GCS = "GCS"
+    FAS = "FAS"
+    TCS = "TCS"
+
+
+class SensorType(str, Enum):
+    PT = "PT"
+    LC = "LC"
+    TC = "TC"
+
+
 class ActuatorType(str, Enum):
-    SOLENOID = "solenoid"
     SERVO = "servo"
-    SERVO3 = "servo3"
-    POWERED_DEVICE = "poweredDevice"
-    POWERED_GPIO_DEVICE = "poweredGpioDevice"
+    SOLENOID = "solenoid"
+    POWERED_DEVICE = "powered_device"
+    POWERED_GPIO_DEVICE = "powered_gpio_device"
 
 
-class SensorConfig(BaseModel):
-    hat_id: int = Field(validation_alias=AliasChoices("hatID", "hatId", "hat_id"), serialization_alias="hatID")
-    channel_id: int = Field(validation_alias=AliasChoices("channelID", "channelId", "channel_id"), serialization_alias="channelID")
-    name: str
-    unit: str = ""
+class ConvertMethod(str, Enum):
+    NONE = "none"
+    LINEAR = "linear"
+    POLYNOMIAL = "polynomial"
+
+
+class ConvertSpec(BaseModel):
+    method: ConvertMethod = ConvertMethod.LINEAR
     calibration: list[tuple[float, float]] | None = None
 
 
-class ActuatorConfig(BaseModel):
-    channel_id: int = Field(validation_alias=AliasChoices("channelID", "channelId", "channel_id"), serialization_alias="channelID")
+class GcsSensorBinding(BaseModel):
+    source: Literal["GCS", "TCS"]
+    hat_id: int
+    channel_id: int
+
+
+class FasSensorBinding(BaseModel):
+    source: Literal["FAS"]
+    node: str
+    channel: int
+
+
+class SensorEntry(BaseModel):
     name: str
-    actuator_type: ActuatorType = Field(validation_alias=AliasChoices("actuator_type", "actuatorType"))
-    relay_type: str | None = None
-    solenoid_type: str | None = None
-    relay_id: int | None = Field(default=None, validation_alias=AliasChoices("relayID", "relayId", "relay_id"), serialization_alias="relayID")
+    type: SensorType
+    unit: str = ""
+    binding: GcsSensorBinding | FasSensorBinding = Field(discriminator="source")
+    convert: ConvertSpec = Field(default_factory=ConvertSpec)
+
+
+class ActuatorBinding(BaseModel):
+    target: SourceTarget
+    node: str | None = None  # required when target == FAS
+    relay_channel: int | None = None
+    servo_channel: int | None = None
+
+
+class ActuatorActions(BaseModel):
+    # servo
     position_aliases: list[str] = Field(default_factory=list)
     positions: list[int] = Field(default_factory=list)
-    default_position: str | int | None = Field(default=None, validation_alias=AliasChoices("default_position", "defaultPosition"), serialization_alias="defaultPosition")
-
-    @model_validator(mode="before")
-    @classmethod
-    def normalize_legacy_actuator_fields(cls, data: Any) -> Any:
-        if not isinstance(data, dict):
-            return data
-
-        normalized = dict(data)
-        actuator_type_hint = str(
-            normalized.get("actuator_type", normalized.get("actuatorType", ""))
-        ).strip().lower()
-
-        if "solenoid_type" not in normalized:
-            if "solenoidType" in normalized:
-                normalized["solenoid_type"] = normalized["solenoidType"]
-            elif actuator_type_hint == "solenoid" and "type" in normalized:
-                normalized["solenoid_type"] = normalized["type"]
-
-        if "relay_type" not in normalized:
-            if "relayType" in normalized:
-                normalized["relay_type"] = normalized["relayType"]
-            elif "type" in normalized:
-                normalized["relay_type"] = normalized["type"]
-
-        if "position_aliases" not in normalized and "positionAliases" in normalized:
-            normalized["position_aliases"] = normalized["positionAliases"]
-
-        return normalized
+    default_position: str | int | None = Field(
+        default=None,
+        validation_alias=AliasChoices("defaultPosition", "default_position"),
+    )
+    # relay / solenoid / powered
+    relay_type: str | None = None  # "nominally_off" / "nominally_on"
+    solenoid_type: str | None = None  # "nominally_closed" / "nominally_open"
+    gpio_commands: list[str] = Field(default_factory=list)  # e.g. [ARM, DISARM]
 
     @model_validator(mode="after")
-    def validate_positions(self) -> "ActuatorConfig":
+    def _servo_arrays_match(self) -> "ActuatorActions":
         if self.position_aliases and len(self.position_aliases) != len(self.positions):
-            raise ValueError("position_aliases and positions must have the same size")
+            raise ValueError("position_aliases and positions length mismatch")
         return self
 
 
+class ActuatorEntry(BaseModel):
+    name: str
+    type: ActuatorType
+    binding: ActuatorBinding
+    actions: ActuatorActions = Field(default_factory=ActuatorActions)
+
+    @model_validator(mode="after")
+    def _fas_needs_node(self) -> "ActuatorEntry":
+        if self.binding.target == SourceTarget.FAS and self.binding.node is None:
+            raise ValueError(f"FAS actuator '{self.name}' must set binding.node")
+        return self
+
+
+class CommandBinding(BaseModel):
+    target: SourceTarget
+    node: str | None = None
+    channel: int | None = None
+
+
+class CommandEntry(BaseModel):
+    binding: CommandBinding
+    states: list[str] | None = None  # e.g. [STANDBY, ARMED]
+
+
 class SystemConfig(BaseModel):
-    mcc128daq: list[SensorConfig] = Field(default_factory=list, alias="MCC128DAQ")
-    mcc134daq: list[SensorConfig] = Field(default_factory=list, alias="MCC134DAQ")
-    fas: list[SensorConfig] = Field(default_factory=list, alias="FAS")
-    mccdaq: list[SensorConfig] = Field(default_factory=list, alias="MCCDAQ")
+    model_config = ConfigDict(populate_by_name=True)
 
-    relay_board: list[ActuatorConfig] = Field(default_factory=list, alias="relayBoard")
-    pca9685: list[ActuatorConfig] = Field(default_factory=list, alias="PCA9685")
+    sensors: list[SensorEntry] = Field(default_factory=list, alias="Sensors")
+    actuators: list[ActuatorEntry] = Field(default_factory=list, alias="Actuators")
+    commands: dict[str, CommandEntry] = Field(default_factory=dict, alias="Commands")
 
+    def find_sensor(self, name: str) -> SensorEntry | None:
+        for sensor in self.sensors:
+            if sensor.name == name:
+                return sensor
+        return None
 
-    @model_validator(mode="before")
-    @classmethod
-    def normalize_legacy_config(cls, data: Any) -> Any:
-        if not isinstance(data, dict):
-            return data
+    def find_actuator(self, name: str) -> ActuatorEntry | None:
+        for actuator in self.actuators:
+            if actuator.name == name:
+                return actuator
+        return None
 
-        pca_entries = data.get("PCA9685")
-        if not isinstance(pca_entries, list):
-            return data
+    def find_command(self, name: str) -> CommandEntry | None:
+        return self.commands.get(name)
 
-        normalized: list[Any] = []
-        for entry in pca_entries:
-            if not isinstance(entry, dict):
-                normalized.append(entry)
-                continue
+    def all_sensors(self) -> list[SensorEntry]:
+        return list(self.sensors)
 
-            if "actuator_type" not in entry:
-                aliases = entry.get("position_aliases") or entry.get("positionAliases") or []
-                positions = entry.get("positions") or []
-                count = max(len(aliases), len(positions))
-                inferred = "servo3" if count > 2 else "servo"
-                entry = {**entry, "actuator_type": inferred}
-
-            normalized.append(entry)
-
-        return {**data, "PCA9685": normalized}
-
-    def all_sensors(self) -> list[SensorConfig]:
-        sensors = []
-        sensors.extend(self.mcc128daq)
-        sensors.extend(self.mcc134daq)
-        sensors.extend(self.fas)
-        sensors.extend(self.mccdaq)
-        return sensors
-
-    def all_actuators(self) -> list[ActuatorConfig]:
-        actuators = []
-        actuators.extend(self.relay_board)
-        actuators.extend(self.pca9685)
-        return actuators
+    def all_actuators(self) -> list[ActuatorEntry]:
+        return list(self.actuators)
 
 
 class FlagPayload(BaseModel):
@@ -144,6 +160,20 @@ class CommandPayload(BaseModel):
     type: str = Field(description="Frontend actuator type label")
     name: str = Field(description="Actuator name from config")
     state: str = Field(description="Requested state (e.g., open/closed/on/off/alias)")
+
+
+class SystemCommandPayload(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "name": "SET_FLIGHT_STATE",
+                "state": "ARMED"
+            }
+        }
+    )
+
+    name: str = Field(description="System command name from the Commands config section")
+    state: str | None = Field(default=None, description="Optional command state argument")
 
 
 class IncomingSensorPacket(BaseModel):

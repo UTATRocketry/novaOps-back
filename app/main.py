@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from app.config_service import ConfigService
 
-from app.models import ActuatorConfig, ActuatorType, CommandPayload, FlagPayload
+from app.models import ActuatorEntry, ActuatorType, CommandPayload, FlagPayload, SystemCommandPayload
 from app.mqtt_service import MqttService
 from app.parsing import CommandParser, RollingAverageStore, SensorParser
 from app.state import RuntimeState
@@ -122,34 +122,31 @@ def create_app() -> FastAPI:
         on_sensor_message=on_sensor_message,
     )
     
-    def find_actuator(name: str) -> ActuatorConfig | None:
-        for actuator in config_service.config.all_actuators():
-            if actuator.name == name:
-                return actuator
-        return None
+    def find_actuator(name: str) -> ActuatorEntry | None:
+        return config_service.config.find_actuator(name)
 
-    def update_actuator_state(actuator: ActuatorConfig, state: str) -> None:
+    def update_actuator_state(actuator: ActuatorEntry, state: str) -> None:
         entry = runtime.actuator_states.get(actuator.name)
         if not isinstance(entry, dict):
             entry = {}
 
         lower = state.strip().lower()
-        if actuator.actuator_type in {ActuatorType.SERVO, ActuatorType.SERVO3}:
+        if actuator.type == ActuatorType.SERVO:
             if lower in {"enable", "enabled", "disable", "disabled"}:
                 entry["enable"] = "enabled" if lower in {"enable", "enabled"} else "disabled"
             elif lower in {"on", "off"}:
                 entry["power"] = lower
             else:
                 entry["position"] = state
-        elif actuator.actuator_type == ActuatorType.SOLENOID:
+        elif actuator.type == ActuatorType.SOLENOID:
             if lower in {"open", "closed"}:
                 entry["position"] = lower
             else:
                 entry["position"] = state
-        elif actuator.actuator_type == ActuatorType.POWERED_GPIO_DEVICE:
+        elif actuator.type == ActuatorType.POWERED_GPIO_DEVICE:
             if lower in {"on", "off"}:
                 entry["power"] = lower
-            if lower in {"armed", "disarmed"}:
+            if lower in {"armed", "disarmed", "arm", "disarm"}:
                 entry["arming"] = lower
         else:
             if lower in {"on", "off"}:
@@ -158,16 +155,16 @@ def create_app() -> FastAPI:
                 entry["arming"] = lower
 
         runtime.actuator_states[actuator.name] = entry
-    
+
     def initialize_actuators() -> None:
         for actuator in config_service.config.all_actuators():
             init_state = {}
-            if actuator.actuator_type in {ActuatorType.SERVO, ActuatorType.SERVO3}:
-                if actuator.default_position is not None:
-                     init_state["position"] = actuator.default_position
+            if actuator.type == ActuatorType.SERVO:
+                if actuator.actions.default_position is not None:
+                     init_state["position"] = actuator.actions.default_position
                 init_state["enable"] = "disabled"
                 init_state["power"] = "off"
-            elif actuator.actuator_type == ActuatorType.SOLENOID:
+            elif actuator.type == ActuatorType.SOLENOID:
                 init_state["position"] = "closed"
             else:
                 init_state["power"] = "off"
@@ -302,6 +299,32 @@ def create_app() -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return {"published_commands": commands}
+
+    def apply_system_command(payload: SystemCommandPayload) -> dict:
+        command = config_service.config.find_command(payload.name)
+        if command is None:
+            raise ValueError(f"System command '{payload.name}' not found in config")
+
+        # Data-saving / data-file commands map onto the existing mqtt machinery.
+        if payload.name in {"START_DATA_SAVING", "STOP_DATA_SAVING"}:
+            enabled = payload.name == "START_DATA_SAVING"
+            runtime.data_saving_enabled = enabled
+            mqtt_service.publish_data_saving(enabled)
+            return {"data_saving_enabled": enabled}
+        if payload.name == "GET_DATA_FILES":
+            return {"data_files": sorted(path.name for path in data_dir.glob("*.csv"))}
+
+        # FAS / system commands emit an abstract command dict; novaGround maps it to an opcode.
+        published = command_parser().parse_system_command(payload.name, payload.state)
+        mqtt_service.publish_device_commands(published)
+        return {"published_commands": published}
+
+    @app.post("/api/system-commands", tags=["Commands"], summary="Send system command", description="Dispatch a Commands-section command (data saving or FAS system command).")
+    async def post_system_command(payload: SystemCommandPayload) -> dict:
+        try:
+            return apply_system_command(payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     async def handle_websocket(websocket: WebSocket) -> None:
         assigned_role = await ws_manager.connect(websocket, None)
