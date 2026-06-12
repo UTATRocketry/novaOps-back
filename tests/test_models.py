@@ -78,6 +78,28 @@ def test_actuator_types_are_lowercase() -> None:
     assert actuator.binding.relay_channel == 8
 
 
+def test_gpio_device_type_is_supported() -> None:
+    config = SystemConfig.model_validate(
+        {
+            "Actuators": [
+                {
+                    "name": "IMC-V",
+                    "type": "gpio_device",
+                    "binding": {"target": "FAS", "node": "EPB_3", "gpio_channel": 2},
+                    "actions": {"gpio_commands": ["ARM", "DISARM"]},
+                }
+            ]
+        }
+    )
+
+    actuator = config.actuators[0]
+    assert actuator.type == ActuatorType.GPIO_DEVICE
+    assert actuator.binding.target == SourceTarget.FAS
+    assert actuator.binding.node == "EPB_3"
+    assert actuator.binding.gpio_channel == 2
+    assert actuator.actions.gpio_commands == ["ARM", "DISARM"]
+
+
 def test_servo_default_position_alias_accepts_camel_case() -> None:
     config = SystemConfig.model_validate(
         {
@@ -146,3 +168,23 @@ def test_command_section_parses_with_states() -> None:
     assert command.binding.node == "FMC"
     assert command.states == ["STANDBY", "ARMED"]
     assert config.find_command("START_DATA_SAVING").states is None
+
+
+def test_safety_rules_match_hazardous_commands() -> None:
+    config = SystemConfig.model_validate(
+        {
+            "safetyRules": {
+                "hazardous": [
+                    {"IMC-V": "ALL"},
+                    {"BVGSO": "OPEN"},
+                    {"BVFTP": ["OPEN", "CLOSE"]},
+                ]
+            }
+        }
+    )
+
+    assert config.is_hazardous_command("IMC-V", "DISARM")
+    assert config.is_hazardous_command("BVGSO", "open")
+    assert config.is_hazardous_command("BVFTP", "close")
+    assert not config.is_hazardous_command("BVGSO", "closed")
+    assert not config.is_hazardous_command("SVFTV", "open")

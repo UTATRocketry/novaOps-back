@@ -15,6 +15,40 @@ lockButton.onclick = () => {
   lockButton.textContent = isLocked ? "Unlock Actuators" : "Lock Actuators";
 };
 
+// `/api/actuators` returns the raw config ActuatorEntry shape:
+//   { name, type, binding: {target, node, relay_channel, servo_channel, gpio_channel},
+//     actions: {position_aliases, positions, gpio_commands, ...} }
+// The rest of this file expects a flattened shape (actuator_type, relayID,
+// position_aliases at the top level), so normalize on fetch.
+const ACTUATOR_TYPE_MAP = {
+  servo: "servo",
+  solenoid: "solenoid",
+  powered_device: "poweredDevice",
+  powered_gpio_device: "poweredGpioDevice",
+  gpio_device: "gpioDevice",
+};
+
+function normalizeActuator(raw) {
+  const binding = raw.binding || {};
+  const actions = raw.actions || {};
+  return {
+    name: raw.name,
+    actuator_type: ACTUATOR_TYPE_MAP[raw.type] || raw.type,
+    config_type: raw.type,
+    relayID: binding.relay_channel ?? null,
+    servoID: binding.servo_channel ?? null,
+    gpioID: binding.gpio_channel ?? binding.relay_channel ?? null,
+    node: binding.node ?? null,
+    target: binding.target ?? null,
+    position_aliases: Array.isArray(actions.position_aliases) ? actions.position_aliases : [],
+    positions: Array.isArray(actions.positions) ? actions.positions : [],
+    gpio_commands: Array.isArray(actions.gpio_commands) ? actions.gpio_commands : [],
+    relay_type: actions.relay_type ?? null,
+    solenoid_type: actions.solenoid_type ?? null,
+    default_position: actions.default_position ?? actions.defaultPosition ?? null,
+  };
+}
+
 function isServoType(type) {
   return type === "servo" || type === "servo3";
 }
@@ -136,6 +170,13 @@ function applyStateUpdate(actuator, stateValue) {
     return;
   }
 
+  if (lower === "arm" || lower === "disarm") {
+    if (ui.armingState !== null) {
+      ui.armingState = lower === "arm" ? "armed" : "disarmed";
+    }
+    return;
+  }
+
   if (supportsOpenClose(actuator)) {
     const { open, closed } = getOpenCloseStates(actuator);
     if (lower === String(open).toLowerCase()) {
@@ -158,9 +199,12 @@ function applyStateUpdate(actuator, stateValue) {
 }
 
 async function sendCommand(actuator, state) {
+  const headers = { "Content-Type": "application/json" };
+  if (window.NOVA_CLIENT_ID) headers["X-Client-Id"] = window.NOVA_CLIENT_ID;
+
   const response = await fetch(`${BASE_URL}/api/commands`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers,
     body: JSON.stringify({
       type: actuator.actuator_type,
       name: actuator.name,
@@ -294,7 +338,8 @@ async function fetchActuators() {
     const response = await fetch(`${BASE_URL}/api/actuators`, { headers: { Accept: "application/json" } });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
-    actuatorCache = await response.json();
+    const data = await response.json();
+    actuatorCache = Array.isArray(data) ? data.map(normalizeActuator) : [];
     syncUiStateWithConfig(actuatorCache);
     renderActuators(actuatorCache);
   } catch (error) {
@@ -321,5 +366,3 @@ window.addEventListener("nova:actuator_states", (event) => {
 fetchActuators();
 
 })();
-
-

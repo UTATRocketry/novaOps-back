@@ -1,124 +1,20 @@
 from __future__ import annotations
 
-from collections import defaultdict, deque
-from dataclasses import dataclass
-from typing import Iterable
-import numpy as np
+from pathlib import Path
+from typing import TYPE_CHECKING
+
 from app.models import (
-    ActuatorEntry,
     ActuatorActions,
+    ActuatorEntry,
     ActuatorType,
     CommandPayload,
-    ConvertMethod,
-    SensorEntry,
     SourceTarget,
+    SystemCommandPayload,
     SystemConfig,
 )
 
-
-def linear_interpolate(raw_value: float, points: list[tuple[float, float]] | None, degree: int = 1) -> float:
-    if not points or len(points) <= degree:
-        return raw_value
-
-    calibration_points = np.asarray(points, dtype=float)
-    if calibration_points.ndim != 2 or calibration_points.shape[1] != 2:
-        raise ValueError("Calibration must be a list of [voltage, reading] pairs.")
-
-    voltages, readings = calibration_points[:, 0], calibration_points[:, 1]
-    m, b = np.polyfit(voltages, readings, degree)
-    return m * raw_value + b
-
-
-@dataclass
-class ParsedSensor:
-    name: str
-    value: float
-    avg: float
-    unit: str
-    timestamp: int
-
-
-class RollingAverageStore:
-    def __init__(self, window_size: int = 100) -> None:
-        self._window_size = window_size
-        self._values: dict[str, deque[float]] = defaultdict(lambda: deque(maxlen=self._window_size))
-
-    def add(self, key: str, value: float) -> float:
-        bucket = self._values[key]
-        bucket.append(value)
-        return np.mean(np.array(bucket))
-
-
-# Telemetry "source" strings (incoming packets) mapped to the config SourceTarget.
-# Legacy novaGround/novaThermo/novaFAS names are kept so existing publishers keep working.
-_SOURCE_ALIASES = {
-    "gcs": SourceTarget.GCS,
-    "novaground": SourceTarget.GCS,
-    "novaops": SourceTarget.GCS,
-    "tcs": SourceTarget.TCS,
-    "novathermo": SourceTarget.TCS,
-    "fas": SourceTarget.FAS,
-    "novafas": SourceTarget.FAS,
-}
-
-
-class SensorParser:
-    def __init__(self, rolling_store: RollingAverageStore) -> None:
-        self._rolling_store = rolling_store
-
-    @staticmethod
-    def _resolve_source(source: str) -> SourceTarget | None:
-        return _SOURCE_ALIASES.get(source.strip().lower())
-
-    @staticmethod
-    def _gcs_lookup(sensors: Iterable[SensorEntry]) -> dict[tuple[int, int], SensorEntry]:
-        return {(s.binding.hat_id, s.binding.channel_id): s for s in sensors}
-
-    @staticmethod
-    def _fas_lookup(sensors: Iterable[SensorEntry]) -> dict[tuple[str, int], SensorEntry]:
-        return {(s.binding.node, s.binding.channel): s for s in sensors}
-
-    def parse(self, source: str, raw_sensors: list[dict], config: SystemConfig, calibration_enabled: bool) -> list[ParsedSensor]:
-        target = self._resolve_source(source)
-        sensors_cfg = [s for s in config.sensors if s.binding.source == target] if target else config.sensors
-
-        is_fas = target == SourceTarget.FAS
-        if is_fas:
-            lookup_fas = self._fas_lookup(sensors_cfg)
-        else:
-            lookup_gcs = self._gcs_lookup(sensors_cfg)
-
-        parsed: list[ParsedSensor] = []
-        for item in raw_sensors:
-            timestamp = int(item.get("timestamp", 0))
-            raw_value = float(item.get("value", 0.0))
-
-            if is_fas:
-                key = (str(item.get("node", "")), int(item.get("channel", -1)))
-                sensor_cfg = lookup_fas.get(key)
-            else:
-                key = (int(item.get("hat_id", -1)), int(item.get("channel_id", -1)))
-                sensor_cfg = lookup_gcs.get(key)
-
-            if sensor_cfg is None:
-                continue
-
-            value = raw_value
-            if calibration_enabled and sensor_cfg.convert.method != ConvertMethod.NONE:
-                value = linear_interpolate(raw_value, sensor_cfg.convert.calibration)
-            averaged_value = self._rolling_store.add(sensor_cfg.name, value)
-
-            parsed.append(
-                ParsedSensor(
-                    name=sensor_cfg.name,
-                    value=round(value, 2),
-                    avg=round(averaged_value, 2),
-                    unit=sensor_cfg.unit,
-                    timestamp=timestamp,
-                )
-            )
-
-        return parsed
+if TYPE_CHECKING:
+    from app.context import AppContext
 
 
 class CommandParser:
@@ -160,6 +56,14 @@ class CommandParser:
 
         return 0 if ((power_on and relay == "nominally_off") or ((not power_on) and relay == "nominally_on")) else 1
 
+    @staticmethod
+    def _resolve_gpio_state(state: str) -> int:
+        return 1 if CommandParser._is_on_state(state) else 0
+
+    @staticmethod
+    def _resolve_gpio_channel(binding) -> int | None:
+        return binding.gpio_channel if binding.gpio_channel is not None else binding.relay_channel
+
     def _find_actuator(self, name: str) -> ActuatorEntry:
         actuator = self._config.find_actuator(name)
         if actuator is None:
@@ -177,11 +81,32 @@ class CommandParser:
         actions = actuator.actions
         state = state.strip()
         state_lower = state.lower()
+        gpio_channel = self._resolve_gpio_channel(binding)
+
+        if actuator.type == ActuatorType.GPIO_DEVICE:
+            if gpio_channel is None:
+                raise ValueError(f"GPIO actuator '{actuator.name}' does not define gpio_channel")
+            return [
+                {
+                    "type": "gpio",
+                    "id": gpio_channel,
+                    "state": self._resolve_gpio_state(state),
+                }
+            ]
+
+        if actuator.type == ActuatorType.POWERED_GPIO_DEVICE:
+            if state_lower in {"on", "off"}:
+                relay_state = self._resolve_relay_state(state, actions.relay_type, None)
+                if binding.relay_channel is None:
+                    raise ValueError(f"GPIO actuator '{actuator.name}' does not define relay_channel")
+                return [{"type": "relay", "id": binding.relay_channel, "state": relay_state}]
+            if gpio_channel is None:
+                raise ValueError(f"GPIO actuator '{actuator.name}' does not define gpio_channel")
+            return [{"type": "gpio", "id": gpio_channel, "state": self._resolve_gpio_state(state)}]
 
         if actuator.type in self.RELAY_TYPES:
             relay_state = self._resolve_relay_state(state, actions.relay_type, actions.solenoid_type)
-            command_type = "gpio" if actuator.type == ActuatorType.POWERED_GPIO_DEVICE else "relay"
-            return [{"type": command_type, "id": binding.relay_channel, "state": relay_state}]
+            return [{"type": "relay", "id": binding.relay_channel, "state": relay_state}]
 
         if actuator.type == ActuatorType.SERVO:
             if state_lower in {"enable", "disable"}:
@@ -217,10 +142,39 @@ class CommandParser:
         binding = actuator.binding
         actions = actuator.actions
         state = state.strip()
+        gpio_channel = self._resolve_gpio_channel(binding)
 
         if actuator.type == ActuatorType.SERVO:
+            state_lower = state.lower()
+
+            if state_lower in {"enable", "disable"}:
+                return [
+                    {
+                        "type": "fas",
+                        "node": binding.node,
+                        "port": "servo",
+                        "channel": binding.servo_channel,
+                        "action": "on" if state_lower == "enable" else "off",
+                    }
+                ]
+
+            if state_lower in {"on", "off"}:
+                if binding.relay_channel is None:
+                    raise ValueError(
+                        f"Servo '{actuator.name}' does not define relay_channel, so state '{state}' is invalid"
+                    )
+                return [
+                    {
+                        "type": "fas",
+                        "node": binding.node,
+                        "port": "relay",
+                        "channel": binding.relay_channel,
+                        "action": state_lower,
+                    }
+                ]
+
             alias_lookup = {alias.lower(): pos for alias, pos in zip(actions.position_aliases, actions.positions)}
-            micros = alias_lookup.get(state.lower())
+            micros = alias_lookup.get(state_lower)
             if micros is None:
                 raise ValueError(f"Unsupported servo state '{state}' for actuator '{actuator.name}'")
             commands: list[dict] = []
@@ -254,12 +208,39 @@ class CommandParser:
             ]
 
         if actuator.type == ActuatorType.POWERED_GPIO_DEVICE:
+            if state.lower() in {"on", "off"}:
+                if binding.relay_channel is None:
+                    raise ValueError(f"GPIO actuator '{actuator.name}' does not define relay_channel")
+                return [
+                    {
+                        "type": "fas",
+                        "node": binding.node,
+                        "port": "relay",
+                        "channel": binding.relay_channel,
+                        "action": state.lower(),
+                    }
+                ]
+            if gpio_channel is None:
+                raise ValueError(f"GPIO actuator '{actuator.name}' does not define gpio_channel")
             return [
                 {
                     "type": "fas",
                     "node": binding.node,
                     "port": "gpio",
-                    "channel": binding.relay_channel,
+                    "channel": gpio_channel,
+                    "action": state,
+                }
+            ]
+
+        if actuator.type == ActuatorType.GPIO_DEVICE:
+            if gpio_channel is None:
+                raise ValueError(f"GPIO actuator '{actuator.name}' does not define gpio_channel")
+            return [
+                {
+                    "type": "fas",
+                    "node": binding.node,
+                    "port": "gpio",
+                    "channel": gpio_channel,
                     "action": state,
                 }
             ]
@@ -286,3 +267,49 @@ class CommandParser:
         if state is not None:
             emitted["state"] = state
         return [emitted]
+
+
+class CommandService:
+    def __init__(self, ctx: AppContext) -> None:
+        self._ctx = ctx
+
+    async def apply_command(self, command: CommandPayload) -> list[dict]:
+        ctx = self._ctx
+        if ctx.runtime.lockout_is_locked and ctx.config_service.config.is_hazardous_command(command.name, command.state):
+            raise ValueError("Nova is locked; actuator commands are disabled")
+
+        parsed = CommandParser(ctx.config_service.config).parse(command)
+        ctx.mqtt_service.publish_device_commands(parsed)
+
+        actuator = ctx.config_service.config.find_actuator(command.name)
+        if actuator is not None:
+            ctx.runtime.update_actuator_state(actuator, command.state)
+        else:
+            ctx.runtime.actuator_states[command.name] = {"state": command.state}
+
+        await ctx.broadcast(
+            {"type": "actuator_states", "actuator_states": ctx.runtime.actuator_states}
+        )
+        return parsed
+
+    def apply_system_command(self, payload: SystemCommandPayload) -> dict:
+        ctx = self._ctx
+        command = ctx.config_service.config.find_command(payload.name)
+        if command is None:
+            raise ValueError(f"System command '{payload.name}' not found in config")
+
+        if payload.name in {"START_DATA_SAVING", "STOP_DATA_SAVING"}:
+            enabled = payload.name == "START_DATA_SAVING"
+            ctx.runtime.data_saving_enabled = enabled
+            ctx.mqtt_service.publish_data_saving(enabled)
+            return {"data_saving_enabled": enabled}
+
+        if payload.name == "GET_DATA_FILES":
+            return {"data_files": sorted(path.name for path in ctx.data_dir.glob("*.csv"))}
+
+        if ctx.runtime.lockout_is_locked and ctx.config_service.config.is_hazardous_command(payload.name, payload.state):
+            raise ValueError("Nova is locked; FAS system commands are disabled")
+
+        published = CommandParser(ctx.config_service.config).parse_system_command(payload.name, payload.state)
+        ctx.mqtt_service.publish_device_commands(published)
+        return {"published_commands": published}

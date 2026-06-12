@@ -10,6 +10,7 @@ class SourceTarget(str, Enum):
     GCS = "GCS"
     FAS = "FAS"
     TCS = "TCS"
+    OPS = "OPS"
 
 
 class SensorType(str, Enum):
@@ -23,6 +24,7 @@ class ActuatorType(str, Enum):
     SOLENOID = "solenoid"
     POWERED_DEVICE = "powered_device"
     POWERED_GPIO_DEVICE = "powered_gpio_device"
+    GPIO_DEVICE = "gpio_device"
 
 
 class ConvertMethod(str, Enum):
@@ -52,6 +54,7 @@ class SensorEntry(BaseModel):
     name: str
     type: SensorType
     unit: str = ""
+    range: tuple[float, float] | None = None
     binding: GcsSensorBinding | FasSensorBinding = Field(discriminator="source")
     convert: ConvertSpec = Field(default_factory=ConvertSpec)
 
@@ -61,6 +64,7 @@ class ActuatorBinding(BaseModel):
     node: str | None = None  # required when target == FAS
     relay_channel: int | None = None
     servo_channel: int | None = None
+    gpio_channel: int | None = None
 
 
 class ActuatorActions(BaseModel):
@@ -107,12 +111,18 @@ class CommandEntry(BaseModel):
     states: list[str] | None = None  # e.g. [STANDBY, ARMED]
 
 
+class SafetyRules(BaseModel):
+    critical: list[dict[str, str | list[str]]] = Field(default_factory=list)
+    hazardous: list[dict[str, str | list[str]]] = Field(default_factory=list)
+
+
 class SystemConfig(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     sensors: list[SensorEntry] = Field(default_factory=list, alias="Sensors")
     actuators: list[ActuatorEntry] = Field(default_factory=list, alias="Actuators")
     commands: dict[str, CommandEntry] = Field(default_factory=dict, alias="Commands")
+    safety_rules: SafetyRules = Field(default_factory=SafetyRules, alias="safetyRules")
 
     def find_sensor(self, name: str) -> SensorEntry | None:
         for sensor in self.sensors:
@@ -134,6 +144,32 @@ class SystemConfig(BaseModel):
 
     def all_actuators(self) -> list[ActuatorEntry]:
         return list(self.actuators)
+
+    def is_hazardous_command(self, name: str, state: str | None) -> bool:
+        return self._matches_safety_rule(self.safety_rules.hazardous, name, state)
+    
+    def is_critical_command(self, name: str, state: str | None) -> bool:
+        return self._matches_safety_rule(self.safety_rules.critical, name, state)
+
+    @staticmethod
+    def _matches_safety_rule(rules: list[dict[str, str | list[str]]], name: str, state: str | None) -> bool:
+        requested_name = name.strip().upper()
+        requested_state = (state or "").strip().upper()
+
+        for rule in rules:
+            for rule_name, rule_states in rule.items():
+                if rule_name.strip().upper() != requested_name:
+                    continue
+
+                if isinstance(rule_states, str):
+                    states = [rule_states]
+                else:
+                    states = rule_states
+
+                normalized_states = [item.strip().upper() for item in states]
+                return "ALL" in normalized_states or requested_state in normalized_states
+
+        return False
 
 
 class FlagPayload(BaseModel):
@@ -179,3 +215,22 @@ class SystemCommandPayload(BaseModel):
 class IncomingSensorPacket(BaseModel):
     source: str
     sensors: list[dict[str, Any]]
+
+
+class RoleAssignPayload(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "role": "operator",
+                "password": None,
+                "target_client_id": None,
+            }
+        }
+    )
+
+    role: str = Field(description="Target role: viewer, pad, operator, or admin")
+    password: str | None = Field(default=None, description="Required when requesting the admin role")
+    target_client_id: str | None = Field(
+        default=None,
+        description="Target client UUID. Omit to change your own role. Only admin callers may set this.",
+    )

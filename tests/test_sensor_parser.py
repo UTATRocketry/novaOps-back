@@ -1,5 +1,5 @@
 from app.models import SystemConfig
-from app.parsing import RollingAverageStore, SensorParser
+from app.services.data_service import RollingAverageStore, SensorParser
 
 
 def _config() -> SystemConfig:

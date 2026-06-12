@@ -60,9 +60,12 @@
     const nextState = purgeState === "open" ? "closed" : "open";
 
     try {
+      const headers = { "Content-Type": "application/json" };
+      if (window.NOVA_CLIENT_ID) headers["X-Client-Id"] = window.NOVA_CLIENT_ID;
+
       const res = await fetch(`${BASE_URL}/api/commands`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify({
           type: "servo",
           name: "BVOTP",

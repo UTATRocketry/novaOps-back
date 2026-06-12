@@ -1,7 +1,7 @@
 import pytest
 
 from app.models import CommandPayload, SystemConfig
-from app.parsing import CommandParser
+from app.services.command_service import CommandParser
 
 
 def _config(actuators: list[dict], commands: dict | None = None) -> SystemConfig:
@@ -87,6 +87,45 @@ def test_gcs_servo_on_without_relay_channel_raises() -> None:
         parser.parse(CommandPayload(type="servo", name="NOPWR", state="on"))
 
 
+def test_gcs_gpio_device_uses_gpio_channel() -> None:
+    config = _config(
+        [
+            {
+                "name": "IMC-V",
+                "type": "gpio_device",
+                "binding": {"target": "GCS", "gpio_channel": 5},
+                "actions": {"gpio_commands": ["ARM", "DISARM"]},
+            }
+        ]
+    )
+    parser = CommandParser(config)
+
+    assert parser.parse(CommandPayload(type="gpio_device", name="IMC-V", state="armed")) == [
+        {"type": "gpio", "id": 5, "state": 1}
+    ]
+
+
+def test_gcs_powered_gpio_on_off_uses_relay_channel() -> None:
+    config = _config(
+        [
+            {
+                "name": "IMC-G",
+                "type": "powered_gpio_device",
+                "binding": {"target": "GCS", "relay_channel": 11, "gpio_channel": 5},
+                "actions": {"relay_type": "nominally_off", "gpio_commands": ["ARM", "DISARM"]},
+            }
+        ]
+    )
+    parser = CommandParser(config)
+
+    assert parser.parse(CommandPayload(type="powered_gpio_device", name="IMC-G", state="on")) == [
+        {"type": "relay", "id": 11, "state": 0}
+    ]
+    assert parser.parse(CommandPayload(type="powered_gpio_device", name="IMC-G", state="off")) == [
+        {"type": "relay", "id": 11, "state": 1}
+    ]
+
+
 # --- FAS path: abstract dict output ---
 
 def test_fas_solenoid_emits_abstract_relay_dict() -> None:
@@ -135,7 +174,7 @@ def test_fas_powered_gpio_emits_gpio_action() -> None:
             {
                 "name": "IMC-V",
                 "type": "powered_gpio_device",
-                "binding": {"target": "FAS", "node": "EPB_3", "relay_channel": 2},
+                "binding": {"target": "FAS", "node": "EPB_3", "relay_channel": 2, "gpio_channel": 2},
                 "actions": {"relay_type": "nominally_off", "gpio_commands": ["ARM", "DISARM"]},
             }
         ]
@@ -144,6 +183,33 @@ def test_fas_powered_gpio_emits_gpio_action() -> None:
 
     assert parser.parse(CommandPayload(type="powered_gpio_device", name="IMC-V", state="ARM")) == [
         {"type": "fas", "node": "EPB_3", "port": "gpio", "channel": 2, "action": "ARM"}
+    ]
+    assert parser.parse(CommandPayload(type="powered_gpio_device", name="IMC-V", state="on")) == [
+        {"type": "fas", "node": "EPB_3", "port": "relay", "channel": 2, "action": "on"}
+    ]
+    assert parser.parse(CommandPayload(type="powered_gpio_device", name="IMC-V", state="off")) == [
+        {"type": "fas", "node": "EPB_3", "port": "relay", "channel": 2, "action": "off"}
+    ]
+
+
+def test_fas_gpio_device_emits_arm_disarm_gpio_action() -> None:
+    config = _config(
+        [
+            {
+                "name": "IMC-V",
+                "type": "gpio_device",
+                "binding": {"target": "FAS", "node": "EPB_3", "gpio_channel": 2},
+                "actions": {"gpio_commands": ["ARM", "DISARM"]},
+            }
+        ]
+    )
+    parser = CommandParser(config)
+
+    assert parser.parse(CommandPayload(type="gpio_device", name="IMC-V", state="armed")) == [
+        {"type": "fas", "node": "EPB_3", "port": "gpio", "channel": 2, "action": "armed"}
+    ]
+    assert parser.parse(CommandPayload(type="gpio_device", name="IMC-V", state="disarm")) == [
+        {"type": "fas", "node": "EPB_3", "port": "gpio", "channel": 2, "action": "disarm"}
     ]
 
 

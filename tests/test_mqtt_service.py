@@ -1,6 +1,6 @@
 import json
 
-from app.mqtt_service import MqttService
+from app.services.mqtt_service import MqttService
 
 
 class _FakeInfo:
@@ -83,3 +83,43 @@ def test_publish_device_commands_wraps_fas_cmd() -> None:
         "source": "novaOps",
         "command": {"type": "fas_cmd", "node": "FMC", "command": "SET_FLIGHT_STATE", "state": "ARMED"},
     }
+
+
+def test_publish_console_emits_payload_without_wrapping() -> None:
+    svc, client = _connected_service()
+
+    svc.publish_console({"line": "status"})
+
+    assert client.published == [("nova/console", {"line": "status"})]
+
+
+def test_on_message_routes_by_topic() -> None:
+    routed: list[tuple[str, dict]] = []
+    svc = MqttService(
+        sensor_topic="nova/telemetry/engine",
+        command_topic="nova/command",
+        control_topic="nova/control",
+        flight_topic="nova/telemetry/flight",
+        console_topic="nova/console",
+        on_sensor_message=lambda payload: routed.append(("engine", payload)),
+        on_flight_message=lambda payload: routed.append(("flight", payload)),
+        on_console_message=lambda payload: routed.append(("console", payload)),
+        on_control_message=lambda payload: routed.append(("control", payload)),
+    )
+
+    class Message:
+        def __init__(self, topic: str, payload: dict) -> None:
+            self.topic = topic
+            self.payload = json.dumps(payload).encode("utf-8")
+
+    svc._on_message(None, None, Message("nova/telemetry/engine", {"sensors": []}))
+    svc._on_message(None, None, Message("nova/telemetry/flight", {"data": {"fmc.tempH7": 30}}))
+    svc._on_message(None, None, Message("nova/console", {"line": "ok"}))
+    svc._on_message(None, None, Message("nova/control", {"source": "novaLock", "state": "locked"}))
+
+    assert routed == [
+        ("engine", {"sensors": []}),
+        ("flight", {"data": {"fmc.tempH7": 30}}),
+        ("console", {"line": "ok"}),
+        ("control", {"source": "novaLock", "state": "locked"}),
+    ]

@@ -55,9 +55,21 @@ Environment variables:
 
 Topics:
 
-- Subscribe: `nova/telemetry`
+- Subscribe engine telemetry: `nova/telemetry/engine`
+- Subscribe flight telemetry: `nova/telemetry/flight`
+- Subscribe console passthrough: `nova/console`
+- Subscribe physical lockout/control: `nova/control`
 - Publish commands: `nova/command`
 - Publish controls: `nova/control`
+- Publish console passthrough: `nova/console`
+
+WebSocket telemetry payloads:
+
+```json
+{ "type": "engine_data", "data": [] }
+{ "type": "flight_data", "data": {} }
+{ "type": "flight_events", "events": [] }
+```
 
 ## Requirements
 To run this project, you will need Docker and Docker Compose installed on your machine. Installation guides for Docker can be found [here](https://docs.docker.com/get-docker/) and for Docker Compose [here](https://docs.docker.com/compose/install/).

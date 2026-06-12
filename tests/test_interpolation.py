@@ -1,6 +1,6 @@
 import pytest
 
-from app.parsing import linear_interpolate
+from app.services.data_service import linear_interpolate
 
 
 def test_linear_interpolate_inside_range() -> None:

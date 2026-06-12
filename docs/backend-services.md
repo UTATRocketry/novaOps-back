@@ -13,14 +13,50 @@ The backend is organized around a few core runtime services:
 
 ## Parsing Pipeline
 
-### Sensor parsing
+### Engine telemetry parsing
 
-1. Receive packet from MQTT (`source`, `sensors`).
-2. Select config section by source (`MCC128DAQ`, `MCC134DAQ`, `FAS`, fallback).
+1. Receive packet from MQTT topic `nova/telemetry/engine` (`source`, `sensors`).
+2. Select config section by source (`GCS`, `TCS`, `FAS`, fallback).
 3. Map `(hat_id, channel_id)` to configured sensor metadata.
 4. Optionally calibrate using piecewise linear interpolation.
 5. Apply rolling average smoothing.
-6. Broadcast parsed payload over websocket as `parsed_data`.
+6. Broadcast parsed payload over websocket as `engine_data`.
+7. Also broadcast `parsed_data` for compatibility with existing clients.
+
+Engine telemetry websocket payload:
+
+```json
+{ "type": "engine_data", "data": [] }
+```
+
+### Flight telemetry routing
+
+Lower-rate FAS avionics packets arrive on `nova/telemetry/flight`.
+
+Flight data is stored and broadcast without parsing:
+
+```json
+{ "source": "FAS", "data": { "...": "..." } }
+```
+
+```json
+{ "type": "flight_data", "data": {} }
+```
+
+Flight events are stored and broadcast without parsing:
+
+```json
+{ "source": "FAS", "events": [] }
+```
+
+```json
+{ "type": "flight_events", "events": [] }
+```
+
+### Console and lockout routing
+
+- `nova/console`: raw passthrough between frontend, backend, novaGround, and FAS. Backend publishes and broadcasts payloads without adding formatting.
+- `nova/control`: physical lockout updates. A payload such as `{ "source": "novaLock", "state": "locked" }` sets the runtime lockout state and blocks commands matched by `safetyRules.hazardous` while locked.
 
 ### Command parsing
 
@@ -40,7 +76,11 @@ The backend is organized around a few core runtime services:
 - Broadcasts:
   - `session`
   - `snapshot`
+  - `engine_data`
   - `parsed_data`
+  - `flight_data`
+  - `flight_events`
+  - `physical_lockout`
   - `actuator_states`
 
 ### RuntimeState
@@ -48,6 +88,10 @@ The backend is organized around a few core runtime services:
 - `calibration_enabled`
 - `data_saving_enabled`
 - `latest_sensors`
+- `latest_engine_data`
+- `latest_flight_data`
+- `latest_events`
+- `physical_lockout_state`
 - `actuator_states`
 
 ## API and OpenAPI

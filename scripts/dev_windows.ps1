@@ -19,11 +19,12 @@ python -m pip install -r requirements.txt
 
 $env:NOVA_MQTT_BROKER = $Broker
 $env:NOVA_MQTT_PORT = "1883"
+$env:NOVA_ADMIN_PASSWORD = "admin123" # change this in production!
 
 $dummyProcess = $null
 if ($WithDummy) {
-  $dummyProcess = Start-Process -FilePath "python" -ArgumentList "tools/novaGround_dummy.py" -PassThru
-  Write-Host "Started novaGround_dummy.py (PID $($dummyProcess.Id))"
+  $dummyProcess = Start-Process -FilePath "python" -ArgumentList "tools/novaSystem_dummy.py" -PassThru
+  Write-Host "Started novaSystem_dummy.py (PID $($dummyProcess.Id))"
 }
 
 try {
