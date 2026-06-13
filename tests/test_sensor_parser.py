@@ -85,3 +85,31 @@ def test_source_filters_out_other_buses() -> None:
         calibration_enabled=True,
     )
     assert parsed == []
+
+
+def test_fas_sensor_maps_from_board_based_config() -> None:
+    parser = SensorParser(RollingAverageStore(window_size=5))
+    config = SystemConfig.model_validate(
+        {
+            "Sensors": [
+                {
+                    "name": "PCC",
+                    "type": "PT",
+                    "unit": "psi",
+                    "binding": {"source": "FAS", "board_type": "EPB", "board_id": 2, "channel": 1},
+                    "convert": {"method": "linear", "calibration": [[0, 0], [2, 100]]},
+                }
+            ]
+        }
+    )
+
+    parsed = parser.parse(
+        source="FAS",
+        raw_sensors=[{"node": "EPB_3", "channel": 1, "value": 1.0, "timestamp": 9}],
+        config=config,
+        calibration_enabled=True,
+    )
+
+    assert len(parsed) == 1
+    assert parsed[0].name == "PCC"
+    assert parsed[0].value == 50.0

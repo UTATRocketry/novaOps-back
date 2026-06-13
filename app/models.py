@@ -46,8 +46,18 @@ class GcsSensorBinding(BaseModel):
 
 class FasSensorBinding(BaseModel):
     source: Literal["FAS"]
-    node: str
+    node: str | None = None 
+    board_type: str | None = None 
+    board_id: int = 0  
     channel: int
+
+    @property
+    def resolved_node(self) -> str | None:
+        if self.node:
+            return self.node
+        if self.board_type is None:
+            return None
+        return f"{self.board_type}_{self.board_id + 1}"
 
 
 class SensorEntry(BaseModel):
@@ -129,6 +139,27 @@ class SystemConfig(BaseModel):
     actuators: list[ActuatorEntry] = Field(default_factory=list, alias="Actuators")
     commands: dict[str, CommandEntry] = Field(default_factory=dict, alias="Commands")
     safety_rules: SafetyRules = Field(default_factory=SafetyRules, alias="safetyRules")
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_commands(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+
+        commands = data.get("Commands")
+        if not isinstance(commands, list):
+            return data
+
+        normalized_commands: dict[str, Any] = {}
+        for command in commands:
+            if not isinstance(command, dict):
+                continue
+
+            name = command.get("name")
+            if isinstance(name, str) and name:
+                normalized_commands[name] = {key: value for key, value in command.items() if key != "name"}
+
+        return {**data, "Commands": normalized_commands}
 
     def find_sensor(self, name: str) -> SensorEntry | None:
         for sensor in self.sensors:

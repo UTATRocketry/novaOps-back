@@ -56,7 +56,7 @@ class ConfigService:
         for sensor in config.sensors:
             binding = sensor.binding
             if isinstance(binding, FasSensorBinding):
-                address = ("FAS", binding.node, binding.channel)
+                address = ("FAS", binding.resolved_node, binding.channel)
             else:
                 address = (binding.source, binding.hat_id, binding.channel_id)
             if address in sensor_addresses:

@@ -64,13 +64,13 @@ class SensorParser:
         return _SOURCE_ALIASES.get(source.strip().lower())
 
     @staticmethod
-    def _gcs_lookup(sensors: Iterable[SensorEntry]) -> dict[tuple[int, int], SensorEntry]:
+    def _gcs_lookup(sensors: Iterable[SensorEntry], target: SourceTarget) -> dict[tuple[int, int], SensorEntry]:
         return {(s.binding.hat_id, s.binding.channel_id): s for s in sensors
-                if isinstance(s.binding, GcsSensorBinding)}
+                if isinstance(s.binding, GcsSensorBinding) and s.binding.source == target}
 
     @staticmethod
     def _fas_lookup(sensors: Iterable[SensorEntry]) -> dict[tuple[str, int], SensorEntry]:
-        return {(s.binding.node, s.binding.channel): s for s in sensors
+        return {(s.binding.resolved_node, s.binding.channel): s for s in sensors
                 if isinstance(s.binding, FasSensorBinding)}
 
     def parse(self, source: str, raw_sensors: list[dict], config: SystemConfig, calibration_enabled: bool) -> list[ParsedSensor]:
@@ -80,7 +80,7 @@ class SensorParser:
         if is_fas:
             lookup_fas = self._fas_lookup(config.sensors)
         else:
-            lookup_gcs = self._gcs_lookup(config.sensors)
+            lookup_gcs = self._gcs_lookup(config.sensors, target or SourceTarget.GCS)
 
         parsed: list[ParsedSensor] = []
         for item in raw_sensors:

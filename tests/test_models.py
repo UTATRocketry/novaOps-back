@@ -42,6 +42,26 @@ def test_sensor_binding_discriminates_on_source() -> None:
     assert fas.binding.node == "EPB_1" and fas.binding.channel == 1
 
 
+def test_fas_sensor_binding_derives_node_from_board_fields() -> None:
+    config = SystemConfig.model_validate(
+        {
+            "Sensors": [
+                {
+                    "name": "POT",
+                    "type": "PT",
+                    "unit": "psi",
+                    "binding": {"source": "FAS", "board_type": "EPB", "board_id": 1, "channel": 1},
+                    "convert": {"method": "linear", "calibration": [[1, 1]]},
+                }
+            ]
+        }
+    )
+
+    binding = config.sensors[0].binding
+    assert isinstance(binding, FasSensorBinding)
+    assert binding.resolved_node == "EPB_2"
+
+
 def test_tc_sensor_allows_convert_none() -> None:
     config = SystemConfig.model_validate(
         {
@@ -121,7 +141,7 @@ def test_servo_default_position_alias_accepts_camel_case() -> None:
 
 
 def test_fas_actuator_without_node_raises() -> None:
-    with pytest.raises(ValueError, match="must set binding.node"):
+    with pytest.raises(ValueError, match=r"must set either binding.node \(legacy\) or binding.board_type"):
         SystemConfig.model_validate(
             {
                 "Actuators": [
