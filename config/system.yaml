@@ -5,6 +5,8 @@ safetyRules:
     - SVFTV: ALL
     - SVGSD: ALL
   hazardous: # requires novaLock to be running and unlocked to use
+    - MOV: ALL
+    - MFV: ALL
     #- IMC-V: ALL
     #- IMC-G: ALL
     #- SVBVGS: OPEN
@@ -126,7 +128,8 @@ Sensors:
     range: [0, 1000]
     binding:
       source: FAS
-      node: EPB_1
+      board_type: EPB
+      board_id: 0
       channel: 1
     convert:
       method: linear
@@ -138,7 +141,8 @@ Sensors:
     range: [0, 1000]
     binding:
       source: FAS
-      node: EPB_2
+      board_type: EPB
+      board_id: 1
       channel: 1
     convert:
       method: linear
@@ -150,7 +154,8 @@ Sensors:
     range: [0, 1000]
     binding:
       source: FAS
-      node: EPB_3
+      board_type: EPB
+      board_id: 2
       channel: 1
     convert:
       method: linear
@@ -230,11 +235,19 @@ Actuators:
       relay_channel: 13
     actions:
       relay_type: "nominally_off"
+  - name: FAS_POWER
+    type: powered_device
+    binding:
+      target: GCS
+      relay_channel: 14
+    actions:
+      relay_type: "nominally_off"
   - name: SVFTV
     type: solenoid
     binding:
       target: FAS
-      node: EPB_1
+      board_type: EPB
+      board_id: 0
       relay_channel: 2
     actions:
       relay_type: "nominally_off"
@@ -243,7 +256,8 @@ Actuators:
     type: solenoid
     binding:
       target: FAS
-      node: EPB_2
+      board_type: EPB
+      board_id: 1
       relay_channel: 2
     actions:
       relay_type: "nominally_off"
@@ -252,7 +266,8 @@ Actuators:
     type: servo
     binding:
       target: FAS
-      node: EPB_1
+      board_type: EPB
+      board_id: 0
       relay_channel: 1
       servo_channel: 1
     actions:
@@ -263,7 +278,8 @@ Actuators:
     type: servo
     binding:
       target: FAS
-      node: EPB_3
+      board_type: EPB
+      board_id: 2
       relay_channel: 1
       servo_channel: 1
     actions:
@@ -274,10 +290,11 @@ Actuators:
     type: gpio_device
     binding:
       target: FAS
-      node: EPB_3
+      board_type: EPB
+      board_id: 2
       gpio_channel: 2
     actions:
-      gpio_commands: [ARM, DISARM]
+      gpio_commands: [arm, disarm]
   - name: GPIO_Test_1
     type: gpio_device
     binding:
@@ -292,57 +309,12 @@ Actuators:
 
 
 Commands:
-  START_DATA_SAVING:
-    binding:
-      target: GCS
-  STOP_DATA_SAVING:
-    binding:
-      target: GCS
-  GET_DATA_FILES:
-    binding:
-      target: GCS
-  POWER_CYCLE_SOFT:
+  - name: Discover
+    type: system
     binding:
       target: FAS
-      node: PMB
-  SET_FLIGHT_STATE:
+  - name: FailSafe
+    type: system
     binding:
       target: FAS
-      node: FMC
-    states: [STANDBY, ARMED]
-  GET_LOG_FILES:
-    binding:
-      target: FAS
-      node: FMC
-  GET_CONFIG_FILE:
-    binding:
-      target: FAS
-      node: FMC
-  SET_CONFIG_FILE:
-    binding:
-      target: FAS
-      node: FMC
-  LOAD_CONFIG_FILE:
-    binding:
-      target: FAS
-      node: FMC
-  START_CAMERA_RECORDING:
-    binding:
-      target: FAS
-      node: FMC
-  STOP_CAMERA_RECORDING:
-    binding:
-      target: FAS
-      node: FMC
-  SET_BLUE_RAVEN_STATE:
-    binding:
-      target: FAS
-      node: RAB
-      channel: 1
-    states: [ARM, DISARM]
-  SET_STRATO_STATE:
-    binding:
-      target: FAS
-      node: RAB
-      channel: 2
-    states: [ARM, DISARM]
+

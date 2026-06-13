@@ -6,3 +6,4 @@ paho-mqtt>=2.1.0
 python-multipart>=0.0.9
 Jinja2>=3.1.0
 numpy
+pyserial>=3.5.0

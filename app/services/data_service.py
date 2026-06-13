@@ -6,7 +6,7 @@ from typing import Iterable
 
 import numpy as np
 
-from app.models import ConvertMethod, SensorEntry, SourceTarget, SystemConfig
+from app.models import ConvertMethod, FasSensorBinding, GcsSensorBinding, SensorEntry, SourceTarget, SystemConfig
 
 
 def linear_interpolate(raw_value: float, points: list[tuple[float, float]] | None, degree: int = 1) -> float:
@@ -65,21 +65,22 @@ class SensorParser:
 
     @staticmethod
     def _gcs_lookup(sensors: Iterable[SensorEntry]) -> dict[tuple[int, int], SensorEntry]:
-        return {(s.binding.hat_id, s.binding.channel_id): s for s in sensors}
+        return {(s.binding.hat_id, s.binding.channel_id): s for s in sensors
+                if isinstance(s.binding, GcsSensorBinding)}
 
     @staticmethod
     def _fas_lookup(sensors: Iterable[SensorEntry]) -> dict[tuple[str, int], SensorEntry]:
-        return {(s.binding.node, s.binding.channel): s for s in sensors}
+        return {(s.binding.node, s.binding.channel): s for s in sensors
+                if isinstance(s.binding, FasSensorBinding)}
 
     def parse(self, source: str, raw_sensors: list[dict], config: SystemConfig, calibration_enabled: bool) -> list[ParsedSensor]:
         target = self._resolve_source(source)
-        sensors_cfg = [s for s in config.sensors if s.binding.source == target] if target else config.sensors
-
         is_fas = target == SourceTarget.FAS
+
         if is_fas:
-            lookup_fas = self._fas_lookup(sensors_cfg)
+            lookup_fas = self._fas_lookup(config.sensors)
         else:
-            lookup_gcs = self._gcs_lookup(sensors_cfg)
+            lookup_gcs = self._gcs_lookup(config.sensors)
 
         parsed: list[ParsedSensor] = []
         for item in raw_sensors:

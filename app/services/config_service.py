@@ -5,7 +5,7 @@ from typing import Any
 
 import yaml
 
-from app.models import SourceTarget, SystemConfig
+from app.models import FasSensorBinding, SourceTarget, SystemConfig
 
 
 class ConfigService:
@@ -55,7 +55,7 @@ class ConfigService:
         sensor_addresses: dict[tuple, str] = {}
         for sensor in config.sensors:
             binding = sensor.binding
-            if binding.source == SourceTarget.FAS:
+            if isinstance(binding, FasSensorBinding):
                 address = ("FAS", binding.node, binding.channel)
             else:
                 address = (binding.source, binding.hat_id, binding.channel_id)

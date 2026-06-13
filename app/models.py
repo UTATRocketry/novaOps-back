@@ -61,7 +61,9 @@ class SensorEntry(BaseModel):
 
 class ActuatorBinding(BaseModel):
     target: SourceTarget
-    node: str | None = None  # required when target == FAS
+    node: str | None = None          # legacy FAS node string, e.g. "EPB_1"
+    board_type: str | None = None    # FAS board kind, e.g. "EPB", "FMC"
+    board_id: int = 0                # 0-based FAS board index (default 0)
     relay_channel: int | None = None
     servo_channel: int | None = None
     gpio_channel: int | None = None
@@ -94,9 +96,13 @@ class ActuatorEntry(BaseModel):
     actions: ActuatorActions = Field(default_factory=ActuatorActions)
 
     @model_validator(mode="after")
-    def _fas_needs_node(self) -> "ActuatorEntry":
-        if self.binding.target == SourceTarget.FAS and self.binding.node is None:
-            raise ValueError(f"FAS actuator '{self.name}' must set binding.node")
+    def _fas_needs_board(self) -> "ActuatorEntry":
+        if self.binding.target == SourceTarget.FAS:
+            if self.binding.node is None and self.binding.board_type is None:
+                raise ValueError(
+                    f"FAS actuator '{self.name}' must set either binding.node (legacy) "
+                    "or binding.board_type"
+                )
         return self
 
 

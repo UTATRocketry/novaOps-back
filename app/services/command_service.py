@@ -138,135 +138,75 @@ class CommandParser:
 
         raise ValueError(f"Unsupported actuator type: {actuator.type}")
 
+    @staticmethod
+    def _board_fields(binding: ActuatorBinding) -> dict:
+        """Return board_type / board_id fields for a FAS command envelope."""
+        if binding.board_type is not None:
+            return {"board_type": binding.board_type, "board_id": binding.board_id}
+        # Legacy config: derive from node string ("EPB_1" → board_type="EPB", board_id=0).
+        if binding.node:
+            parts = binding.node.rsplit("_", 1)
+            if len(parts) == 2 and parts[1].isdigit():
+                return {"board_type": parts[0], "board_id": int(parts[1]) - 1}
+        return {"board_type": None, "board_id": binding.board_id}
+
     def _parse_fas(self, actuator: ActuatorEntry, state: str) -> list[dict]:
         binding = actuator.binding
         actions = actuator.actions
         state = state.strip()
         gpio_channel = self._resolve_gpio_channel(binding)
+        board = self._board_fields(binding)
+
+        def fas(**fields) -> dict:
+            return {"type": "fas", **board, **fields}
 
         if actuator.type == ActuatorType.SERVO:
             state_lower = state.lower()
 
-            if state_lower in {"enable", "disable"}:
-                return [
-                    {
-                        "type": "fas",
-                        "node": binding.node,
-                        "port": "servo",
-                        "channel": binding.servo_channel,
-                        "action": "on" if state_lower == "enable" else "off",
-                    }
-                ]
+            if state_lower == "enable":
+                return []  # servo enable is a no-op at the wire level
+
+            if state_lower == "disable":
+                # Drive PWM to 0 µs to park / disable the servo output.
+                return [fas(port="servo", channel=binding.servo_channel, value=0)]
 
             if state_lower in {"on", "off"}:
                 if binding.relay_channel is None:
                     raise ValueError(
                         f"Servo '{actuator.name}' does not define relay_channel, so state '{state}' is invalid"
                     )
-                return [
-                    {
-                        "type": "fas",
-                        "node": binding.node,
-                        "port": "relay",
-                        "channel": binding.relay_channel,
-                        "action": state_lower,
-                    }
-                ]
+                return [fas(port="relay", channel=binding.relay_channel, action=state_lower)]
 
             alias_lookup = {alias.lower(): pos for alias, pos in zip(actions.position_aliases, actions.positions)}
             micros = alias_lookup.get(state_lower)
             if micros is None:
                 raise ValueError(f"Unsupported servo state '{state}' for actuator '{actuator.name}'")
             commands: list[dict] = []
-            # FAS servos carry both a power relay and a PWM channel: power the relay, then move.
+            # FAS servos carry both a power relay and a PWM channel: energise relay then move.
             if binding.relay_channel is not None:
-                commands.append(
-                    {"type": "fas", "node": binding.node, "port": "relay", "channel": binding.relay_channel, "action": "on"}
-                )
-            commands.append(
-                {
-                    "type": "fas",
-                    "node": binding.node,
-                    "port": "servo",
-                    "channel": binding.servo_channel,
-                    "action": state,
-                    "value": int(micros),
-                }
-            )
+                commands.append(fas(port="relay", channel=binding.relay_channel, action="on"))
+            commands.append(fas(port="servo", channel=binding.servo_channel, action=state, value=int(micros)))
             return commands
 
         if actuator.type in (ActuatorType.SOLENOID, ActuatorType.POWERED_DEVICE):
             power = self._resolve_power(state, actions)
-            return [
-                {
-                    "type": "fas",
-                    "node": binding.node,
-                    "port": "relay",
-                    "channel": binding.relay_channel,
-                    "action": "on" if power else "off",
-                }
-            ]
+            return [fas(port="relay", channel=binding.relay_channel, action="on" if power else "off")]
 
         if actuator.type == ActuatorType.POWERED_GPIO_DEVICE:
             if state.lower() in {"on", "off"}:
                 if binding.relay_channel is None:
                     raise ValueError(f"GPIO actuator '{actuator.name}' does not define relay_channel")
-                return [
-                    {
-                        "type": "fas",
-                        "node": binding.node,
-                        "port": "relay",
-                        "channel": binding.relay_channel,
-                        "action": state.lower(),
-                    }
-                ]
+                return [fas(port="relay", channel=binding.relay_channel, action=state.lower())]
             if gpio_channel is None:
                 raise ValueError(f"GPIO actuator '{actuator.name}' does not define gpio_channel")
-            return [
-                {
-                    "type": "fas",
-                    "node": binding.node,
-                    "port": "gpio",
-                    "channel": gpio_channel,
-                    "action": state,
-                }
-            ]
+            return [fas(port="gpio", channel=gpio_channel, action=state)]
 
         if actuator.type == ActuatorType.GPIO_DEVICE:
             if gpio_channel is None:
                 raise ValueError(f"GPIO actuator '{actuator.name}' does not define gpio_channel")
-            return [
-                {
-                    "type": "fas",
-                    "node": binding.node,
-                    "port": "gpio",
-                    "channel": gpio_channel,
-                    "action": state,
-                }
-            ]
+            return [fas(port="gpio", channel=gpio_channel, action=state)]
 
         raise ValueError(f"Unsupported actuator type: {actuator.type}")
-
-    def parse_system_command(self, name: str, state: str | None) -> list[dict]:
-        command = self._config.find_command(name)
-        if command is None:
-            raise ValueError(f"System command '{name}' not found in config")
-        if command.states is not None:
-            if state is None or state not in command.states:
-                raise ValueError(
-                    f"System command '{name}' requires state in {command.states}, got '{state}'"
-                )
-
-        emitted: dict[str, object] = {
-            "type": "fas_cmd",
-            "node": command.binding.node,
-            "command": name,
-        }
-        if command.binding.channel is not None:
-            emitted["channel"] = command.binding.channel
-        if state is not None:
-            emitted["state"] = state
-        return [emitted]
 
 
 class CommandService:
@@ -307,9 +247,4 @@ class CommandService:
         if payload.name == "GET_DATA_FILES":
             return {"data_files": sorted(path.name for path in ctx.data_dir.glob("*.csv"))}
 
-        if ctx.runtime.lockout_is_locked and ctx.config_service.config.is_hazardous_command(payload.name, payload.state):
-            raise ValueError("Nova is locked; FAS system commands are disabled")
-
-        published = CommandParser(ctx.config_service.config).parse_system_command(payload.name, payload.state)
-        ctx.mqtt_service.publish_device_commands(published)
-        return {"published_commands": published}
+        raise ValueError(f"Unknown system command: {payload.name!r}")
