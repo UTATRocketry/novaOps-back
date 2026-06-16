@@ -276,7 +276,7 @@ function renderActuators(actuators) {
       openCloseBtn.textContent = isOpen ? open : closed;
       setButtonStyle(openCloseBtn, isOpen, "green", "darkgreen", "red", "darkred");
       openCloseBtn.onclick = () => onStateAction(actuator, isOpen ? closed : open, {
-        requiresEnable: isServoType(actuator.actuator_type),
+        //requiresEnable: isServoType(actuator.actuator_type),
         requiresPower: isServoType(actuator.actuator_type) && needsPowerButton(actuator)
       });
       stateCell.appendChild(openCloseBtn);
@@ -291,7 +291,7 @@ function renderActuators(actuators) {
           btn.textContent = alias;
           setButtonStyle(btn, active, "green", "darkgreen", "gray", "black");
           btn.onclick = () => onStateAction(actuator, alias, {
-            requiresEnable: true,
+            //requiresEnable: true,
             requiresPower: needsPowerButton(actuator)
           });
           stateCell.appendChild(btn);

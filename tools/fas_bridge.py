@@ -774,16 +774,18 @@ class FasBridge:
                 "sensors": list(latest.values()),
             }
             flight_payload = {
-                "source":           self._node_id,
-                "fas_boards":       fas_boards_snap,
-                "fas_actuators":    fas_actuators_snap,
-                "fas_sensors":      fas_sensors_snap,
-                "fas_board_status": fas_board_status_snap,
-                "fas_fmc":          fas_fmc_snap,
-                "fas_pmb":          fas_pmb_snap,
-                "fas_imc":          fas_imc_snap,
+                "source": self._node_id,
+                "data": {
+                    "fas_boards":       fas_boards_snap,
+                    "fas_actuators":    fas_actuators_snap,
+                    "fas_sensors":      fas_sensors_snap,
+                    "fas_board_status": fas_board_status_snap,
+                    "fas_fmc":          fas_fmc_snap,
+                    "fas_pmb":          fas_pmb_snap,
+                    "fas_imc":          fas_imc_snap,
+                },
             }
-            #self._client.publish(TELEMETRY_TOPIC, json.dumps(engine_payload),    qos=0)
+            #self._client.publish(TELEMETRY_TOPIC, json.dumps(fas_sensor_payload),    qos=0)
             if latest:
                 self._client.publish(TELEMETRY_TOPIC, json.dumps(engine_payload), qos=0)
             self._client.publish(FLIGHT_TOPIC,    json.dumps(flight_payload), qos=0)
