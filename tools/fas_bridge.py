@@ -11,10 +11,15 @@ silently dropped.
 Telemetry published
   nova/telemetry/engine — sensors: FAS EPB ADC samples at hat_id = (100 + board_id)
                           gpios:   always empty (bridge has no GPIO manager)
-  nova/telemetry/flight — fas_boards: online/offline status per board
-                          fas_imc:    IMC arm state
-  fas_boards — board online/offline and uptime, updated from heartbeats
-  fas_imc    — IMC arm/disarm/status, updated from RT_MSG_IMC_STATUS frames
+  nova/telemetry/flight — full board state snapshot, mirroring the gs server:
+                          fas_boards:       online/uptime/fw/caps per board
+                          fas_actuators:    per-channel actuator state (EPB)
+                          fas_sensors:      SENSOR_STATUS masks per board
+                          fas_board_status: EPB bus voltage / current rails
+                          fas_fmc:          FMC IMU/baro/GPS/temp/SD/radio
+                          fas_pmb:          PMB power/vmon/temp/charger
+                          fas_imc:          IMC arm/disarm state
+  All message types in gs/protocol.py are decoded via decode_payload().
 
 Inbound commands handled
   {"type":"fas",     ...}   — both op-shape and board_type/port/action shape
@@ -61,19 +66,48 @@ RT_BOARD_RAB = 4
 RT_BOARD_PMB = 5
 BOARD_KIND_NAMES = {0: "GS", 1: "FMC", 2: "EPB", 3: "IMC", 4: "RAB", 5: "PMB"}
 
-# Message types (rt_msg_t)
+# Message types (rt_msg_t) — full set, mirrors gs/protocol.py MsgType
 RT_MSG_HEARTBEAT          = 0x01
 RT_MSG_DISCOVERY_REQ      = 0x02
 RT_MSG_DISCOVERY_ANNOUNCE = 0x03
+RT_MSG_TIME_SYNC          = 0x04
 RT_MSG_PWM_SET            = 0x10
 RT_MSG_LOAD_SW_SET        = 0x11
 RT_MSG_ACTUATOR_QUERY     = 0x12
+RT_MSG_ACTUATOR_CONFIG    = 0x13
+RT_MSG_ACTUATOR_STATE     = 0x14
 RT_MSG_ACTUATOR_FAILSAFE  = 0x1F
+RT_MSG_ADC_BURST          = 0x20
+RT_MSG_SENSOR_STATUS      = 0x21
 RT_MSG_BOARD_STATUS       = 0x22
 RT_MSG_ADC_SAMPLE         = 0x23
-RT_MSG_IMC_STATUS         = 0x33
+RT_MSG_FMC_IMU_ACCEL      = 0x24
+RT_MSG_FMC_IMU_GYRO       = 0x25
+RT_MSG_FMC_ACCEL_HG       = 0x26
+RT_MSG_FMC_MAG            = 0x27
+RT_MSG_FMC_BARO           = 0x28
+RT_MSG_FMC_GPS_POS        = 0x29
+RT_MSG_FMC_GPS_INFO       = 0x2A
+RT_MSG_FMC_HEALTH         = 0x2B
+RT_MSG_PMB_PWR            = 0x2C
+RT_MSG_PMB_VMON           = 0x2D
+RT_MSG_PMB_TEMP           = 0x2E
+RT_MSG_FMC_TEMP           = 0x2F
 RT_MSG_IGN_ARM            = 0x30
+RT_MSG_IGN_FIRE           = 0x31
 RT_MSG_IGN_DISARM         = 0x32
+RT_MSG_IMC_STATUS         = 0x33
+RT_MSG_FMC_SD_STATUS      = 0x34
+RT_MSG_FMC_RADIO_STATUS   = 0x35
+RT_MSG_PMB_CHARGER        = 0x39
+
+# Names for FMC vector sensors, keyed by msg type → snapshot field name
+FMC_VEC3_FIELDS = {
+    RT_MSG_FMC_IMU_ACCEL: "imu_accel",
+    RT_MSG_FMC_IMU_GYRO:  "imu_gyro",
+    RT_MSG_FMC_ACCEL_HG:  "accel_hg",
+    RT_MSG_FMC_MAG:       "mag",
+}
 
 # ADC scaling: firmware shifts 24-bit code right by 8 → int16
 ADC_INT16_TO_V  = 256.0 * 1.2 / (1 << 23)
@@ -197,6 +231,96 @@ class FrameParser:
             self._state = _ParserState.WAIT_MAGIC
 
 
+# ── Inbound payload decoder (mirrors gs/protocol.py unpack_payload) ───────────
+
+def decode_payload(msg: int, data: bytes) -> dict:
+    """Decode a frame payload into a dict of fields, keyed by message type.
+
+    Mirrors unpack_payload() in gs/protocol.py byte-for-byte. Unknown or
+    too-short payloads fall back to {"raw_hex": ...} so nothing is lost.
+    """
+    def fits(fmt: str) -> bool:
+        return len(data) >= struct.calcsize(fmt)
+
+    if msg == RT_MSG_HEARTBEAT and fits("<IHBB"):
+        uptime, fw, bid, flags = struct.unpack_from("<IHBB", data, 0)
+        return {"uptime_ms": uptime, "fw_version": fw, "board_id": bid, "flags": flags}
+    if msg == RT_MSG_DISCOVERY_ANNOUNCE and fits("<BBBBHBB"):
+        kind, bid, nch, nse, fw, caps, _ = struct.unpack_from("<BBBBHBB", data, 0)
+        return {"board_kind": kind, "board_id": bid, "num_channels": nch,
+                "num_sensors": nse, "fw_version": fw, "caps_mask": caps}
+    if msg == RT_MSG_ACTUATOR_CONFIG and fits("<BBBB4s"):
+        ch, caps, safe, _, name = struct.unpack_from("<BBBB4s", data, 0)
+        return {"channel_idx": ch, "caps": caps, "safe_state": safe,
+                "short_name": name.decode("ascii", errors="replace").rstrip("\x00")}
+    if msg == RT_MSG_ACTUATOR_STATE and fits("<BBHHBB"):
+        ch, on, pulse, period, faults, _ = struct.unpack_from("<BBHHBB", data, 0)
+        return {"channel_idx": ch, "load_sw_on": on, "pulse_us": pulse,
+                "period_us": period, "fault_bits": faults}
+    if msg == RT_MSG_ADC_BURST and fits("<4h"):
+        c0, c1, c2, c3 = struct.unpack_from("<4h", data, 0)
+        return {"ch": [c0, c1, c2, c3]}
+    if msg == RT_MSG_ADC_SAMPLE and fits("<Ihh"):
+        t_us, c0, c1 = struct.unpack_from("<Ihh", data, 0)
+        return {"t_us": t_us, "ch": [c0, c1]}
+    if msg in FMC_VEC3_FIELDS and fits("<3hH"):
+        x, y, z, t_ms = struct.unpack_from("<3hH", data, 0)
+        return {"axes": [x, y, z], "t_ms": t_ms}
+    if msg == RT_MSG_FMC_BARO and fits("<ih"):
+        pressure_pa, temp_cc = struct.unpack_from("<ih", data, 0)
+        return {"pressure_pa": pressure_pa, "temp_cc": temp_cc}
+    if msg == RT_MSG_FMC_GPS_POS and fits("<ii"):
+        lat_1e7, lon_1e7 = struct.unpack_from("<ii", data, 0)
+        return {"lat_1e7": lat_1e7, "lon_1e7": lon_1e7}
+    if msg == RT_MSG_FMC_GPS_INFO and fits("<hBBHH"):
+        alt_m, fix, sats, hdop_x10, speed_cms = struct.unpack_from("<hBBHH", data, 0)
+        return {"alt_m": alt_m, "fix": fix, "sats": sats,
+                "hdop_x10": hdop_x10, "speed_cms": speed_cms}
+    if msg == RT_MSG_FMC_HEALTH and fits("<BBBBHBB"):
+        imu, accel, mag, present, baro_c1, gfix, gsats = struct.unpack_from("<BBBBHBB", data, 0)
+        return {"imu_id": imu, "accel_id": accel, "mag_id": mag,
+                "present_mask": present, "baro_c1": baro_c1,
+                "gps_fix": gfix, "gps_sats": gsats}
+    if msg == RT_MSG_PMB_PWR and fits("<HHHH"):
+        v8, i8, v24, i24 = struct.unpack_from("<HHHH", data, 0)
+        return {"v_8v4_mv": v8, "i_8v4_ma": i8, "v_24v0_mv": v24, "i_24v0_ma": i24}
+    if msg == RT_MSG_PMB_VMON and fits("<HHHBB"):
+        vmain, vbatt, vgse, flags, _ = struct.unpack_from("<HHHBB", data, 0)
+        return {"v_main_mv": vmain, "v_batt_mv": vbatt, "v_gse_mv": vgse, "flags": flags}
+    if msg == RT_MSG_PMB_TEMP and fits("<hhhH"):
+        ta, tb, tc, _ = struct.unpack_from("<hhhH", data, 0)
+        return {"temp_amb_cc": ta, "temp_buck_cc": tb, "temp_boost_cc": tc}
+    if msg == RT_MSG_PMB_CHARGER and fits("<hHBBBB"):
+        i_chg, v_bat, flags, state, status, cells = struct.unpack_from("<hHBBBB", data, 0)
+        return {"i_chg_ma": i_chg, "v_bat_mv": v_bat, "flags": flags,
+                "state": state, "status": status, "cells": cells}
+    if msg == RT_MSG_BOARD_STATUS and fits("<HHHH"):
+        v8, v24, i8, i24 = struct.unpack_from("<HHHH", data, 0)
+        return {"vmon_8v4_mv": v8, "vmon_24v_mv": v24,
+                "isense_8v4_ma": i8, "isense_24v_ma": i24}
+    if msg == RT_MSG_FMC_TEMP and fits("<hhI"):
+        t_h7, t_pwr, _ = struct.unpack_from("<hhI", data, 0)
+        return {"temp_h7_cc": t_h7, "temp_pwr_cc": t_pwr}
+    if msg == RT_MSG_FMC_SD_STATUS and fits("<BBHI"):
+        state, err, free_mb, written_kb = struct.unpack_from("<BBHI", data, 0)
+        return {"state": state, "err": err, "free_mb": free_mb, "written_kb": written_kb}
+    if msg == RT_MSG_FMC_RADIO_STATUS and fits("<BBHI"):
+        flags, every_n, tx_frames, tx_bytes = struct.unpack_from("<BBHI", data, 0)
+        return {"flags": flags, "every_n": every_n,
+                "tx_frames": tx_frames, "tx_bytes": tx_bytes}
+    if msg == RT_MSG_TIME_SYNC and fits("<II"):
+        t_us, _ = struct.unpack_from("<II", data, 0)
+        return {"t_us": t_us}
+    if msg == RT_MSG_SENSOR_STATUS and fits("<BBBBI"):
+        conn, sat, err, _, _ = struct.unpack_from("<BBBBI", data, 0)
+        return {"connected_mask": conn, "saturated_mask": sat, "error_mask": err}
+    if msg == RT_MSG_IMC_STATUS and fits("<BBBBI"):
+        armed, arm_line, disarm_line, flags, _ = struct.unpack_from("<BBBBI", data, 0)
+        return {"armed": armed, "arm_line": arm_line,
+                "disarm_line": disarm_line, "flags": flags}
+    return {"raw_hex": data.hex()}
+
+
 # ── Outbound payload builders ────────────────────────────────────────────────
 
 def _encode_pwm_set(duty_q15: int, period_us: int) -> bytes:
@@ -256,9 +380,15 @@ class FasBridge:
         self._lock       = threading.Lock()
         self._seq        = 0
 
-        # Telemetry state
+        # Telemetry state — mirrors gs StateModel: boards, actuators, sensors, imc
+        # plus FMC/PMB onboard telemetry, all keyed by board key ("EPB:0", etc.)
         self._adc_samples: deque[dict] = deque(maxlen=1024)
-        self._fas_boards: dict[str, dict]  = {}    # key → {online, uptime_ms, last_seen}
+        self._fas_boards: dict[str, dict]  = {}    # key → {online, uptime_ms, last_seen, ...}
+        self._fas_actuators: dict[str, dict[int, dict]] = {}  # key → {channel_idx → state}
+        self._fas_sensors: dict[str, dict] = {}    # key → SENSOR_STATUS fields
+        self._fas_board_status: dict[str, dict] = {}  # key → BOARD_STATUS V+I
+        self._fas_fmc: dict[str, dict] = {}        # key → merged FMC sensor fields
+        self._fas_pmb: dict[str, dict] = {}        # key → merged PMB telemetry fields
         self._fas_imc  = {"board_id": 0, "armed": False,
                            "arm_line": False, "disarm_line": False}
         self._console_active = False
@@ -421,66 +551,119 @@ class FasBridge:
             }
             self._client.publish(CONSOLE_TOPIC, json.dumps(frame), qos=0)
 
-        board_id = cid["board_id"]
+        board_id  = cid["board_id"]
+        kind_name = BOARD_KIND_NAMES.get(cid["kind"], "UNK")
+        key       = f"{kind_name}:{board_id}"
+        now       = time.monotonic()
+        d         = decode_payload(msg, data)
 
-        if msg == RT_MSG_HEARTBEAT and len(data) >= 8:
-            uptime_ms = struct.unpack_from("<I", data, 0)[0]
-            kind_name = BOARD_KIND_NAMES.get(cid["kind"], "UNK")
-            key = f"{kind_name}:{board_id}"
+        if msg == RT_MSG_HEARTBEAT:
             with self._lock:
-                existing = self._fas_boards.get(key, {})
+                prev = self._fas_boards.get(key, {})
                 self._fas_boards[key] = {
-                    "online":    True,
-                    "uptime_ms": uptime_ms,
-                    "last_seen": time.monotonic(),
-                    # Preserve num_channels/sensors from the announce if present
-                    "num_channels": existing.get("num_channels", 0),
-                    "num_sensors":  existing.get("num_sensors", 0),
+                    **prev,
+                    "kind":       kind_name,
+                    "board_id":   board_id,
+                    "online":     True,
+                    "uptime_ms":  d.get("uptime_ms", 0),
+                    "fw_version": d.get("fw_version", prev.get("fw_version", 0)),
+                    "last_seen":  now,
+                    "num_channels": prev.get("num_channels", 0),
+                    "num_sensors":  prev.get("num_sensors", 0),
                 }
-            self._log(2, f"[bridge] heartbeat {key} uptime={uptime_ms}ms")
+            self._log(2, f"[bridge] heartbeat {key} uptime={d.get('uptime_ms')}ms")
 
-        elif msg == RT_MSG_DISCOVERY_ANNOUNCE and len(data) >= 8:
-            # rt_announce_t: uint8 board_kind, board_id, num_channels, num_sensors,
-            #                uint16 fw_version, uint8 caps_mask, uint8 reserved
-            bkind, bid, n_ch, n_sens, fw, caps, _ = struct.unpack_from("<BBBBHBB", data, 0)
-            kind_name = BOARD_KIND_NAMES.get(bkind, "UNK")
-            key = f"{kind_name}:{bid}"
+        elif msg == RT_MSG_DISCOVERY_ANNOUNCE:
             with self._lock:
+                prev = self._fas_boards.get(key, {})
                 self._fas_boards[key] = {
+                    **prev,
+                    "kind":         kind_name,
+                    "board_id":     board_id,
                     "online":       True,
-                    "uptime_ms":    0,
-                    "last_seen":    time.monotonic(),
-                    "num_channels": n_ch,
-                    "num_sensors":  n_sens,
+                    "uptime_ms":    prev.get("uptime_ms", 0),
+                    "last_seen":    now,
+                    "num_channels": d.get("num_channels", 0),
+                    "num_sensors":  d.get("num_sensors", 0),
+                    "caps_mask":    d.get("caps_mask", 0),
+                    "fw_version":   d.get("fw_version", prev.get("fw_version", 0)),
                 }
-            self._log(1, f"[bridge] announce {key} fw={fw:#06x} ch={n_ch} sens={n_sens}")
+            self._log(1, f"[bridge] announce {key} fw={d.get('fw_version', 0):#06x} "
+                         f"ch={d.get('num_channels')} sens={d.get('num_sensors')}")
 
-        elif msg == RT_MSG_ADC_SAMPLE and len(data) >= 8:
-            # rt_adc_sample_t: uint32 t_us, int16 ch0, int16 ch1
-            t_us, ch0, ch1 = struct.unpack_from("<Ihh", data, 0)
-            now_ms = int(time.monotonic() * 1000)
+        elif msg in (RT_MSG_ADC_SAMPLE, RT_MSG_ADC_BURST):
+            # Collapse both stamped samples and legacy bursts into the ADC queue.
+            ch = d.get("ch", [])
+            t_us = d.get("t_us", 0)
+            now_ms = int(now * 1000)
             with self._lock:
                 self._adc_samples.append({
                     "board_id": board_id,
                     "t_us":     t_us,
-                    "v0":       ch0 * ADC_INT16_TO_V,
-                    "v1":       ch1 * ADC_INT16_TO_V,
-                    "ma0":      ch0 * ADC_INT16_TO_MA,
-                    "ma1":      ch1 * ADC_INT16_TO_MA,
+                    "v0":       (ch[0] if len(ch) > 0 else 0) * ADC_INT16_TO_V,
+                    "v1":       (ch[1] if len(ch) > 1 else 0) * ADC_INT16_TO_V,
+                    "ma0":      (ch[0] if len(ch) > 0 else 0) * ADC_INT16_TO_MA,
+                    "ma1":      (ch[1] if len(ch) > 1 else 0) * ADC_INT16_TO_MA,
                     "ts_ms":    now_ms,
                 })
 
-        elif msg == RT_MSG_IMC_STATUS and len(data) >= 4:
-            # rt_imc_status_t: uint8 armed, arm_line, disarm_line, flags, uint32 reserved
-            armed, arm_line, disarm_line, flags = struct.unpack_from("<BBBB", data, 0)
+        elif msg == RT_MSG_ACTUATOR_STATE:
+            ch = d.get("channel_idx", 0)
+            with self._lock:
+                self._fas_actuators.setdefault(key, {})[ch] = d
+            self._log(2, f"[bridge] actuator {key} ch={ch} pulse={d.get('pulse_us')}us")
+
+        elif msg == RT_MSG_SENSOR_STATUS:
+            with self._lock:
+                self._fas_sensors[key] = d
+            self._log(2, f"[bridge] sensor status {key} conn={d.get('connected_mask')}")
+
+        elif msg == RT_MSG_BOARD_STATUS:
+            with self._lock:
+                self._fas_board_status[key] = d
+            self._log(2, f"[bridge] board status {key} v8={d.get('vmon_8v4_mv')}mV")
+
+        elif msg in FMC_VEC3_FIELDS:
+            field = FMC_VEC3_FIELDS[msg]
+            with self._lock:
+                self._fas_fmc.setdefault(key, {})[field] = d
+
+        elif msg in (RT_MSG_FMC_BARO, RT_MSG_FMC_GPS_POS, RT_MSG_FMC_GPS_INFO,
+                     RT_MSG_FMC_HEALTH, RT_MSG_FMC_TEMP,
+                     RT_MSG_FMC_SD_STATUS, RT_MSG_FMC_RADIO_STATUS):
+            field = {
+                RT_MSG_FMC_BARO:         "baro",
+                RT_MSG_FMC_GPS_POS:      "gps_pos",
+                RT_MSG_FMC_GPS_INFO:     "gps_info",
+                RT_MSG_FMC_HEALTH:       "health",
+                RT_MSG_FMC_TEMP:         "temp",
+                RT_MSG_FMC_SD_STATUS:    "sd",
+                RT_MSG_FMC_RADIO_STATUS: "radio",
+            }[msg]
+            with self._lock:
+                self._fas_fmc.setdefault(key, {})[field] = d
+
+        elif msg in (RT_MSG_PMB_PWR, RT_MSG_PMB_VMON,
+                     RT_MSG_PMB_TEMP, RT_MSG_PMB_CHARGER):
+            field = {
+                RT_MSG_PMB_PWR:     "pwr",
+                RT_MSG_PMB_VMON:    "vmon",
+                RT_MSG_PMB_TEMP:    "temp",
+                RT_MSG_PMB_CHARGER: "charger",
+            }[msg]
+            with self._lock:
+                self._fas_pmb.setdefault(key, {})[field] = d
+
+        elif msg == RT_MSG_IMC_STATUS:
             with self._lock:
                 self._fas_imc.update({
                     "board_id":    board_id,
-                    "armed":       bool(armed),
-                    "arm_line":    bool(arm_line),
-                    "disarm_line": bool(disarm_line),
+                    "armed":       bool(d.get("armed")),
+                    "arm_line":    bool(d.get("arm_line")),
+                    "disarm_line": bool(d.get("disarm_line")),
+                    "flags":       d.get("flags", 0),
                 })
-            self._log(2, f"[bridge] IMC status board={board_id} armed={bool(armed)}")
+            self._log(2, f"[bridge] IMC status board={board_id} armed={bool(d.get('armed'))}")
 
     # ── FAS frame send helpers ────────────────────────────────────────────────
 
@@ -569,9 +752,17 @@ class FasBridge:
                 self._adc_samples.clear()
 
                 fas_boards_snap = [
-                    {"key": k, "online": v["online"], "uptime_ms": v["uptime_ms"]}
+                    {"key": k, **{kk: vv for kk, vv in v.items() if kk != "last_seen"}}
                     for k, v in self._fas_boards.items()
                 ]
+                fas_actuators_snap = {
+                    k: [by_ch[c] for c in sorted(by_ch)]
+                    for k, by_ch in self._fas_actuators.items()
+                }
+                fas_sensors_snap = {k: dict(v) for k, v in self._fas_sensors.items()}
+                fas_board_status_snap = {k: dict(v) for k, v in self._fas_board_status.items()}
+                fas_fmc_snap = {k: dict(v) for k, v in self._fas_fmc.items()}
+                fas_pmb_snap = {k: dict(v) for k, v in self._fas_pmb.items()}
                 fas_imc_snap = dict(self._fas_imc)
 
             fas_sensor_payload = {
@@ -580,17 +771,21 @@ class FasBridge:
             }
             engine_payload = {
                 "source":  self._node_id,
-                "sensors": [],
-                "gpios":   [],
+                "sensors": list(latest.values()),
             }
             flight_payload = {
-                "source":     self._node_id,
-                "fas_boards": fas_boards_snap,
-                "fas_imc":    fas_imc_snap,
+                "source":           self._node_id,
+                "fas_boards":       fas_boards_snap,
+                "fas_actuators":    fas_actuators_snap,
+                "fas_sensors":      fas_sensors_snap,
+                "fas_board_status": fas_board_status_snap,
+                "fas_fmc":          fas_fmc_snap,
+                "fas_pmb":          fas_pmb_snap,
+                "fas_imc":          fas_imc_snap,
             }
-            self._client.publish(TELEMETRY_TOPIC, json.dumps(engine_payload),    qos=0)
+            #self._client.publish(TELEMETRY_TOPIC, json.dumps(engine_payload),    qos=0)
             if latest:
-                self._client.publish(TELEMETRY_TOPIC, json.dumps(fas_sensor_payload), qos=0)
+                self._client.publish(TELEMETRY_TOPIC, json.dumps(engine_payload), qos=0)
             self._client.publish(FLIGHT_TOPIC,    json.dumps(flight_payload), qos=0)
 
             time.sleep(self._publish_ms / 1000.0)
@@ -600,8 +795,8 @@ class FasBridge:
         for key in self._fas_boards:
             colon = key.find(":")
             if colon != -1 and int(key[colon + 1:]) == board_id:
-                return key[:colon] + "_" + str(board_id + 1)
-        return f"EPB_{board_id + 1}"
+                return key[:colon] + "_" + str(board_id)
+        return f"EPB_{board_id}"
 
     def _log(self, level: int, msg: str) -> None:
         if self._verbosity >= level:
@@ -627,7 +822,7 @@ def main() -> None:
                    help="Serial port connected to the FAS FMC bridge (e.g. /dev/ttyUSB0)")
     p.add_argument("--baud",       type=int, default=460800)
     p.add_argument("--broker",     default="localhost:1883")
-    p.add_argument("--node-id",    default="fas_bridge",
+    p.add_argument("--node-id",    default="FAS",
                    help="MQTT client ID and telemetry source name")
     p.add_argument("--publish-ms", type=int, default=50,
                    help="Telemetry publish interval ms")

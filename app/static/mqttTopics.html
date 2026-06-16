@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>WebSocket JSON Viewer</title>
+    <title>MQTT Topic Viewer</title>
     <style>
         body { font-family: Arial, sans-serif; margin: 20px; }
         pre { background: #f4f4f4; border: 1px solid #ddd; padding: 10px; overflow-x: auto; margin: 0; flex: 1; }
@@ -45,10 +45,12 @@
 
         // Each column: { filter: string|"", dataElem, selectElem, latest: {} }
         const columns = [];
-        // Track every type seen so the filter dropdowns can offer them.
-        const seenTypes = new Set();
-        // Keep the most recent message per type so a new/changed filter shows data immediately.
-        const latestByType = {};
+        // Track every topic seen so the filter dropdowns can offer them.
+        const seenTopics = new Set();
+        // Keep the most recent envelope per topic so a new/changed filter shows data immediately.
+        const latestByTopic = {};
+        // Most recent envelope of any topic (for "All topics").
+        let latestAny = null;
 
         function createColumn(initialFilter = "") {
             if (columns.length >= MAX_COLUMNS) return;
@@ -60,7 +62,7 @@
             header.className = "column-header";
 
             const label = document.createElement("label");
-            label.textContent = "Type:";
+            label.textContent = "Topic:";
 
             const select = document.createElement("select");
 
@@ -80,7 +82,7 @@
             col.appendChild(dataElem);
             columnsElem.appendChild(col);
 
-            const colState = { filter: initialFilter, dataElem, selectElem: select, latest: null };
+            const colState = { filter: initialFilter, dataElem, selectElem: select };
 
             select.addEventListener("change", () => {
                 colState.filter = select.value;
@@ -107,13 +109,13 @@
 
             const allOpt = document.createElement("option");
             allOpt.value = "";
-            allOpt.textContent = "All types";
+            allOpt.textContent = "All topics";
             select.appendChild(allOpt);
 
-            Array.from(seenTypes).sort().forEach((type) => {
+            Array.from(seenTopics).sort().forEach((topic) => {
                 const opt = document.createElement("option");
-                opt.value = type;
-                opt.textContent = type;
+                opt.value = topic;
+                opt.textContent = topic;
                 select.appendChild(opt);
             });
 
@@ -125,14 +127,11 @@
         }
 
         function renderColumn(colState) {
-            let msg;
-            if (colState.filter === "") {
-                msg = colState.latest;
-            } else {
-                msg = latestByType[colState.filter] || null;
-            }
-            colState.dataElem.textContent = msg
-                ? JSON.stringify(msg, null, 2)
+            const env = colState.filter === ""
+                ? latestAny
+                : latestByTopic[colState.filter] || null;
+            colState.dataElem.textContent = env
+                ? JSON.stringify(env, null, 2)
                 : "Waiting for data...";
         }
 
@@ -140,23 +139,21 @@
             addColBtn.disabled = columns.length >= MAX_COLUMNS;
         }
 
-        function handleMessage(msg) {
-            const type = msg && msg.type;
-            let newType = false;
-            if (typeof type === "string" && !seenTypes.has(type)) {
-                seenTypes.add(type);
-                newType = true;
+        function handleEnvelope(env) {
+            const topic = env && env.topic;
+            let newTopic = false;
+            if (typeof topic === "string" && !seenTopics.has(topic)) {
+                seenTopics.add(topic);
+                newTopic = true;
             }
-            if (typeof type === "string") {
-                latestByType[type] = msg;
+            if (typeof topic === "string") {
+                latestByTopic[topic] = env;
             }
-            if (newType) refreshAllSelects();
+            latestAny = env;
+            if (newTopic) refreshAllSelects();
 
             columns.forEach((colState) => {
-                if (colState.filter === "") {
-                    colState.latest = msg;
-                    renderColumn(colState);
-                } else if (colState.filter === type) {
+                if (colState.filter === "" || colState.filter === topic) {
                     renderColumn(colState);
                 }
             });
@@ -174,7 +171,11 @@
 
             socket.onmessage = (event) => {
                 try {
-                    handleMessage(JSON.parse(event.data));
+                    const msg = JSON.parse(event.data);
+                    // Only the raw MQTT pass-through envelopes carry a topic.
+                    if (msg && msg.type === "mqtt_message") {
+                        handleEnvelope(msg);
+                    }
                 } catch (err) {
                     console.error("Error parsing JSON:", err);
                 }

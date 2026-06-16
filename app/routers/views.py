@@ -32,6 +32,14 @@ async def get_data_ui():
     return FileResponse(file_path)
 
 
+@router.get("/view-mqtt")
+async def get_mqtt_ui():
+    file_path = _static_dir / "mqttTopics.html"
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="UI file not found")
+    return FileResponse(file_path)
+
+
 @router.get("/health", tags=["System"], summary="Health check", description="Simple liveness endpoint.")
 async def health() -> dict[str, str]:
     return {"status": "ok"}

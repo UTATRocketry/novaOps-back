@@ -28,6 +28,7 @@ class MqttService:
         on_flight_message: Callable[[dict], None] | None = None,
         on_console_message: Callable[[dict], None] | None = None,
         on_control_message: Callable[[dict], None] | None = None,
+        on_raw_message: Callable[[str, dict], None] | None = None,
     ) -> None:
         self._sensor_topic = sensor_topic
         self._command_topic = command_topic
@@ -38,6 +39,7 @@ class MqttService:
         self._on_flight_message = on_flight_message
         self._on_console_message = on_console_message
         self._on_control_message = on_control_message
+        self._on_raw_message = on_raw_message
         self._client = None
         self._connected = False
         self._file_num = 0
@@ -173,6 +175,8 @@ class MqttService:
         try:
             payload = json.loads(message.payload.decode("utf-8"))
             topic = getattr(message, "topic", self._sensor_topic)
+            if self._on_raw_message is not None:
+                self._on_raw_message(topic, payload)
             if topic == self._flight_topic and self._on_flight_message is not None:
                 self._on_flight_message(payload)
             elif topic == self._console_topic and self._on_console_message is not None:

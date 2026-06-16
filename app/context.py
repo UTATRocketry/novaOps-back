@@ -38,6 +38,7 @@ class AppContext:
             on_flight_message=self._on_flight_message,
             on_console_message=self._on_console_message,
             on_control_message=self._on_control_message,
+            on_raw_message=self._on_raw_message,
         )
 
         self.command_service = CommandService(self)
@@ -72,6 +73,9 @@ class AppContext:
             return
         asyncio.run_coroutine_threadsafe(self.broadcast(payload), self._event_loop)
 
+    def _on_raw_message(self, topic: str, payload: dict[str, Any]) -> None:
+        self._broadcast_from_mqtt({"type": "mqtt_message", "topic": topic, "payload": payload})
+
     def _on_engine_message(self, payload: dict[str, Any]) -> None:
         source = str(payload.get("source", ""))
         sensors = payload.get("sensors", [])
@@ -84,7 +88,7 @@ class AppContext:
         self.runtime.latest_engine_data = [item.__dict__ for item in parsed]
         self.runtime.latest_sensors = self.runtime.latest_engine_data
         self._broadcast_from_mqtt({"type": "engine_data", "data": self.runtime.latest_engine_data})
-        self._broadcast_from_mqtt({"type": "parsed_data", "sensors": self.runtime.latest_sensors})
+        #self._broadcast_from_mqtt({"type": "parsed_data", "sensors": self.runtime.latest_sensors})
 
     def _on_flight_message(self, payload: dict[str, Any]) -> None:
         data = payload.get("data")
