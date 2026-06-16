@@ -61,10 +61,19 @@ class RoleService:
         """Assign a role to a connected client. Returns False if client not found.
 
         Handles operator auto-promotion if the current operator is demoted.
+        Exclusive roles (pad, operator, admin): any existing holder is demoted to
+        viewer before the new assignment takes effect.
         Notifies the affected client(s) via WebSocket.
         """
         if client_id not in self._roles:
             return False
+
+        # Exclusive roles: demote any existing holder to viewer first.
+        if new_role in (ClientRole.pad, ClientRole.operator, ClientRole.admin):
+            for cid, role in list(self._roles.items()):
+                if cid != client_id and role == new_role:
+                    self._roles[cid] = ClientRole.viewer
+                    await self._notify_role_change(cid, ClientRole.viewer, reassigned=True)
 
         old_role = self._roles[client_id]
         self._roles[client_id] = new_role

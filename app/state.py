@@ -42,6 +42,7 @@ class RuntimeState:
                 entry["power"] = lower
             else:
                 entry["position"] = state
+                entry["enable"] = "enabled"
         elif actuator.type == ActuatorType.SOLENOID:
             entry["position"] = lower if lower in {"open", "closed"} else state
         elif actuator.type == ActuatorType.POWERED_GPIO_DEVICE:
