@@ -29,6 +29,7 @@ class ActuatorType(str, Enum):
 
 class ConvertMethod(str, Enum):
     NONE = "none"
+    ZERO_OFFSET = "zero_offset"
     LINEAR = "linear"
     POLYNOMIAL = "polynomial"
 

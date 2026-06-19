@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException
 from app.context import AppContext
 from app.deps import get_context
 from app.models import CommandPayload, SystemCommandPayload
+from app.services.role_service import ClientRole
 
 router = APIRouter(prefix="/api", tags=["Commands"])
 
@@ -36,6 +37,34 @@ async def post_command(
 async def post_console(payload: dict, ctx: AppContext = Depends(get_context)) -> dict:
     ctx.mqtt_service.publish_console(payload)
     return {"published": True}
+
+
+@router.post(
+    "/console/command",
+    summary="Send a FAS console command",
+    description=(
+        "Publish a console control/TX command to the device command topic so the "
+        "FAS bridge acts on it. Supports actions: start, stop, list_ports, "
+        "configure, tx. Requires operator or admin role (raw frame TX is "
+        "powerful). Output is delivered back over the WebSocket console stream."
+    ),
+)
+async def post_console_command(
+    payload: dict,
+    x_client_id: str | None = Header(default=None),
+    ctx: AppContext = Depends(get_context),
+) -> dict:
+    caller_role = ctx.role_service.resolve_caller_role(x_client_id)
+    if caller_role < ClientRole.operator:
+        raise HTTPException(
+            status_code=403,
+            detail="Insufficient role: operator or admin required for console commands",
+        )
+    action = str(payload.get("action", "")).lower()
+    if action not in {"start", "stop", "list_ports", "configure", "tx"}:
+        raise HTTPException(status_code=400, detail=f"Unknown console action '{action}'")
+    ctx.mqtt_service.publish_console_command(payload)
+    return {"published": True, "action": action}
 
 
 @router.post(

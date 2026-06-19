@@ -87,6 +87,19 @@ class MqttService:
             return
         self._publish_json(self._console_topic or "nova/console", payload, label="console")
 
+    def publish_console_command(self, command: dict) -> None:
+        """Publish a console control/TX command to the device command topic.
+
+        Wrapped in the standard {"source": "novaOps", "command": {...}} envelope
+        so the FAS bridge (which only listens on the command topic) receives it.
+        Console *output* still flows back on the console topic.
+        """
+        if not self._can_publish():
+            LOGGER.warning("MQTT unavailable, skipping console command publish")
+            return
+        payload = {"source": "novaOps", "command": {"type": "console", **command}}
+        self._publish_json(self._command_topic, payload, label="console-command")
+
     def publish_data_saving(self, enabled: bool) -> None:
         if not self._can_publish():
             LOGGER.warning("MQTT unavailable, skipping data-saving publish enabled=%s", enabled)

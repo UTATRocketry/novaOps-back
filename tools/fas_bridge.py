@@ -11,7 +11,8 @@ silently dropped.
 Telemetry published
   nova/telemetry/engine — sensors: FAS EPB ADC samples at hat_id = (100 + board_id)
                           gpios:   always empty (bridge has no GPIO manager)
-  nova/telemetry/flight — full board state snapshot, mirroring the gs server:
+  nova/telemetry/flight — full board state snapshot under "data", mirroring the
+                          gs server. data contains:
                           fas_boards:       online/uptime/fw/caps per board
                           fas_actuators:    per-channel actuator state (EPB)
                           fas_sensors:      SENSOR_STATUS masks per board
@@ -21,10 +22,21 @@ Telemetry published
                           fas_imc:          IMC arm/disarm state
   All message types in gs/protocol.py are decoded via decode_payload().
 
-Inbound commands handled
+Inbound commands handled (on nova/command)
   {"type":"fas",     ...}   — both op-shape and board_type/port/action shape
-  {"type":"console", ...}   — "start" publishes raw frame JSON to nova/console
+  {"type":"console", ...}   — two-way console control + TX:
+       action "start"/"stop"  toggle RX frame streaming to nova/console
+       action "list_ports"    enumerate serial ports → nova/console
+       action "configure"     switch serial port/baud and reconnect
+       action "tx"            encode a packet (op/fields/raw) and write to FAS
   everything else           — silently dropped
+
+Console output published (on nova/console)
+  {"type":"fas_frame",     "dir":"rx", ...}  decoded inbound frames while active
+  {"type":"console_tx",    "ok":..., "frame_hex":...}  echo of a sent packet
+  {"type":"console_ports", "ports":[...]}    available serial ports
+  {"type":"console_config","ok":..., "port":..., "baud":...}  reconfigure result
+  {"type":"console_status","active":bool}    start/stop acknowledgement
 
 Dependencies: pip install paho-mqtt pyserial
 
@@ -32,6 +44,7 @@ Usage:
     python fas_bridge.py --port /dev/ttyUSB0 [--baud 460800]
                          [--broker localhost:1883] [--node-id fas_bridge]
                          [--publish-ms 50] [--verbosity 0|1|2]
+                         [--imc-board-id N]
 """
 from __future__ import annotations
 
@@ -45,6 +58,7 @@ from enum import IntEnum
 
 import paho.mqtt.client as mqtt
 import serial
+import serial.tools.list_ports
 
 # ── Topics ──────────────────────────────────────────────────────────────────
 COMMAND_TOPIC   = "nova/command"
@@ -113,11 +127,76 @@ FMC_VEC3_FIELDS = {
 ADC_INT16_TO_V  = 256.0 * 1.2 / (1 << 23)
 ADC_INT16_TO_MA = ADC_INT16_TO_V * 1000.0 / 100.0
 
+# ---- FMC onboard-sensor scaling -------------------------------------------
+#
+# The FMC sends each onboard sensor as a compact int (see rt_proto.h). These
+# factors turn the wire value into the engineering unit the UI charts, exactly
+# mirroring how ADC codes become volts/mA above. Datasheet-confirmed:
+#   LSM6DSOX accel +/-2 g    to 0.061 mg/LSB  = 0.000061 g/LSB
+#   LSM6DSOX gyro  +/-250dps to 8.75 mdps/LSB = 0.00875 dps/LSB
+#   ADXL375 high-g sent as centi-g; MMC5983MA sent as milligauss.
+IMU_ACCEL_LSB_TO_G = 0.000061
+IMU_GYRO_LSB_TO_DPS = 0.00875
+ACCEL_HG_CENTI_TO_G = 0.01
+MAG_MILLIGAUSS_TO_UT = 0.1          # 1 mG = 0.1 uT
+BARO_SEA_LEVEL_PA = 101325.0
+
+
+def _fmc_altitude_m(pressure_pa: float) -> float:
+    """Standard ISA barometric altitude from absolute pressure (pascals)."""
+    if pressure_pa <= 0:
+        return 0.0
+    return 44330.0 * (1.0 - (pressure_pa / BARO_SEA_LEVEL_PA) ** 0.190295)
+
+
+# Charger flag bits (mirror RT_CHG_FLAG_*)
+CHG_FLAG_PRESENT = 1 << 0
+CHG_FLAG_ENABLED = 1 << 1
+CHG_FLAG_VIN_GOOD = 1 << 2
+CHG_FLAG_CHARGING = 1 << 3
+
+# Compacted LTC4162 state / status codes (set in pmb charger.c)
+CHARGER_STATE_NAMES = {
+    0: "off", 1: "bat-detect", 2: "suspended", 3: "precharge", 4: "CC/CV",
+    5: "ntc-pause", 6: "timer-term", 7: "full", 8: "max-time-fault",
+    9: "bat-missing", 10: "bat-short",
+}
+CHARGE_STATUS_NAMES = {
+    0: "off", 1: "ilim", 2: "thermal", 3: "vin-uvcl", 4: "iin-limit",
+    5: "const-current", 6: "const-voltage",
+}
+
+# PMB status flag bits (mirror RT_PMB_FLAG_*)
+PMB_FLAG_BUCK_ON = 1 << 0
+PMB_FLAG_BOOST_ON = 1 << 1
+PMB_FLAG_PG_3V3 = 1 << 2
+PMB_FLAG_PG_8V4 = 1 << 3
+PMB_FLAG_PG_24V0 = 1 << 4
+PMB_FLAG_CHARGER = 1 << 5
+PMB_FLAG_BATT_SRC = 1 << 6
+
+# SD logger states (mirror RT_SD_STATE_*)
+SD_STATE_NAMES = {0: "absent", 1: "no-fs", 2: "mounted", 3: "logging", 4: "error"}
+
+# RFD900x status flag bits (mirror RT_RFD_FLAG_*)
+RFD_FLAG_POWERED = 1 << 0
+RFD_FLAG_ENABLED = 1 << 1
+
+# Buzzer command ops (mirror RT_BUZZER_OP_*)
+BUZZER_OP_BEGIN = 0
+BUZZER_OP_NOTE = 1
+BUZZER_OP_PLAY = 2
+BUZZER_OP_STOP = 3
+
 # Heartbeat timeout matching loops.cpp kBoardTimeoutS
 BOARD_TIMEOUT_S   = 3.0
 DISCOVERY_INTERVAL_S = 2.0
 
-
+# Flight states from Flight_State_t / lookupTableFlightState in flight.h.
+FLIGHT_STATES = [
+    "INIT", "STANDBY", "ARMED", "POWERED_ASCENT",
+    "COASTING", "APOGEE", "DESCENT", "LANDED",
+]
 # ── CAN ID pack / unpack ─────────────────────────────────────────────────────
 
 def can_id_pack(msg: int, kind: int, board_id: int, channel: int,
@@ -264,50 +343,100 @@ def decode_payload(msg: int, data: bytes) -> dict:
         t_us, c0, c1 = struct.unpack_from("<Ihh", data, 0)
         return {"t_us": t_us, "ch": [c0, c1]}
     if msg in FMC_VEC3_FIELDS and fits("<3hH"):
+        if msg == RT_MSG_FMC_IMU_ACCEL:
+            scale = IMU_ACCEL_LSB_TO_G; unit = "g"; decimals = 5
+        elif msg == RT_MSG_FMC_IMU_GYRO:
+            scale = IMU_GYRO_LSB_TO_DPS; unit = "dps";  decimals = 4
+        elif msg == RT_MSG_FMC_ACCEL_HG:
+            scale = ACCEL_HG_CENTI_TO_G; unit = "g";  decimals = 5
+        elif msg == RT_MSG_FMC_MAG:
+            scale = MAG_MILLIGAUSS_TO_UT; unit = "uT";  decimals = 3
         x, y, z, t_ms = struct.unpack_from("<3hH", data, 0)
-        return {"axes": [x, y, z], "t_ms": t_ms}
+        return {"raw_axes": [x, y, z], "unit": unit, "axes": [round(v * scale, decimals) for v in [x, y, z]], "t_ms": t_ms}
     if msg == RT_MSG_FMC_BARO and fits("<ih"):
         pressure_pa, temp_cc = struct.unpack_from("<ih", data, 0)
-        return {"pressure_pa": pressure_pa, "temp_cc": temp_cc}
+        return {"pressure_pa": pressure_pa, "pressure_hpa": round(pressure_pa / 100.0, 3), 
+                "temp_cc": temp_cc, "temp_c": round(temp_cc / 100.0, 2),
+                "altitude_m": round(_fmc_altitude_m(pressure_pa), 2)}
     if msg == RT_MSG_FMC_GPS_POS and fits("<ii"):
         lat_1e7, lon_1e7 = struct.unpack_from("<ii", data, 0)
-        return {"lat_1e7": lat_1e7, "lon_1e7": lon_1e7}
+        return {"lat_1e7": lat_1e7, "lon_1e7": lon_1e7,
+                "lat": round(lat_1e7 * 1e-7, 7), "lon": round(lon_1e7 * 1e-7, 7)
+                }
     if msg == RT_MSG_FMC_GPS_INFO and fits("<hBBHH"):
         alt_m, fix, sats, hdop_x10, speed_cms = struct.unpack_from("<hBBHH", data, 0)
         return {"alt_m": alt_m, "fix": fix, "sats": sats,
-                "hdop_x10": hdop_x10, "speed_cms": speed_cms}
+                "hdop": round(hdop_x10 / 10.0, 1),"speed_mps": round(speed_cms / 100.0, 2)}
     if msg == RT_MSG_FMC_HEALTH and fits("<BBBBHBB"):
-        imu, accel, mag, present, baro_c1, gfix, gsats = struct.unpack_from("<BBBBHBB", data, 0)
-        return {"imu_id": imu, "accel_id": accel, "mag_id": mag,
-                "present_mask": present, "baro_c1": baro_c1,
-                "gps_fix": gfix, "gps_sats": gsats}
+        imu_id, accel_id, mag_id, present_mask, baro_c1, gfix, gsats = struct.unpack_from("<BBBBHBB", data, 0)
+        return {"imu_ok": imu_id == 0x6C,
+                "accel_ok":accel_id == 0xE5,
+                "mag_ok": mag_id == 0x30,
+                "baro_ok": baro_c1 not in (0x0000, 0xFFFF),
+                "gps_present": bool(present_mask & 0x10),}
+    
     if msg == RT_MSG_PMB_PWR and fits("<HHHH"):
-        v8, i8, v24, i24 = struct.unpack_from("<HHHH", data, 0)
-        return {"v_8v4_mv": v8, "i_8v4_ma": i8, "v_24v0_mv": v24, "i_24v0_ma": i24}
+        v8_mv, i8_ma, v24_mv, i24_ma = struct.unpack_from("<HHHH", data, 0)
+        return {
+                "v_8v4": round(v8_mv / 1000.0, 3),
+                "i_8v4": round(i8_ma / 1000.0, 3),
+                "v_24v0": round(v24_mv / 1000.0, 3),
+                "i_24v0": round(i24_ma / 1000.0, 3),
+                "p_8v4": round(v8_mv * i8_ma / 1e6, 2),
+                "p_24v0": round(v24_mv * i24_ma / 1e6, 2),}
     if msg == RT_MSG_PMB_VMON and fits("<HHHBB"):
-        vmain, vbatt, vgse, flags, _ = struct.unpack_from("<HHHBB", data, 0)
-        return {"v_main_mv": vmain, "v_batt_mv": vbatt, "v_gse_mv": vgse, "flags": flags}
+        vmain_mv, vbatt_mv, vgse_mv, flags, _ = struct.unpack_from("<HHHBB", data, 0)
+        return {
+            "v_main": round(vmain_mv / 1000.0, 3),
+            "v_batt": round(vbatt_mv / 1000.0, 3),
+            "v_gse": round(vgse_mv / 1000.0, 3),
+            "buck_on": bool(flags & 0x01), "boost_on": bool(flags & 0x02),
+            "pg_3v3": bool(flags & 0x04), "pg_8v4": bool(flags & 0x08),
+            "pg_24v0": bool(flags & 0x10), "charger": bool(flags & 0x20),
+            "batt_src": bool(flags & 0x40),
+        }
     if msg == RT_MSG_PMB_TEMP and fits("<hhhH"):
-        ta, tb, tc, _ = struct.unpack_from("<hhhH", data, 0)
-        return {"temp_amb_cc": ta, "temp_buck_cc": tb, "temp_boost_cc": tc}
+        temp_amb_cc, temp_buck_cc, temp_boost_cc, _ = struct.unpack_from("<hhhH", data, 0)
+        def _t(cc):
+                return None if cc == 0x7FFF else round(cc / 100.0, 2)
+        return {"temp_amb": _t(temp_amb_cc), "temp_buck": _t(temp_buck_cc), "temp_boost": _t(temp_boost_cc)}
     if msg == RT_MSG_PMB_CHARGER and fits("<hHBBBB"):
-        i_chg, v_bat, flags, state, status, cells = struct.unpack_from("<hHBBBB", data, 0)
-        return {"i_chg_ma": i_chg, "v_bat_mv": v_bat, "flags": flags,
-                "state": state, "status": status, "cells": cells}
+        i_chg_ma, v_bat_mv, flags, state, status, cells = struct.unpack_from("<hHBBBB", data, 0)
+        return {
+                "i_chg_a": round(i_chg_ma/ 1000.0, 3),
+                "v_bat": round(v_bat_mv / 1000.0, 3),
+                "present": bool(flags & CHG_FLAG_PRESENT),
+                "enabled": bool(flags & CHG_FLAG_ENABLED),
+                "vin_good": bool(flags & CHG_FLAG_VIN_GOOD),
+                "charging": bool(flags & CHG_FLAG_CHARGING),
+                "state": CHARGER_STATE_NAMES.get(state, "?"),
+                "status": CHARGE_STATUS_NAMES.get(status, "?"),
+                "cells": cells,
+            }
     if msg == RT_MSG_BOARD_STATUS and fits("<HHHH"):
-        v8, v24, i8, i24 = struct.unpack_from("<HHHH", data, 0)
-        return {"vmon_8v4_mv": v8, "vmon_24v_mv": v24,
-                "isense_8v4_ma": i8, "isense_24v_ma": i24}
+        vmon_8v4_mv, vmon_24v_mv, isense_8v4_ma, isense_24v_ma = struct.unpack_from("<HHHH", data, 0)
+        return {
+                "i_8v4": round(isense_8v4_ma / 1000.0, 3),
+                "i_24v0": round(isense_24v_ma / 1000.0, 3),
+                "v_8v4": round(vmon_8v4_mv / 1000.0, 3),
+                "v_24v0": round(vmon_24v_mv / 1000.0, 3),
+            }
     if msg == RT_MSG_FMC_TEMP and fits("<hhI"):
-        t_h7, t_pwr, _ = struct.unpack_from("<hhI", data, 0)
-        return {"temp_h7_cc": t_h7, "temp_pwr_cc": t_pwr}
+        t_h7_cc, t_pwr_cc, _ = struct.unpack_from("<hhI", data, 0)
+        def _ft(cc):
+            return None if cc == 0x7FFF else round(cc / 100.0, 2)
+        return {"temp_h7": _ft(t_h7_cc), "temp_pwr": _ft(t_pwr_cc)}
     if msg == RT_MSG_FMC_SD_STATUS and fits("<BBHI"):
         state, err, free_mb, written_kb = struct.unpack_from("<BBHI", data, 0)
-        return {"state": state, "err": err, "free_mb": free_mb, "written_kb": written_kb}
+        return {"state": state, "state_name": SD_STATE_NAMES.get(state, "?"), "err": err, "free_mb": free_mb, "written_kb": written_kb}
     if msg == RT_MSG_FMC_RADIO_STATUS and fits("<BBHI"):
         flags, every_n, tx_frames, tx_bytes = struct.unpack_from("<BBHI", data, 0)
-        return {"flags": flags, "every_n": every_n,
-                "tx_frames": tx_frames, "tx_bytes": tx_bytes}
+        return {"powered": bool(flags & RFD_FLAG_POWERED),
+                "enabled": bool(flags & RFD_FLAG_ENABLED),
+                "every_n": every_n,
+                "tx_frames": tx_frames, 
+                "tx_bytes": tx_bytes
+            }
     if msg == RT_MSG_TIME_SYNC and fits("<II"):
         t_us, _ = struct.unpack_from("<II", data, 0)
         return {"t_us": t_us}
@@ -347,6 +476,73 @@ def pulse_to_q15(pulse_us: int, period_us: int = 20000) -> int:
     return min(32767, (pulse_us * 32767) // p)
 
 
+# ── Op-shape → wire frame encoder ────────────────────────────────────────────
+
+def op_to_frame(op: str, cmd: dict, seq: int) -> tuple[int, bytes] | None:
+    """Convert an op-shape command into a (can_id, data) wire frame.
+
+    Shared by the normal fas-op command path and the two-way console TX path so
+    both produce identical frames. Returns None for an unknown op.
+    """
+    board_id = int(cmd.get("board_id", 0))
+    channel  = int(cmd.get("channel", 0))
+
+    if op == "pwm_set":
+        pulse_us  = int(cmd.get("pulse_us", 0))
+        period_us = int(cmd.get("period_us", 20000))
+        cid  = can_id_pack(RT_MSG_PWM_SET, RT_BOARD_GS, board_id, channel, 0, seq)
+        return cid, _encode_pwm_set(pulse_to_q15(pulse_us, period_us), period_us)
+    if op == "load_sw_set":
+        enable  = bool(cmd.get("enable", False))
+        hold_ms = int(cmd.get("hold_ms", 0))
+        cid = can_id_pack(RT_MSG_LOAD_SW_SET, RT_BOARD_GS, board_id, channel, 0, seq)
+        return cid, _encode_load_sw_set(enable, hold_ms)
+    if op == "failsafe":
+        cid = can_id_pack(RT_MSG_ACTUATOR_FAILSAFE, RT_BOARD_GS, board_id, 0, 0, seq)
+        return cid, _pad8()
+    if op == "imc_arm":
+        cid = can_id_pack(RT_MSG_IGN_ARM, RT_BOARD_GS, board_id, 0, 0, seq)
+        return cid, _encode_imc_cmd(int(cmd.get("pulse_ms", 0)))
+    if op == "imc_disarm":
+        cid = can_id_pack(RT_MSG_IGN_DISARM, RT_BOARD_GS, board_id, 0, 0, seq)
+        return cid, _encode_imc_cmd(int(cmd.get("pulse_ms", 0)))
+    if op == "discover":
+        cid = can_id_pack(RT_MSG_DISCOVERY_REQ, RT_BOARD_GS, 0, 0, 0, seq)
+        return cid, _pad8()
+    if op == "actuator_query":
+        cid = can_id_pack(RT_MSG_ACTUATOR_QUERY, RT_BOARD_GS, board_id, channel, 0, seq)
+        return cid, _pad8()
+    return None
+
+
+def console_packet_to_frame(pkt: dict, seq: int) -> tuple[int, bytes] | None:
+    """Convert a console TX packet into a (can_id, data) wire frame.
+
+    Three accepted shapes, tried in order:
+      1. op shape — {"op": "pwm_set", "board_id": .., "channel": .., ...}
+      2. fields   — {"msg": 0x10, "kind": 0, "board_id": .., "channel": ..,
+                     "flags": 0, "data_hex": "aabb..."}  (seq auto-filled)
+      3. raw      — {"can_id": 12345678, "data_hex": "aabb.."}  (full 29-bit id)
+    Returns None if the packet can't be encoded. Data is right-padded with zeros
+    to 8 bytes and truncated to 8 bytes to match the CAN payload limit.
+    """
+    def parse_data() -> bytes:
+        hexstr = str(pkt.get("data_hex", "")).replace(" ", "")
+        raw = bytes.fromhex(hexstr) if hexstr else b""
+        return (raw + _pad8())[:8]
+
+    if "op" in pkt:
+        return op_to_frame(str(pkt["op"]), pkt, seq)
+    if "can_id" in pkt:
+        return int(pkt["can_id"]) & 0x1FFFFFFF, parse_data()
+    if "msg" in pkt:
+        cid = can_id_pack(int(pkt.get("msg", 0)), int(pkt.get("kind", RT_BOARD_GS)),
+                          int(pkt.get("board_id", 0)), int(pkt.get("channel", 0)),
+                          int(pkt.get("flags", 0)), seq)
+        return cid, parse_data()
+    return None
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _parse_broker(broker: str) -> tuple[str, int]:
@@ -371,12 +567,16 @@ def _resolve_fas_board_id(cmd: dict) -> int:
 # ─────────────────────────────────────────────────────────────────────────────
 class FasBridge:
     def __init__(self, port: str, baud: int, broker: str,
-                 node_id: str, publish_ms: int, verbosity: int) -> None:
+                 node_id: str, publish_ms: int, verbosity: int,
+                 imc_board_id: int | None = None) -> None:
         self._port       = port
         self._baud       = baud
         self._node_id    = node_id
         self._publish_ms = publish_ms
         self._verbosity  = verbosity
+        # When set, only IMC_STATUS frames from this board_id update _fas_imc.
+        # None means accept IMC status from any board.
+        self._imc_board_id = imc_board_id
         self._lock       = threading.Lock()
         self._seq        = 0
 
@@ -393,7 +593,8 @@ class FasBridge:
                            "arm_line": False, "disarm_line": False}
         self._console_active = False
 
-        # Serial
+        # Serial — port/baud are mutable so the console can reconfigure them.
+        self._serial_lock = threading.Lock()
         self._serial  = serial.Serial(port, baud, timeout=1)
         self._parser  = FrameParser(self._on_frame)
 
@@ -440,11 +641,99 @@ class FasBridge:
             else:
                 self._log(2, f"[bridge] fas: unrecognised shape {cmd}")
         elif t == "console":
-            action = str(cmd.get("action", "")).lower()
+            self._cmd_console(cmd)
+        # All other types are silently dropped per spec.
+
+    # ── Console (two-way) ─────────────────────────────────────────────────────
+
+    def _cmd_console(self, cmd: dict) -> None:
+        """Handle console control + TX. Output (frames, port lists, tx echoes,
+        acks) is published to nova/console for the frontend to display.
+
+        Actions:
+          start | stop        — toggle RX frame streaming to nova/console
+          list_ports          — enumerate serial ports → console_ports message
+          configure           — switch serial port/baud and reconnect
+          tx                  — encode a packet (op/fields/raw) and write to FAS
+        """
+        action = str(cmd.get("action", "")).lower()
+
+        if action in ("start", "stop"):
             with self._lock:
                 self._console_active = action == "start"
-            self._log(1, f"[bridge] console {'started' if self._console_active else 'stopped'}")
-        # All other types are silently dropped per spec.
+            self._log(1, f"[bridge] console {action}")
+            self._publish_console({"type": "console_status", "active": action == "start"})
+
+        elif action == "list_ports":
+            ports = [
+                {"device": p.device, "name": p.name,
+                 "description": p.description, "hwid": p.hwid}
+                for p in serial.tools.list_ports.comports()
+            ]
+            self._log(1, f"[bridge] console list_ports → {len(ports)} found")
+            self._publish_console({"type": "console_ports", "ports": ports})
+
+        elif action == "configure":
+            port = str(cmd.get("port", "")) or self._port
+            baud = int(cmd.get("baud", self._baud))
+            ok, err = self._reconnect_serial(port, baud)
+            self._publish_console({
+                "type": "console_config",
+                "ok": ok, "port": port, "baud": baud,
+                **({"error": err} if err else {}),
+            })
+
+        elif action == "tx":
+            frame = console_packet_to_frame(cmd, self._next_seq())
+            if frame is None:
+                self._log(2, f"[bridge] console tx: cannot encode {cmd}")
+                self._publish_console({"type": "console_tx",
+                                       "ok": False, "error": "unencodable packet"})
+                return
+            can_id, data = frame
+            self._send_frame(can_id, data)
+            hex_frame = encode_frame(can_id, data).hex()
+            decoded   = can_id_unpack(can_id)
+            self._log(1, f"[bridge] console tx msg=0x{decoded['msg']:02x} "
+                         f"board={decoded['board_id']} ch={decoded['channel']}")
+            self._publish_console({
+                "type":      "console_tx",
+                "ok":        True,
+                "can_id":    can_id,
+                "msg_type":  decoded["msg"],
+                "board_kind": decoded["kind"],
+                "board_id":  decoded["board_id"],
+                "channel":   decoded["channel"],
+                "data_hex":  data.hex(),
+                "frame_hex": hex_frame,
+            })
+
+        else:
+            self._log(2, f"[bridge] console: unknown action {action!r}")
+
+    def _publish_console(self, payload: dict) -> None:
+        payload.setdefault("source", "novaGround")
+        self._client.publish(CONSOLE_TOPIC, json.dumps(payload), qos=0)
+
+    def _reconnect_serial(self, port: str, baud: int) -> tuple[bool, str | None]:
+        """Open a new serial port and swap it in. The read loop picks up the new
+        handle on its next iteration. Returns (ok, error_message)."""
+        try:
+            new_serial = serial.Serial(port, baud, timeout=1)
+        except (serial.SerialException, ValueError, OSError) as e:
+            self._log(0, f"[bridge] serial reconfigure failed: {e}")
+            return False, str(e)
+        with self._serial_lock:
+            old = self._serial
+            self._serial = new_serial
+            self._port = port
+            self._baud = baud
+        try:
+            old.close()
+        except Exception:
+            pass
+        self._log(1, f"[bridge] serial reconfigured → {port} @ {baud} baud")
+        return True, None
 
     def _cmd_fas_port(self, cmd: dict) -> None:
         board_id = _resolve_fas_board_id(cmd)
@@ -472,10 +761,10 @@ class FasBridge:
         elif port == "gpio":
             act = action.upper()
             if act == "ARM":
-                self._send_imc_arm(board_id, 0)
+                self._send_imc_arm(board_id, 250)
                 self._log(1, f"[bridge] fas imc_arm EPB:{board_id}")
             elif act == "DISARM":
-                self._send_imc_disarm(board_id, 0)
+                self._send_imc_disarm(board_id, 250)
                 self._log(1, f"[bridge] fas imc_disarm EPB:{board_id}")
             else:
                 self._log(2, f"[bridge] fas gpio: unknown action {action!r}")
@@ -483,50 +772,15 @@ class FasBridge:
             self._log(2, f"[bridge] fas: unknown port {port!r}")
 
     def _cmd_fas_op(self, cmd: dict) -> None:
-        op       = str(cmd.get("op", ""))
-        board_id = int(cmd.get("board_id", 0))
-        channel  = int(cmd.get("channel", 0))
-
-        if op == "pwm_set":
-            pulse_us  = int(cmd.get("pulse_us", 0))
-            period_us = int(cmd.get("period_us", 20000))
-            self._send_pwm_set(board_id, channel, pulse_us, period_us)
-            self._log(1, f"[bridge] fas pwm_set EPB:{board_id} ch={channel} "
-                         f"pulse={pulse_us}µs")
-
-        elif op == "load_sw_set":
-            enable  = bool(cmd.get("enable", False))
-            hold_ms = int(cmd.get("hold_ms", 0))
-            self._send_load_sw_set(board_id, channel, enable, hold_ms)
-            self._log(1, f"[bridge] fas load_sw EPB:{board_id} ch={channel} "
-                         f"enable={enable}")
-
-        elif op == "failsafe":
-            cid   = can_id_pack(RT_MSG_ACTUATOR_FAILSAFE, RT_BOARD_GS, board_id, 0, 0, self._next_seq())
-            self._send_frame(cid, _pad8())
-            self._log(1, f"[bridge] fas failsafe EPB:{board_id}")
-
-        elif op == "imc_arm":
-            pulse_ms = int(cmd.get("pulse_ms", 0))
-            self._send_imc_arm(board_id, pulse_ms)
-            self._log(1, f"[bridge] fas imc_arm EPB:{board_id} pulse={pulse_ms}ms")
-
-        elif op == "imc_disarm":
-            pulse_ms = int(cmd.get("pulse_ms", 0))
-            self._send_imc_disarm(board_id, pulse_ms)
-            self._log(1, f"[bridge] fas imc_disarm EPB:{board_id} pulse={pulse_ms}ms")
-
-        elif op == "discover":
-            self._send_discovery_req()
-            self._log(2, "[bridge] fas discover sent")
-
-        elif op == "actuator_query":
-            cid = can_id_pack(RT_MSG_ACTUATOR_QUERY, RT_BOARD_GS, board_id, channel, 0, self._next_seq())
-            self._send_frame(cid, _pad8())
-            self._log(1, f"[bridge] fas actuator_query EPB:{board_id} ch={channel}")
-
-        else:
+        op    = str(cmd.get("op", ""))
+        frame = op_to_frame(op, cmd, self._next_seq())
+        if frame is None:
             self._log(2, f"[bridge] fas: unknown op {op!r}")
+            return
+        can_id, data = frame
+        self._send_frame(can_id, data)
+        self._log(1, f"[bridge] fas op={op} board={cmd.get('board_id', 0)} "
+                     f"ch={cmd.get('channel', 0)}")
 
     # ── FAS frame receive ────────────────────────────────────────────────────
 
@@ -534,28 +788,27 @@ class FasBridge:
         cid = can_id_unpack(can_id)
         msg = cid["msg"]
 
-        # Console raw-frame output
-        with self._lock:
-            console = self._console_active
-        if console:
-            hex_str = " ".join(f"{b:02x}" for b in data)
-            frame = {
-                "source":     "novaGround",
-                "type":       "fas_frame",
-                "can_id":     can_id,
-                "msg_type":   msg,
-                "board_kind": cid["kind"],
-                "board_id":   cid["board_id"],
-                "channel":    cid["channel"],
-                "data_hex":   hex_str,
-            }
-            self._client.publish(CONSOLE_TOPIC, json.dumps(frame), qos=0)
-
         board_id  = cid["board_id"]
         kind_name = BOARD_KIND_NAMES.get(cid["kind"], "UNK")
         key       = f"{kind_name}:{board_id}"
         now       = time.monotonic()
         d         = decode_payload(msg, data)
+
+        # Console raw-frame output (RX direction)
+        with self._lock:
+            console = self._console_active
+        if console:
+            self._publish_console({
+                "type":       "fas_frame",
+                "dir":        "rx",
+                "can_id":     can_id,
+                "msg_type":   msg,
+                "board_kind": cid["kind"],
+                "board_id":   board_id,
+                "channel":    cid["channel"],
+                "data_hex":   data.hex(),
+                "decoded":    d,
+            })
 
         if msg == RT_MSG_HEARTBEAT:
             with self._lock:
@@ -655,15 +908,19 @@ class FasBridge:
                 self._fas_pmb.setdefault(key, {})[field] = d
 
         elif msg == RT_MSG_IMC_STATUS:
-            with self._lock:
-                self._fas_imc.update({
-                    "board_id":    board_id,
-                    "armed":       bool(d.get("armed")),
-                    "arm_line":    bool(d.get("arm_line")),
-                    "disarm_line": bool(d.get("disarm_line")),
-                    "flags":       d.get("flags", 0),
-                })
-            self._log(2, f"[bridge] IMC status board={board_id} armed={bool(d.get('armed'))}")
+            if self._imc_board_id is not None and board_id != self._imc_board_id:
+                self._log(2, f"[bridge] IMC status board={board_id} ignored "
+                             f"(listening for board {self._imc_board_id})")
+            else:
+                with self._lock:
+                    self._fas_imc.update({
+                        "board_id":    board_id,
+                        "armed":       bool(d.get("armed")),
+                        "arm_line":    bool(d.get("arm_line")),
+                        "disarm_line": bool(d.get("disarm_line")),
+                        "flags":       d.get("flags", 0),
+                    })
+                self._log(2, f"[bridge] IMC status board={board_id} armed={bool(d.get('armed'))}")
 
     # ── FAS frame send helpers ────────────────────────────────────────────────
 
@@ -675,8 +932,10 @@ class FasBridge:
 
     def _send_frame(self, can_id: int, data: bytes) -> None:
         frame = encode_frame(can_id, data)
+        with self._serial_lock:
+            ser = self._serial
         try:
-            self._serial.write(frame)
+            ser.write(frame)
         except serial.SerialException as e:
             self._log(0, f"[bridge] serial write error: {e}")
 
@@ -710,13 +969,17 @@ class FasBridge:
     def _serial_read_loop(self) -> None:
         self._log(1, f"[bridge] serial reader started on {self._port}")
         while True:
+            with self._serial_lock:
+                ser = self._serial
             try:
-                chunk = self._serial.read(256)
+                chunk = ser.read(256)
                 if chunk:
                     self._parser.feed(chunk)
             except serial.SerialException as e:
-                self._log(0, f"[bridge] serial error: {e}")
-                time.sleep(1)
+                # A reconfigure may have closed this handle out from under us;
+                # loop around and pick up the current handle on the next pass.
+                self._log(2, f"[bridge] serial error (reconnecting?): {e}")
+                time.sleep(0.2)
 
     def _discovery_loop(self) -> None:
         self._log(2, "[bridge] discovery loop started")
@@ -783,6 +1046,7 @@ class FasBridge:
                     "fas_fmc":          fas_fmc_snap,
                     "fas_pmb":          fas_pmb_snap,
                     "fas_imc":          fas_imc_snap,
+                    "fas_fsm":          {"state": "ARMED" if fas_imc_snap.get("armed") else "STANDBY"}
                 },
             }
             #self._client.publish(TELEMETRY_TOPIC, json.dumps(fas_sensor_payload),    qos=0)
@@ -829,6 +1093,10 @@ def main() -> None:
     p.add_argument("--publish-ms", type=int, default=50,
                    help="Telemetry publish interval ms")
     p.add_argument("--verbosity",  type=int, default=1, choices=[0, 1, 2])
+    p.add_argument("--imc-board-id", type=int, default=None,
+                   help="If set, only update IMC arm state from this board_id; "
+                        "IMC_STATUS frames from other boards are ignored "
+                        "(default: accept any board)")
     args = p.parse_args()
 
     FasBridge(
@@ -838,6 +1106,7 @@ def main() -> None:
         node_id=args.node_id,
         publish_ms=args.publish_ms,
         verbosity=args.verbosity,
+        imc_board_id=args.imc_board_id,
     ).run()
 
 

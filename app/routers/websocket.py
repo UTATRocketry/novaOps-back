@@ -86,6 +86,26 @@ async def _handle_websocket(websocket: WebSocket, ctx) -> None:
                 ctx.mqtt_service.publish_console(console_payload if isinstance(console_payload, dict) else payload)
                 continue
 
+            if msg_type == "console_command":
+                role = ctx.role_service.get_role_by_ws(websocket)
+                if role < ClientRole.operator:
+                    await ctx.ws_manager.send_json(websocket, {
+                        "type": "error",
+                        "detail": "Insufficient role: operator or admin required for console commands",
+                    })
+                    continue
+                command = payload.get("command")
+                command = command if isinstance(command, dict) else payload
+                action = str(command.get("action", "")).lower()
+                if action not in {"start", "stop", "list_ports", "configure", "tx"}:
+                    await ctx.ws_manager.send_json(websocket, {
+                        "type": "error",
+                        "detail": f"Unknown console action '{action}'",
+                    })
+                    continue
+                ctx.mqtt_service.publish_console_command(command)
+                continue
+
             if msg_type == "role_request":
                 await _handle_role_request_ws(websocket, ctx, client_id, payload)
                 continue
