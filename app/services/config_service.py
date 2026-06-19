@@ -37,7 +37,15 @@ class ConfigService:
     def update_config(self, config_data: dict[str, Any]) -> SystemConfig:
         config = self._parse_config(config_data)
         self._check_duplicates(config)
-        self._write_yaml(self._config_path, config_data)
+        # Persist the parsed model (not the raw payload) so the written file stays
+        # compact: defaults and null fields are dropped instead of being echoed back.
+        clean_data = config.model_dump(
+            by_alias=True,
+            mode="json",
+            exclude_defaults=True,
+            exclude_none=True,
+        )
+        self._write_yaml(self._config_path, clean_data)
         self._config = config
         return config
 
@@ -80,4 +88,20 @@ class ConfigService:
     @staticmethod
     def _write_yaml(path: Path, data: dict[str, Any]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+        path.write_text(
+            yaml.dump(data, Dumper=_ConfigDumper, sort_keys=False),
+            encoding="utf-8",
+        )
+
+
+class _ConfigDumper(yaml.SafeDumper):
+    """SafeDumper that renders scalar leaf-lists inline (e.g. ``range: [0, 1000]``)
+    while keeping lists of mappings/nested lists in readable block style."""
+
+
+def _represent_list(dumper: yaml.Dumper, data: list[Any]) -> Any:
+    all_scalar = all(isinstance(item, (int, float, str, bool)) or item is None for item in data)
+    return dumper.represent_sequence("tag:yaml.org,2002:seq", data, flow_style=all_scalar)
+
+
+_ConfigDumper.add_representer(list, _represent_list)

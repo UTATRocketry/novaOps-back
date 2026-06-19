@@ -324,7 +324,57 @@ Actuators:
       gpio_channel: 0
     actions:
       gpio_commands: [arm, disarm]
+      
+# chart ranges for the Devices + Flight pages (keyed by board key)
+Devices:
+  - key: "EPB:0"
+    label: Engine Power Board (ox)
+    ranges:
+      voltage: [0, 30]      # rail-voltage chart (8V4 + 24V0)
+      current: [0, 20]      # rail-current chart
+  - key: "EPB:4"
+    label: Engine Power Board (fuel)
+    ranges:
+      voltage: [0, 30]
+      current: [0, 20]
+  - key: "PMB:0"
+    label: Power Management Board
+    ranges:
+      voltage: [0, 30]      # VMAIN/VBATT/VGSE chart
+      temperature: [0, 80]  # ambient/buck/boost chart
+  - key: "FMC:0"
+    label: Flight Management Computer
+    ranges:                 # these drive the Flight dashboard charts
+      accel: [-16, 16]
+      gyro: [-2000, 2000]
+      mag: [-100, 100]
+      accelHi: [-100, 100]
+      altitude: [0, 5000]
 
+# composable FAS transmit packets (drive Console → Transmit Packet)
+Packets:
+  - name: PWM Set (servo)
+    op: pwm_set
+    fields:
+      - { key: board_id, type: number, default: 0 }
+      - { key: channel,  type: number, default: 0 }
+      - { key: pulse_us, type: number, default: 1500 }
+      - { key: period_us, type: number, default: 20000 }
+  - name: Load Switch (relay)
+    op: load_sw_set
+    fields:
+      - { key: board_id, type: number, default: 0 }
+      - { key: channel,  type: number, default: 0 }
+      - { key: enable,   type: bool,   default: false }
+      - { key: hold_ms,  type: number, default: 0 }
+  - name: IMC Arm
+    op: imc_arm
+    fields:
+      - { key: board_id, type: number, default: 0 }
+      - { key: pulse_ms, type: number, default: 0 }
+  - name: Discover
+    op: discover
+    fields: []
 
 Procedures:
   - name: Hotfire

@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException
 
 from app.context import AppContext
 from app.deps import get_context
-from app.models import CommandPayload, SystemCommandPayload
+from app.models import CommandPayload, DirectRelayPayload, DirectServoPayload, SystemCommandPayload
 from app.services.role_service import ClientRole
 
 router = APIRouter(prefix="/api", tags=["Commands"])
@@ -65,6 +65,47 @@ async def post_console_command(
         raise HTTPException(status_code=400, detail=f"Unknown console action '{action}'")
     ctx.mqtt_service.publish_console_command(payload)
     return {"published": True, "action": action}
+
+
+@router.post(
+    "/direct/relay",
+    summary="Direct relay control",
+    description=(
+        "Set a relay channel directly by number, bypassing config-based name resolution. "
+        "Requires operator or admin role. state: 0=off, 1=on."
+    ),
+)
+async def post_direct_relay(
+    payload: DirectRelayPayload,
+    x_client_id: str | None = Header(default=None),
+    ctx: AppContext = Depends(get_context),
+) -> dict:
+    caller_role = ctx.role_service.resolve_caller_role(x_client_id)
+    if caller_role < ClientRole.operator:
+        raise HTTPException(status_code=403, detail="Insufficient role: operator or admin required")
+    commands = ctx.command_service.apply_direct_relay(payload)
+    return {"published_commands": commands}
+
+
+@router.post(
+    "/direct/servo",
+    summary="Direct servo control",
+    description=(
+        "Set a servo/PWM channel directly by number and pulse width (µs), "
+        "bypassing config-based name resolution. "
+        "Requires operator or admin role. pulse_us=0 disables the output."
+    ),
+)
+async def post_direct_servo(
+    payload: DirectServoPayload,
+    x_client_id: str | None = Header(default=None),
+    ctx: AppContext = Depends(get_context),
+) -> dict:
+    caller_role = ctx.role_service.resolve_caller_role(x_client_id)
+    if caller_role < ClientRole.operator:
+        raise HTTPException(status_code=403, detail="Insufficient role: operator or admin required")
+    commands = ctx.command_service.apply_direct_servo(payload)
+    return {"published_commands": commands}
 
 
 @router.post(

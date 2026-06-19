@@ -132,6 +132,25 @@ class SafetyRules(BaseModel):
     critical: list[dict[str, str | list[str]]] = Field(default_factory=list)
     hazardous: list[dict[str, str | list[str]]] = Field(default_factory=list)
 
+
+class DeviceEntry(BaseModel):
+    key: str                                           # e.g. "EPB:0", "FMC:0"
+    label: str = ""
+    ranges: dict[str, tuple[float, float]] = Field(default_factory=dict)
+
+
+class PacketFieldSpec(BaseModel):
+    key: str
+    type: str        # "number" | "bool" | "string"
+    default: Any = None
+
+
+class PacketEntry(BaseModel):
+    name: str
+    op: str
+    fields: list[PacketFieldSpec] = Field(default_factory=list)
+
+
 class Procedure(BaseModel):
     name: str
     steps: list[str] = Field(default_factory=list)
@@ -145,6 +164,8 @@ class SystemConfig(BaseModel):
     commands: dict[str, CommandEntry] = Field(default_factory=dict, alias="Commands")
     safety_rules: SafetyRules = Field(default_factory=SafetyRules, alias="safetyRules")
     procedures: list[Procedure] = Field(default_factory=list, alias="Procedures")
+    devices: list[DeviceEntry] = Field(default_factory=list, alias="Devices")
+    packets: list[PacketEntry] = Field(default_factory=list, alias="Packets")
 
     @model_validator(mode="before")
     @classmethod
@@ -262,6 +283,34 @@ class SystemCommandPayload(BaseModel):
 
     name: str = Field(description="System command name from the Commands config section")
     state: str | None = Field(default=None, description="Optional command state argument")
+
+
+class DirectRelayPayload(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={"example": {"target": "GCS", "channel": 8, "state": 1}}
+    )
+
+    target: Literal["GCS", "FAS"]
+    node: str | None = Field(
+        default=None,
+        description='FAS only — board node string, e.g. "EPB_4". Parsed to board_type/board_id.',
+    )
+    channel: int = Field(ge=0, description="Relay channel number")
+    state: Literal[0, 1] = Field(description="0 = off, 1 = on")
+
+
+class DirectServoPayload(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={"example": {"target": "FAS", "node": "EPB_4", "channel": 1, "pulse_us": 1500}}
+    )
+
+    target: Literal["GCS", "FAS"]
+    node: str | None = Field(
+        default=None,
+        description='FAS only — board node string, e.g. "EPB_4".',
+    )
+    channel: int = Field(ge=0, description="Servo/PWM channel number")
+    pulse_us: int = Field(ge=0, le=3000, description="PWM pulse width in microseconds (0 = disable)")
 
 
 class IncomingSensorPacket(BaseModel):

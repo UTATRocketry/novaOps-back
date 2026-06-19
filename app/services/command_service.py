@@ -4,10 +4,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from app.models import (
+    ActuatorBinding,
     ActuatorActions,
     ActuatorEntry,
     ActuatorType,
     CommandPayload,
+    DirectRelayPayload,
+    DirectServoPayload,
     SourceTarget,
     SystemCommandPayload,
     SystemConfig,
@@ -230,6 +233,34 @@ class CommandService:
             {"type": "actuator_states", "actuator_states": ctx.runtime.actuator_states}
         )
         return parsed
+
+    @staticmethod
+    def _fas_board(node: str | None) -> dict:
+        """Parse a node string like 'EPB_4' into FAS board_type / board_id fields."""
+        if node:
+            parts = node.rsplit("_", 1)
+            if len(parts) == 2 and parts[1].isdigit():
+                return {"board_type": parts[0], "board_id": int(parts[1])}
+        return {"board_type": None, "board_id": 0}
+
+    def apply_direct_relay(self, payload: DirectRelayPayload) -> list[dict]:
+        if payload.target == "GCS":
+            commands = [{"type": "relay", "id": payload.channel, "state": payload.state}]
+        else:
+            board = self._fas_board(payload.node)
+            action = "on" if payload.state == 1 else "off"
+            commands = [{"type": "fas", **board, "port": "relay", "channel": payload.channel, "action": action}]
+        self._ctx.mqtt_service.publish_device_commands(commands)
+        return commands
+
+    def apply_direct_servo(self, payload: DirectServoPayload) -> list[dict]:
+        if payload.target == "GCS":
+            commands = [{"type": "servo", "id": payload.channel, "angle": payload.pulse_us}]
+        else:
+            board = self._fas_board(payload.node)
+            commands = [{"type": "fas", **board, "port": "servo", "channel": payload.channel, "value": payload.pulse_us}]
+        self._ctx.mqtt_service.publish_device_commands(commands)
+        return commands
 
     def apply_system_command(self, payload: SystemCommandPayload) -> dict:
         ctx = self._ctx
