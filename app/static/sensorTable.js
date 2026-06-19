@@ -1,17 +1,16 @@
 (function () {
   "use strict";
 
+const DESIRED_ROLE = "pad";
+
 const WS_URL = window.APP_CONFIG?.WS_URL || `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}`;
-const wsUrl = `${WS_URL}/ws?role=operator`;
+const wsUrl = `${WS_URL}/ws?role=${DESIRED_ROLE}`;
 
 let socket;
 let reconnectAttempts = 0;
 const maxReconnectAttempts = 10;
 const reconnectInterval = 2000;
 
-// Desired role for this control UI. Operator can issue any command; hazardous
-// commands remain gated per-state by the physical lockout on the backend.
-const DESIRED_ROLE = "operator";
 let roleRequested = false;
 
 const BASE_URL = window.APP_CONFIG?.BASE_URL || window.location.origin;

@@ -73,7 +73,7 @@ class SensorParser:
         return {(s.binding.resolved_node, s.binding.channel): s for s in sensors
                 if isinstance(s.binding, FasSensorBinding)}
 
-    def parse(self, source: str, raw_sensors: list[dict], config: SystemConfig, calibration_enabled: bool) -> list[ParsedSensor]:
+    def parse(self, source: str, raw_sensors: list[dict] | dict[str, dict], config: SystemConfig, calibration_enabled: bool) -> list[ParsedSensor]:
         target = self._resolve_source(source)
         is_fas = target == SourceTarget.FAS
 
@@ -82,8 +82,11 @@ class SensorParser:
         else:
             lookup_gcs = self._gcs_lookup(config.sensors, target or SourceTarget.GCS)
 
+        # Accept either a list of sensor dicts or a dict keyed by "node:channel"
+        items = raw_sensors.values() if isinstance(raw_sensors, dict) else raw_sensors
+
         parsed: list[ParsedSensor] = []
-        for item in raw_sensors:
+        for item in items:
             timestamp = int(item.get("timestamp", 0))
             raw_value = float(item.get("value", 0.0))
 
@@ -107,7 +110,7 @@ class SensorParser:
                     name=sensor_cfg.name,
                     value=round(value, 2),
                     avg=round(averaged_value, 2),
-                    unit=sensor_cfg.unit,
+                    unit= "V" if sensor_cfg.convert.method != ConvertMethod.NONE and not calibration_enabled else sensor_cfg.unit,
                     timestamp=timestamp,
                 )
             )

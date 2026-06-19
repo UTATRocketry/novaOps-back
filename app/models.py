@@ -58,7 +58,7 @@ class FasSensorBinding(BaseModel):
             return self.node
         if self.board_type is None:
             return None
-        return f"{self.board_type}_{self.board_id + 1}"
+        return f"{self.board_type}_{self.board_id}"
 
 
 class SensorEntry(BaseModel):
@@ -132,6 +132,10 @@ class SafetyRules(BaseModel):
     critical: list[dict[str, str | list[str]]] = Field(default_factory=list)
     hazardous: list[dict[str, str | list[str]]] = Field(default_factory=list)
 
+class Procedure(BaseModel):
+    name: str
+    steps: list[str] = Field(default_factory=list)
+
 
 class SystemConfig(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
@@ -140,6 +144,7 @@ class SystemConfig(BaseModel):
     actuators: list[ActuatorEntry] = Field(default_factory=list, alias="Actuators")
     commands: dict[str, CommandEntry] = Field(default_factory=dict, alias="Commands")
     safety_rules: SafetyRules = Field(default_factory=SafetyRules, alias="safetyRules")
+    procedures: list[Procedure] = Field(default_factory=list, alias="Procedures")
 
     @model_validator(mode="before")
     @classmethod
@@ -182,6 +187,15 @@ class SystemConfig(BaseModel):
 
     def all_actuators(self) -> list[ActuatorEntry]:
         return list(self.actuators)
+
+    def all_procedures(self) -> list[Procedure]:
+        return list(self.procedures)
+
+    def find_procedure(self, name: str) -> Procedure | None:
+        for procedure in self.procedures:
+            if procedure.name == name:
+                return procedure
+        return None
 
     def is_hazardous_command(self, name: str, state: str | None) -> bool:
         return self._matches_safety_rule(self.safety_rules.hazardous, name, state)

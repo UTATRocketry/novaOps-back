@@ -9,8 +9,10 @@ nova/command FAS commands to wire frames. All non-FAS command types are
 silently dropped.
 
 Telemetry published
-  nova/telemetry/engine — sensors: FAS EPB ADC samples at hat_id = (100 + board_id)
-                          gpios:   always empty (bridge has no GPIO manager)
+  nova/telemetry/engine — sensors: dict keyed "node:channel" (e.g. "EPB_0:0"),
+                          each {node, channel, value, timestamp}, updated in
+                          place so order is stable and timestamp only advances
+                          on a fresh ADC sample
   nova/telemetry/flight — full board state snapshot under "data", mirroring the
                           gs server. data contains:
                           fas_boards:       online/uptime/fw/caps per board
@@ -29,6 +31,8 @@ Inbound commands handled (on nova/command)
        action "list_ports"    enumerate serial ports → nova/console
        action "configure"     switch serial port/baud and reconnect
        action "tx"            encode a packet (op/fields/raw) and write to FAS
+  {"type":"data_file", ...} — record ADC samples to a CSV in --data-dir:
+       action "start_data_saving" (filename) / "stop_data_saving"
   everything else           — silently dropped
 
 Console output published (on nova/console)
@@ -42,7 +46,7 @@ Dependencies: pip install paho-mqtt pyserial
 
 Usage:
     python fas_bridge.py --port /dev/ttyUSB0 [--baud 460800]
-                         [--broker localhost:1883] [--node-id fas_bridge]
+                         [--broker localhost:1883] [--node-id FAS]
                          [--publish-ms 50] [--verbosity 0|1|2]
                          [--imc-board-id N]
 """
@@ -50,10 +54,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import struct
 import threading
 import time
-from collections import deque
 from enum import IntEnum
 
 import paho.mqtt.client as mqtt
@@ -191,6 +195,10 @@ BUZZER_OP_STOP = 3
 # Heartbeat timeout matching loops.cpp kBoardTimeoutS
 BOARD_TIMEOUT_S   = 3.0
 DISCOVERY_INTERVAL_S = 2.0
+# Drop an engine sensor from the published set if no fresh ADC sample has
+# arrived within this many seconds, so the bridge stops republishing values
+# for boards that have gone away.
+ENGINE_STALE_S    = 3.0
 
 # Flight states from Flight_State_t / lookupTableFlightState in flight.h.
 FLIGHT_STATES = [
@@ -560,7 +568,7 @@ def _resolve_fas_board_id(cmd: dict) -> int:
     if node:
         parts = node.rsplit("_", 1)
         if len(parts) == 2 and parts[1].isdigit():
-            return max(0, int(parts[1]) - 1)
+            return max(0, int(parts[1]))
     return 0
 
 
@@ -568,7 +576,7 @@ def _resolve_fas_board_id(cmd: dict) -> int:
 class FasBridge:
     def __init__(self, port: str, baud: int, broker: str,
                  node_id: str, publish_ms: int, verbosity: int,
-                 imc_board_id: int | None = None) -> None:
+                 imc_board_id: int | None = None, data_dir: str = "data") -> None:
         self._port       = port
         self._baud       = baud
         self._node_id    = node_id
@@ -580,9 +588,18 @@ class FasBridge:
         self._lock       = threading.Lock()
         self._seq        = 0
 
+        # Data saving: when recording, ADC samples are appended to a CSV in
+        # data_dir. Driven by {"type":"data_file", ...} commands from the backend.
+        self._data_dir     = data_dir
+        self._record_lock  = threading.Lock()
+        self._record_file  = None    # open file handle, or None when not recording
+
         # Telemetry state — mirrors gs StateModel: boards, actuators, sensors, imc
         # plus FMC/PMB onboard telemetry, all keyed by board key ("EPB:0", etc.)
-        self._adc_samples: deque[dict] = deque(maxlen=1024)
+        # Engine sensor values are kept as a persistent dict keyed "node:channel"
+        # and updated in place, so the published order is stable (like flight data)
+        # and the timestamp only advances when a fresh ADC sample arrives.
+        self._engine_values: dict[str, dict] = {}  # "EPB_0:0" → {node, channel, value, timestamp}
         self._fas_boards: dict[str, dict]  = {}    # key → {online, uptime_ms, last_seen, ...}
         self._fas_actuators: dict[str, dict[int, dict]] = {}  # key → {channel_idx → state}
         self._fas_sensors: dict[str, dict] = {}    # key → SENSOR_STATUS fields
@@ -642,7 +659,59 @@ class FasBridge:
                 self._log(2, f"[bridge] fas: unrecognised shape {cmd}")
         elif t == "console":
             self._cmd_console(cmd)
+        elif t == "data_file":
+            self._cmd_data_file(cmd)
         # All other types are silently dropped per spec.
+
+    # ── Data saving ───────────────────────────────────────────────────────────
+
+    def _cmd_data_file(self, cmd: dict) -> None:
+        """Start/stop recording ADC samples to a CSV in the bridge's data dir.
+
+        Mirrors the backend's data-saving command:
+          {"type":"data_file","action":"start_data_saving","filename":"..._data_0"}
+          {"type":"data_file","action":"stop_data_saving"}
+        """
+        action = str(cmd.get("action", "")).lower()
+
+        if action == "start_data_saving":
+            filename = str(cmd.get("filename") or "fas_data")
+            if not filename.endswith(".csv"):
+                filename += ".csv"
+            path = os.path.join(self._data_dir, filename)
+            try:
+                os.makedirs(self._data_dir, exist_ok=True)
+                f = open(path, "w", newline="", encoding="utf-8")
+                f.write("timestamp_ms,node,channel,value\n")
+                f.flush()
+            except OSError as e:
+                self._log(0, f"[bridge] data saving open failed: {e}")
+                return
+            with self._record_lock:
+                if self._record_file is not None:
+                    self._record_file.close()
+                self._record_file = f
+            self._log(1, f"[bridge] data saving started -> {path}")
+
+        elif action == "stop_data_saving":
+            with self._record_lock:
+                if self._record_file is not None:
+                    self._record_file.close()
+                    self._record_file = None
+            self._log(1, "[bridge] data saving stopped")
+
+        else:
+            self._log(2, f"[bridge] data_file: unknown action {action!r}")
+
+    def _record_samples(self, node: str, ch: list, now_ms: int) -> None:
+        """Append one CSV row per channel if a recording is in progress."""
+        with self._record_lock:
+            f = self._record_file
+            if f is None:
+                return
+            for idx, code in enumerate(ch):
+                f.write(f"{now_ms},{node},{idx},{code * ADC_INT16_TO_V}\n")
+            f.flush()
 
     # ── Console (two-way) ─────────────────────────────────────────────────────
 
@@ -670,7 +739,7 @@ class FasBridge:
                  "description": p.description, "hwid": p.hwid}
                 for p in serial.tools.list_ports.comports()
             ]
-            self._log(1, f"[bridge] console list_ports → {len(ports)} found")
+            self._log(1, f"[bridge] console list_ports -> {len(ports)} found")
             self._publish_console({"type": "console_ports", "ports": ports})
 
         elif action == "configure":
@@ -732,7 +801,7 @@ class FasBridge:
             old.close()
         except Exception:
             pass
-        self._log(1, f"[bridge] serial reconfigured → {port} @ {baud} baud")
+        self._log(1, f"[bridge] serial reconfigured -> {port} @ {baud} baud")
         return True, None
 
     def _cmd_fas_port(self, cmd: dict) -> None:
@@ -756,7 +825,7 @@ class FasBridge:
             period_us = int(cmd.get("period_us", 20000))
             self._send_pwm_set(board_id, channel, pulse_us, period_us)
             self._log(1, f"[bridge] fas pwm_set EPB:{board_id} ch={channel} "
-                         f"pulse={pulse_us}µs")
+                         f"pulse={pulse_us}us")
 
         elif port == "gpio":
             act = action.upper()
@@ -845,20 +914,23 @@ class FasBridge:
                          f"ch={d.get('num_channels')} sens={d.get('num_sensors')}")
 
         elif msg in (RT_MSG_ADC_SAMPLE, RT_MSG_ADC_BURST):
-            # Collapse both stamped samples and legacy bursts into the ADC queue.
+            # Update the persistent engine dict in place, one entry per channel.
+            # Stamped samples carry 2 channels, legacy bursts 4.
+            # Node comes from THIS frame's own kind+board_id ("EPB_0"); never look
+            # it up by board_id alone — the FMC/GS share board_id 0 with the EPB.
             ch = d.get("ch", [])
-            t_us = d.get("t_us", 0)
             now_ms = int(now * 1000)
+            node = f"{kind_name}_{board_id}"
             with self._lock:
-                self._adc_samples.append({
-                    "board_id": board_id,
-                    "t_us":     t_us,
-                    "v0":       (ch[0] if len(ch) > 0 else 0) * ADC_INT16_TO_V,
-                    "v1":       (ch[1] if len(ch) > 1 else 0) * ADC_INT16_TO_V,
-                    "ma0":      (ch[0] if len(ch) > 0 else 0) * ADC_INT16_TO_MA,
-                    "ma1":      (ch[1] if len(ch) > 1 else 0) * ADC_INT16_TO_MA,
-                    "ts_ms":    now_ms,
-                })
+                for idx, code in enumerate(ch):
+                    self._engine_values[f"{node}:{idx}"] = {
+                        "node":      node,
+                        "channel":   idx,
+                        "value":     code * ADC_INT16_TO_V,
+                        "timestamp": now_ms,
+                    }
+            self._record_samples(node, ch, now_ms)
+            self._log(2, f"[bridge] adc {key} ch={ch}")
 
         elif msg == RT_MSG_ACTUATOR_STATE:
             ch = d.get("channel_idx", 0)
@@ -991,28 +1063,24 @@ class FasBridge:
                 for key, info in self._fas_boards.items():
                     if info["online"] and (now - info.get("last_seen", now)) > BOARD_TIMEOUT_S:
                         info["online"] = False
-                        self._log(1, f"[bridge] board {key} timed out → offline")
+                        self._log(1, f"[bridge] board {key} timed out -> offline")
             time.sleep(DISCOVERY_INTERVAL_S)
 
     def _publish_loop(self) -> None:
         self._log(2, "[bridge] telemetry publisher started")
         while True:
             now_ms = int(time.monotonic() * 1000)
-
             with self._lock:
-                # Drain the ADC sample queue and collapse to latest per (board_id, channel).
-                # Node string derived from board key ("EPB:0" → "EPB_1", 1-based).
-                latest: dict[tuple[int, int], dict] = {}
-                for s in self._adc_samples:
-                    bid = s["board_id"]
-                    for ch, v_key in ((0, "v0"), (1, "v1")):
-                        latest[(bid, ch)] = {
-                            "node":      self._board_node(bid),
-                            "channel":   ch,
-                            "value":     s[v_key],
-                            "timestamp": s["ts_ms"],
-                        }
-                self._adc_samples.clear()
+                # Drop sensors whose ADC samples have stopped arriving so we don't
+                # keep republishing frozen values for a board that's gone.
+                stale = [k for k, v in self._engine_values.items()
+                         if now_ms - v["timestamp"] > ENGINE_STALE_S * 1000]
+                for k in stale:
+                    del self._engine_values[k]
+
+                # Engine sensors: snapshot the persistent dict, keyed "node:channel"
+                # so the published order stays stable across messages.
+                engine_snap = {k: dict(v) for k, v in self._engine_values.items()}
 
                 fas_boards_snap = [
                     {"key": k, **{kk: vv for kk, vv in v.items() if kk != "last_seen"}}
@@ -1028,13 +1096,11 @@ class FasBridge:
                 fas_pmb_snap = {k: dict(v) for k, v in self._fas_pmb.items()}
                 fas_imc_snap = dict(self._fas_imc)
 
-            fas_sensor_payload = {
-                "source":  "FAS",
-                "sensors": list(latest.values()),
-            }
+            # Source must be a FAS alias so the backend routes these to FAS
+            # sensor bindings; it is independent of --node-id (the MQTT client id).
             engine_payload = {
-                "source":  self._node_id,
-                "sensors": list(latest.values()),
+                "source":  "FAS",
+                "sensors": engine_snap,
             }
             flight_payload = {
                 "source": self._node_id,
@@ -1049,24 +1115,20 @@ class FasBridge:
                     "fas_fsm":          {"state": "ARMED" if fas_imc_snap.get("armed") else "STANDBY"}
                 },
             }
-            #self._client.publish(TELEMETRY_TOPIC, json.dumps(fas_sensor_payload),    qos=0)
-            if latest:
+            if engine_snap:
                 self._client.publish(TELEMETRY_TOPIC, json.dumps(engine_payload), qos=0)
             self._client.publish(FLIGHT_TOPIC,    json.dumps(flight_payload), qos=0)
 
             time.sleep(self._publish_ms / 1000.0)
 
-    def _board_node(self, board_id: int) -> str:
-        """Return the node string for a board_id, e.g. board_id=0 → 'EPB_1'."""
-        for key in self._fas_boards:
-            colon = key.find(":")
-            if colon != -1 and int(key[colon + 1:]) == board_id:
-                return key[:colon] + "_" + str(board_id)
-        return f"EPB_{board_id}"
-
     def _log(self, level: int, msg: str) -> None:
         if self._verbosity >= level:
-            print(msg, flush=True)
+            try:
+                print(msg, flush=True)
+            except UnicodeEncodeError:
+                # Windows consoles are often cp1252; never let a stray non-ASCII
+                # character (e.g. from wire data) kill a logging thread.
+                print(msg.encode("ascii", "replace").decode("ascii"), flush=True)
 
     def run(self) -> None:
         self._log(1, f"[bridge] FAS bridge starting: {self._port} @ {self._baud} baud")
@@ -1089,7 +1151,7 @@ def main() -> None:
     p.add_argument("--baud",       type=int, default=460800)
     p.add_argument("--broker",     default="localhost:1883")
     p.add_argument("--node-id",    default="FAS",
-                   help="MQTT client ID and telemetry source name")
+                   help="MQTT client ID (engine telemetry source is always 'FAS')")
     p.add_argument("--publish-ms", type=int, default=50,
                    help="Telemetry publish interval ms")
     p.add_argument("--verbosity",  type=int, default=1, choices=[0, 1, 2])
@@ -1097,6 +1159,8 @@ def main() -> None:
                    help="If set, only update IMC arm state from this board_id; "
                         "IMC_STATUS frames from other boards are ignored "
                         "(default: accept any board)")
+    p.add_argument("--data-dir",   default="data",
+                   help="Directory for recorded data-saving CSV files")
     args = p.parse_args()
 
     FasBridge(
@@ -1107,6 +1171,7 @@ def main() -> None:
         publish_ms=args.publish_ms,
         verbosity=args.verbosity,
         imc_board_id=args.imc_board_id,
+        data_dir=args.data_dir,
     ).run()
 
 

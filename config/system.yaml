@@ -11,7 +11,7 @@ safetyRules:
     #- IMC-G: ALL
     #- SVBVGS: OPEN
     #- BVGSO: OPEN
-    - BVOTP: OPEN
+    #- BVOTP: OPEN
     #- BVFTP: OPEN
 
 Sensors:
@@ -57,6 +57,43 @@ Sensors:
         [3.77,700],
         [4.08,775]
       ]
+  - name: PFM
+    unit: psi
+    type: PT
+    unit: psi
+    range: [0, 1000]
+    binding:
+      source: GCS
+      hat_id: 0
+      channel_id: 4
+    convert:
+      method: linear
+      calibration: [
+        [2.01, 4.00],
+        [9.14, 633],
+      ]
+
+  - name: PVO
+    unit: psi
+    type: PT
+    range: [0, 1000]
+    binding:
+      source: GCS
+      hat_id: 1
+      channel_id: 0
+    convert:
+      method: linear
+      calibration: [
+        [1.98,0],
+        [2.68,100],
+        [3.53,200],
+        [4.35,300],
+        [5.19,400],
+        [5.92,500],
+        [6.74,600],
+        [7.57,700],
+        [8.25,800]
+      ]
   - name: MOT
     type: LC
     unit: kg
@@ -64,7 +101,7 @@ Sensors:
     binding:
       source: GCS
       hat_id: 0
-      channel_id: 2
+      channel_id: 6
     convert:
       method: linear
       calibration: [
@@ -102,7 +139,7 @@ Sensors:
     binding:
       source: GCS
       hat_id: 1
-      channel_id: 5
+      channel_id: 1
     convert:
       method: linear
       calibration: [
@@ -128,8 +165,7 @@ Sensors:
     range: [0, 1000]
     binding:
       source: FAS
-      board_type: EPB
-      board_id: 0
+      node: EPB_4
       channel: 1
     convert:
       method: linear
@@ -141,9 +177,8 @@ Sensors:
     range: [0, 1000]
     binding:
       source: FAS
-      board_type: EPB
-      board_id: 1
-      channel: 1
+      node: EPB_4
+      channel: 0
     convert:
       method: linear
       calibration: [ [1, 1],]
@@ -154,8 +189,7 @@ Sensors:
     range: [0, 1000]
     binding:
       source: FAS
-      board_type: EPB
-      board_id: 2
+      node: EPB_0
       channel: 1
     convert:
       method: linear
@@ -246,29 +280,26 @@ Actuators:
     type: solenoid
     binding:
       target: FAS
-      board_type: EPB
-      board_id: 0
-      relay_channel: 2
+      node: EPB_4
+      relay_channel: 0
     actions:
       relay_type: "nominally_off"
-      solenoid_type: "nominally_closed"
+      solenoid_type: "nominally_open"
   - name: SVOTV
     type: solenoid
     binding:
       target: FAS
-      board_type: EPB
-      board_id: 1
-      relay_channel: 2
+      node: EPB_0
+      relay_channel: 1
     actions:
       relay_type: "nominally_off"
-      solenoid_type: "nominally_closed"
+      solenoid_type: "nominally_open"
   - name: BVFTP
     type: servo
     binding:
       target: FAS
       board_type: EPB
-      board_id: 0
-      relay_channel: 1
+      node: EPB_4
       servo_channel: 1
     actions:
       position_aliases: [open, closed] 
@@ -278,10 +309,9 @@ Actuators:
     type: servo
     binding:
       target: FAS
-      board_type: EPB
-      board_id: 2
-      relay_channel: 1
-      servo_channel: 1
+      node: EPB_0
+      relay_channel: 0
+      servo_channel: 0
     actions:
       position_aliases: ["F", "N", "D"]
       positions: [500, 1500, 2500]
@@ -290,31 +320,35 @@ Actuators:
     type: gpio_device
     binding:
       target: FAS
-      board_type: EPB
-      board_id: 2
-      gpio_channel: 2
+      node: EPB_0
+      gpio_channel: 0
     actions:
       gpio_commands: [arm, disarm]
-  - name: GPIO_Test_1
-    type: gpio_device
-    binding:
-      target: GCS
-      gpio_channel: 1
-  - name: GPIO_Test_2
-    type: powered_gpio_device
-    binding:
-      target: GCS
-      relay_channel: 14
-      gpio_channel: 2
 
 
-Commands:
-  - name: Discover
-    type: system
-    binding:
-      target: FAS
-  - name: FailSafe
-    type: system
-    binding:
-      target: FAS
-
+Procedures:
+  - name: Hotfire
+    steps:
+      - Perform actuator and sensor checkouts
+      - Verify all valves closed and all sensors nominal
+      - Complete low pressure leak checks
+      - Complete high pressure leak checks
+      - Complete Ox fill
+      - Pressurize Ox Tank and Fuel Tank
+      - Dump Fill lines
+      - Perform GO/NO-GOs
+      - Connect Launch Controller
+      - Arm IMCs
+      - GO for ignition
+  - name: Cold Flow
+    steps:
+      - Perform actuator and sensor checkouts
+      - Verify all valves closed and all sensors nominal
+      - Complete low pressure leak checks
+      - Complete high pressure leak checks
+      - Complete Ox fill
+      - Pressurize Ox Tank and Fuel Tank
+      - Dump Fill lines
+      - Perform GO/NO-GOs
+      - Arm IMCs
+      - Pull Burn Wire

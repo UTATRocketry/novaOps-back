@@ -19,6 +19,11 @@ async def get_sensors(ctx: AppContext = Depends(get_context)) -> list[dict]:
     return [item.model_dump(by_alias=True) for item in ctx.config_service.config.all_sensors()]
 
 
+@router.get("/procedures", summary="List procedures", description="Return checklist procedures from loaded config.")
+async def get_procedures(ctx: AppContext = Depends(get_context)) -> list[dict]:
+    return [item.model_dump(by_alias=True) for item in ctx.config_service.config.all_procedures()]
+
+
 @router.get("/config", summary="Get full config", description="Return the active configuration as JSON.")
 async def get_config(ctx: AppContext = Depends(get_context)) -> dict:
     return ctx.config_service.config.model_dump(by_alias=True)

@@ -143,11 +143,10 @@ class CommandParser:
         """Return board_type / board_id fields for a FAS command envelope."""
         if binding.board_type is not None:
             return {"board_type": binding.board_type, "board_id": binding.board_id}
-        # Legacy config: derive from node string ("EPB_1" → board_type="EPB", board_id=0).
         if binding.node:
             parts = binding.node.rsplit("_", 1)
             if len(parts) == 2 and parts[1].isdigit():
-                return {"board_type": parts[0], "board_id": int(parts[1]) - 1}
+                return {"board_type": parts[0], "board_id": int(parts[1])}
         return {"board_type": None, "board_id": binding.board_id}
 
     def _parse_fas(self, actuator: ActuatorEntry, state: str) -> list[dict]:
