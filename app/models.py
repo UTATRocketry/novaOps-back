@@ -166,6 +166,14 @@ class SystemConfig(BaseModel):
     procedures: list[Procedure] = Field(default_factory=list, alias="Procedures")
     devices: list[DeviceEntry] = Field(default_factory=list, alias="Devices")
     packets: list[PacketEntry] = Field(default_factory=list, alias="Packets")
+    buzzer_melodies: dict[str, list[list[int]]] = Field(
+        default_factory=dict,
+        alias="BuzzerMelodies",
+        description=(
+            "Named FMC buzzer melodies. Each is a list of [freq_hz, dur_ms] or "
+            "[freq_hz, dur_ms, vol] notes; freq_hz 0 is a rest (silence)."
+        ),
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -202,6 +210,9 @@ class SystemConfig(BaseModel):
 
     def find_command(self, name: str) -> CommandEntry | None:
         return self.commands.get(name)
+
+    def find_buzzer_melody(self, name: str) -> list[list[int]] | None:
+        return self.buzzer_melodies.get(name)
 
     def all_sensors(self) -> list[SensorEntry]:
         return list(self.sensors)
@@ -311,6 +322,50 @@ class DirectServoPayload(BaseModel):
     )
     channel: int = Field(ge=0, description="Servo/PWM channel number")
     pulse_us: int = Field(ge=0, le=3000, description="PWM pulse width in microseconds (0 = disable)")
+
+
+class FasBuzzerPayload(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={"example": {"node": "FMC_0", "action": "play", "melody": "test_chime"}}
+    )
+
+    node: str | None = Field(
+        default=None,
+        description='FAS board node string, e.g. "FMC_0". Parsed to board_type/board_id.',
+    )
+    action: Literal["play", "stop"] = Field(
+        default="play",
+        description="play = stream a melody to the FMC and play it; stop = silence now",
+    )
+    melody: str | None = Field(
+        default=None,
+        description="Name of a predefined melody from config (BuzzerMelodies). Used when notes is omitted.",
+    )
+    notes: list[list[int]] | None = Field(
+        default=None,
+        description=(
+            "Explicit melody: list of [freq_hz, dur_ms] or [freq_hz, dur_ms, vol] "
+            "notes; freq_hz 0 is a rest. Takes precedence over melody."
+        ),
+    )
+
+
+class FasSdPayload(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={"example": {"node": "FMC_0", "action": "set_rate", "divisor": 10}}
+    )
+
+    node: str | None = Field(
+        default=None,
+        description='FAS board node string, e.g. "FMC_0". Parsed to board_type/board_id.',
+    )
+    action: Literal["set_rate", "clear"] = Field(
+        description="set_rate = set SD log decimation divisor, clear = reformat the card",
+    )
+    divisor: int = Field(
+        default=1, ge=1, le=255,
+        description="Log decimation divisor for action=set_rate (1 = full rate)",
+    )
 
 
 class IncomingSensorPacket(BaseModel):

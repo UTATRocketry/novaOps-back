@@ -4,7 +4,14 @@ from fastapi import APIRouter, Depends, Header, HTTPException
 
 from app.context import AppContext
 from app.deps import get_context
-from app.models import CommandPayload, DirectRelayPayload, DirectServoPayload, SystemCommandPayload
+from app.models import (
+    CommandPayload,
+    DirectRelayPayload,
+    DirectServoPayload,
+    FasBuzzerPayload,
+    FasSdPayload,
+    SystemCommandPayload,
+)
 from app.services.role_service import ClientRole
 
 router = APIRouter(prefix="/api", tags=["Commands"])
@@ -105,6 +112,51 @@ async def post_direct_servo(
     if caller_role < ClientRole.operator:
         raise HTTPException(status_code=403, detail="Insufficient role: operator or admin required")
     commands = ctx.command_service.apply_direct_servo(payload)
+    return {"published_commands": commands}
+
+
+@router.post(
+    "/fas/buzzer",
+    summary="Control the FMC buzzer",
+    description=(
+        "Drive the FAS FMC buzzer. action: begin (start a melody), note (append "
+        "a freq/duration note), play (play melody by idx), stop (silence). "
+        "Requires operator or admin role."
+    ),
+)
+async def post_fas_buzzer(
+    payload: FasBuzzerPayload,
+    x_client_id: str | None = Header(default=None),
+    ctx: AppContext = Depends(get_context),
+) -> dict:
+    caller_role = ctx.role_service.resolve_caller_role(x_client_id)
+    if caller_role < ClientRole.operator:
+        raise HTTPException(status_code=403, detail="Insufficient role: operator or admin required")
+    try:
+        commands = ctx.command_service.apply_fas_buzzer(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"published_commands": commands}
+
+
+@router.post(
+    "/fas/sd",
+    summary="Control the FMC SD-card logger",
+    description=(
+        "Control the FAS FMC SD-card logger. action: set_rate (set the log "
+        "decimation divisor, 1 = full rate) or clear (reformat the card). "
+        "Requires operator or admin role."
+    ),
+)
+async def post_fas_sd(
+    payload: FasSdPayload,
+    x_client_id: str | None = Header(default=None),
+    ctx: AppContext = Depends(get_context),
+) -> dict:
+    caller_role = ctx.role_service.resolve_caller_role(x_client_id)
+    if caller_role < ClientRole.operator:
+        raise HTTPException(status_code=403, detail="Insufficient role: operator or admin required")
+    commands = ctx.command_service.apply_fas_sd(payload)
     return {"published_commands": commands}
 
 

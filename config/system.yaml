@@ -402,3 +402,16 @@ Procedures:
       - Perform GO/NO-GOs
       - Arm IMCs
       - Pull Burn Wire
+
+# Named FMC buzzer melodies. Each note is [freq_hz, dur_ms] or
+# [freq_hz, dur_ms, vol]; freq_hz 0 is a rest (silence). Played via
+# POST /api/fas/buzzer with {"action": "play", "melody": "<name>"}.
+BuzzerMelodies:
+  test_chime:
+    - [523, 180]    # C5
+    - [659, 180]    # E5
+    - [784, 180]    # G5
+    - [1047, 320]   # C6
+    - [0, 80]       # rest
+    - [784, 160]    # G5
+    - [1047, 380]   # C6

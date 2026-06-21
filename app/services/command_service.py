@@ -11,6 +11,8 @@ from app.models import (
     CommandPayload,
     DirectRelayPayload,
     DirectServoPayload,
+    FasBuzzerPayload,
+    FasSdPayload,
     SourceTarget,
     SystemCommandPayload,
     SystemConfig,
@@ -261,6 +263,38 @@ class CommandService:
             commands = [{"type": "fas", **board, "port": "servo", "channel": payload.channel, "value": payload.pulse_us}]
         self._ctx.mqtt_service.publish_device_commands(commands)
         return commands
+
+    def apply_fas_buzzer(self, payload: FasBuzzerPayload) -> list[dict]:
+        board = self._fas_board(payload.node)
+
+        if payload.action == "stop":
+            command = {"type": "fas", **board, "op": "buzzer", "action": "stop"}
+            self._ctx.mqtt_service.publish_device_commands([command])
+            return [command]
+
+        # action == "play": resolve the note list from an explicit array or a
+        # named melody in config, then hand the whole melody to the bridge in
+        # one command (it streams BEGIN/NOTE.../PLAY to the FMC).
+        notes = payload.notes
+        if notes is None and payload.melody is not None:
+            notes = self._ctx.config_service.config.find_buzzer_melody(payload.melody)
+            if notes is None:
+                raise ValueError(f"Buzzer melody '{payload.melody}' not found in config")
+        if not notes:
+            raise ValueError("A buzzer 'play' needs either 'notes' or a known 'melody'")
+
+        command = {"type": "fas", **board, "op": "buzzer", "action": "play", "notes": notes}
+        self._ctx.mqtt_service.publish_device_commands([command])
+        return [command]
+
+    def apply_fas_sd(self, payload: FasSdPayload) -> list[dict]:
+        board = self._fas_board(payload.node)
+        command = {
+            "type": "fas", **board, "op": "sd_cmd",
+            "action": payload.action, "divisor": payload.divisor,
+        }
+        self._ctx.mqtt_service.publish_device_commands([command])
+        return [command]
 
     def apply_system_command(self, payload: SystemCommandPayload) -> dict:
         ctx = self._ctx

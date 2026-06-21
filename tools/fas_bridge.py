@@ -25,7 +25,10 @@ Telemetry published
   All message types in gs/protocol.py are decoded via decode_payload().
 
 Inbound commands handled (on nova/command)
-  {"type":"fas",     ...}   — both op-shape and board_type/port/action shape
+  {"type":"fas",     ...}   — both op-shape and board_type/port/action shape.
+       op-shape ops: pwm_set, load_sw_set, failsafe, imc_arm, imc_disarm,
+       discover, actuator_query, buzzer (FMC buzzer; a "notes" array streams a
+       whole melody as BEGIN/NOTE.../PLAY), sd_cmd (FMC SD logger rate / clear).
   {"type":"console", ...}   — two-way console control + TX:
        action "start"/"stop"  toggle RX frame streaming to nova/console
        action "list_ports"    enumerate serial ports → nova/console
@@ -117,7 +120,14 @@ RT_MSG_IGN_DISARM         = 0x32
 RT_MSG_IMC_STATUS         = 0x33
 RT_MSG_FMC_SD_STATUS      = 0x34
 RT_MSG_FMC_RADIO_STATUS   = 0x35
+RT_MSG_FMC_BUZZER         = 0x36   # GS → FMC: melody note stream
+RT_MSG_RECOVERY_ARM       = 0x37
+RT_MSG_RECOVERY_DEPLOY    = 0x38
 RT_MSG_PMB_CHARGER        = 0x39
+RT_MSG_PMB_CHG_EN         = 0x3A   # GS → PMB: allow / suspend charging
+RT_MSG_FMC_SD_CMD         = 0x3B   # GS → FMC: set SD log rate / clear card
+RT_MSG_DEBUG_LOG          = 0x3E
+RT_MSG_ACK                = 0x3F
 
 # Names for FMC vector sensors, keyed by msg type → snapshot field name
 FMC_VEC3_FIELDS = {
@@ -181,6 +191,21 @@ PMB_FLAG_BATT_SRC = 1 << 6
 
 # SD logger states (mirror RT_SD_STATE_*)
 SD_STATE_NAMES = {0: "absent", 1: "no-fs", 2: "mounted", 3: "logging", 4: "error"}
+
+# SD status flag bits (mirror RT_SD_FLAG_*)
+SD_FLAG_LOGGING      = 1 << 0
+SD_FLAG_NEAR_FULL    = 1 << 1
+SD_FLAG_FULL         = 1 << 2
+SD_FLAG_RATE_REDUCED = 1 << 3
+SD_FLAG_STALLED      = 1 << 4
+# Active decimation, reported in the top 3 bits of `flags` (mirror RT_SD_RATE_*).
+# code = index into SD_RATE_DIVS (0 = full); a code past the table = custom divisor.
+SD_RATE_SHIFT = 5
+SD_RATE_DIVS  = [1, 5, 10, 50, 100]
+
+# SD command ops (mirror RT_SD_CMD_*)
+RT_SD_CMD_SET_RATE = 0    # arg = 1..255 decimation divisor
+RT_SD_CMD_CLEAR    = 1    # reformat / clear the card
 
 # RFD900x status flag bits (mirror RT_RFD_FLAG_*)
 RFD_FLAG_POWERED = 1 << 0
@@ -434,9 +459,21 @@ def decode_payload(msg: int, data: bytes) -> dict:
         def _ft(cc):
             return None if cc == 0x7FFF else round(cc / 100.0, 2)
         return {"temp_h7": _ft(t_h7_cc), "temp_pwr": _ft(t_pwr_cc)}
-    if msg == RT_MSG_FMC_SD_STATUS and fits("<BBHI"):
-        state, err, free_mb, written_kb = struct.unpack_from("<BBHI", data, 0)
-        return {"state": state, "state_name": SD_STATE_NAMES.get(state, "?"), "err": err, "free_mb": free_mb, "written_kb": written_kb}
+    if msg == RT_MSG_FMC_SD_STATUS and fits("<BBBBHH"):
+        state, err, pct_used, flags, free_mb, total_mb = struct.unpack_from("<BBBBHH", data, 0)
+        rate_code = (flags >> SD_RATE_SHIFT) & 0x07
+        rate_div  = SD_RATE_DIVS[rate_code] if rate_code < len(SD_RATE_DIVS) else None
+        return {"state": state, "state_name": SD_STATE_NAMES.get(state, "?"),
+                "err": err, "pct_used": pct_used,
+                "free_mb": free_mb, "total_mb": total_mb,
+                "logging": bool(flags & SD_FLAG_LOGGING),
+                "near_full": bool(flags & SD_FLAG_NEAR_FULL),
+                "full": bool(flags & SD_FLAG_FULL),
+                "rate_reduced": bool(flags & SD_FLAG_RATE_REDUCED),
+                "stalled": bool(flags & SD_FLAG_STALLED),
+                "rate_div": rate_div}
+    if msg == RT_MSG_DEBUG_LOG:
+        return {"text": data.rstrip(b"\x00").decode("ascii", errors="replace")}
     if msg == RT_MSG_FMC_RADIO_STATUS and fits("<BBHI"):
         flags, every_n, tx_frames, tx_bytes = struct.unpack_from("<BBHI", data, 0)
         return {"powered": bool(flags & RFD_FLAG_POWERED),
@@ -473,6 +510,17 @@ def _encode_load_sw_set(enable: bool, hold_ms: int) -> bytes:
 def _encode_imc_cmd(pulse_ms: int) -> bytes:
     # rt_imc_cmd_t: uint16 pulse_ms, uint8 reserved x2, uint32 reserved
     return struct.pack("<HBBI", pulse_ms & 0xFFFF, 0, 0, 0)
+
+
+def _encode_buzzer(op: int, idx: int, freq_hz: int, dur_ms: int, vol: int) -> bytes:
+    # rt_fmc_buzzer_t: u8 op, u8 idx, u16 freq_hz, u16 dur_ms, u16 vol (0..255)
+    return struct.pack("<BBHHH", op & 0xFF, idx & 0xFF,
+                       freq_hz & 0xFFFF, dur_ms & 0xFFFF, vol & 0xFFFF)
+
+
+def _encode_sd_cmd(op: int, arg: int) -> bytes:
+    # rt_fmc_sd_cmd_t: u8 op, u8 arg, u16 reserved, u32 reserved
+    return struct.pack("<BBHI", op & 0xFF, arg & 0xFF, 0, 0)
 
 
 def _pad8() -> bytes:
@@ -520,6 +568,36 @@ def op_to_frame(op: str, cmd: dict, seq: int) -> tuple[int, bytes] | None:
     if op == "actuator_query":
         cid = can_id_pack(RT_MSG_ACTUATOR_QUERY, RT_BOARD_GS, board_id, channel, 0, seq)
         return cid, _pad8()
+    if op == "buzzer":
+        # Single low-level FMC buzzer frame. action selects the melody opcode:
+        #   begin — reset the note buffer; note — append one (freq,dur,vol) note;
+        #   play  — play the buffered melody; stop — silence immediately.
+        # The full note-list path is _cmd_fas_buzzer (begin/note.../play) so a
+        # melody plays without each note traversing the whole software stack.
+        sub = str(cmd.get("action", "play")).lower()
+        bop = {"begin": BUZZER_OP_BEGIN, "note": BUZZER_OP_NOTE,
+               "play": BUZZER_OP_PLAY, "stop": BUZZER_OP_STOP}.get(sub)
+        if bop is None:
+            return None
+        cid = can_id_pack(RT_MSG_FMC_BUZZER, RT_BOARD_FMC, board_id, channel, 0, seq)
+        return cid, _encode_buzzer(bop, int(cmd.get("idx", 0)),
+                                   int(cmd.get("freq_hz", 0)),
+                                   int(cmd.get("dur_ms", 0)),
+                                   int(cmd.get("vol", 255)))
+    if op == "sd_cmd":
+        # Control the FMC SD logger. action "set_rate" sets the decimation
+        # divisor (arg/divisor = 1..255, 1 = full rate); action "clear"
+        # reformats the card.
+        sub = str(cmd.get("action", "set_rate")).lower()
+        if sub == "clear":
+            sd_op, arg = RT_SD_CMD_CLEAR, 0
+        elif sub == "set_rate":
+            sd_op = RT_SD_CMD_SET_RATE
+            arg = int(cmd.get("arg", cmd.get("divisor", 1)))
+        else:
+            return None
+        cid = can_id_pack(RT_MSG_FMC_SD_CMD, RT_BOARD_FMC, board_id, channel, 0, seq)
+        return cid, _encode_sd_cmd(sd_op, arg)
     return None
 
 
@@ -841,7 +919,13 @@ class FasBridge:
             self._log(2, f"[bridge] fas: unknown port {port!r}")
 
     def _cmd_fas_op(self, cmd: dict) -> None:
-        op    = str(cmd.get("op", ""))
+        op = str(cmd.get("op", ""))
+        # A buzzer op carrying a `notes` array is a full melody: the bridge
+        # streams it to the FMC as BEGIN, NOTE×N, PLAY on the spot, so notes do
+        # not each pay the cost of a round trip through the whole software stack.
+        if op == "buzzer" and "notes" in cmd:
+            self._cmd_fas_buzzer(cmd)
+            return
         frame = op_to_frame(op, cmd, self._next_seq())
         if frame is None:
             self._log(2, f"[bridge] fas: unknown op {op!r}")
@@ -850,6 +934,39 @@ class FasBridge:
         self._send_frame(can_id, data)
         self._log(1, f"[bridge] fas op={op} board={cmd.get('board_id', 0)} "
                      f"ch={cmd.get('channel', 0)}")
+
+    def _cmd_fas_buzzer(self, cmd: dict) -> None:
+        """Stream a note list to the FMC buzzer as BEGIN, NOTE×N, PLAY.
+
+        notes is a list of [freq_hz, dur_ms] or [freq_hz, dur_ms, vol]; a
+        freq_hz of 0 is a rest (silence for dur_ms). Mirrors the gs server's
+        _send_melody so the FMC sees an identical frame stream. The whole
+        melody is buffered on the FMC and played there, so per-note timing is
+        not subject to MQTT/serial latency.
+        """
+        board_id = int(cmd.get("board_id", 0))
+        channel  = int(cmd.get("channel", 0))
+        notes    = cmd.get("notes") or []
+
+        def buz(bop: int, idx: int = 0, freq: int = 0,
+                dur: int = 0, vol: int = 255) -> None:
+            cid = can_id_pack(RT_MSG_FMC_BUZZER, RT_BOARD_FMC,
+                              board_id, channel, 0, self._next_seq())
+            self._send_frame(cid, _encode_buzzer(bop, idx, freq, dur, vol))
+
+        buz(BUZZER_OP_BEGIN)
+        sent = 0
+        for note in notes:
+            try:
+                freq = int(note[0])
+                dur  = int(note[1])
+                vol  = int(note[2]) if len(note) > 2 else 255
+            except (TypeError, IndexError, ValueError):
+                continue
+            buz(BUZZER_OP_NOTE, sent & 0xFF, freq, dur, vol)
+            sent += 1
+        buz(BUZZER_OP_PLAY)
+        self._log(1, f"[bridge] fas buzzer melody FMC:{board_id} notes={sent}")
 
     # ── FAS frame receive ────────────────────────────────────────────────────
 
