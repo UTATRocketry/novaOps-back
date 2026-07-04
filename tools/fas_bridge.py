@@ -225,11 +225,139 @@ DISCOVERY_INTERVAL_S = 2.0
 # for boards that have gone away.
 ENGINE_STALE_S    = 3.0
 
-# Flight states from Flight_State_t / lookupTableFlightState in flight.h.
-FLIGHT_STATES = [
-    "INIT", "STANDBY", "ARMED", "POWERED_ASCENT",
-    "COASTING", "APOGEE", "DESCENT", "LANDED",
+# ── Flight FSM taxonomy ───────────────────────────────────────────────────────
+# Kept in sync with tools/novaMock.py. fas_state is the top-level avionics state;
+# flight_phase is the finer phase reported alongside it. FLIGHT_EVENTS maps each
+# event name to (id, default severity); events are published on nova/console as
+# {"type":"flight_event","event":{id,name,severity}}.
+FAS_STATES = ["INIT", "STANDBY", "ARMED", "IN_FLIGHT", "AWAITING_RECOVERY"]
+
+FLIGHT_PHASES = [
+    "PAD", "LIFTOFF", "POWERED_ASCENT", "COASTING", "APOGEE",
+    "DROGUE_DESCENT", "MAIN_DESCENT", "BALLISTIC_DESCENT", "LANDED",
 ]
+
+EVENT_SEVERITY = ["DEBUG", "INFO", "WARNING", "ERROR", "FATAL"]
+
+FLIGHT_EVENTS = {
+    "ARMING_DETECTED":  (10, "INFO"),
+    "LAUNCH_DETECTED":  (11, "INFO"),
+    "BURNOUT_DETECTED": (12, "INFO"),
+    "APOGEE_DETECTED":  (13, "INFO"),
+    "DROGUE_DEPLOYED":  (14, "INFO"),
+    "MAIN_DEPLOYED":    (15, "INFO"),
+    "IMPACT_DETECTED":  (16, "WARNING"),
+}
+
+_PHASE_EVENT = {
+    "LIFTOFF":        "LAUNCH_DETECTED",
+    "COASTING":       "BURNOUT_DETECTED",
+    "APOGEE":         "APOGEE_DETECTED",
+    "DROGUE_DESCENT": "DROGUE_DEPLOYED",
+    "MAIN_DESCENT":   "MAIN_DEPLOYED",
+    "LANDED":         "IMPACT_DETECTED",
+}
+
+# Altitude AGL (m) at/below which the main chute is expected; descent faster than
+# the ballistic threshold (m/s) with no chute is flagged ballistic.
+MAIN_DEPLOY_ALT_M  = 450.0
+BALLISTIC_SPEED_MS = 75.0
+
+
+class FlightFsm:
+    """Derives fas_state + flight_phase from FMC baro altitude and IMC arm, and
+    emits flight events on transitions.
+
+    The FMC firmware is the real authority for flight state; until it sends that
+    over the wire, the bridge infers it from barometric altitude so the frontend
+    still gets a phase/state and events. Feed ``update(alt_m, dt_s)`` each cycle
+    (alt may be None when no baro yet) and ``set_armed`` from IMC status; collect
+    queued events with ``drain``."""
+
+    def __init__(self) -> None:
+        self.phase = "PAD"
+        self.armed = False
+        self.ground_alt: float | None = None
+        self.max_alt = 0.0
+        self._last_alt: float | None = None
+        self._vvel = 0.0
+        self._last_vvel = 0.0
+        self._vacc = 0.0
+        self._events = []
+
+    def _fire(self, name: str, severity: str | None = None) -> None:
+        eid, default_sev = FLIGHT_EVENTS[name]
+        self._events.append({"id": eid, "name": name,
+                             "severity": severity or default_sev})
+
+    def drain(self) -> list:
+        out = self._events
+        self._events = []
+        return out
+
+    def fas_state(self) -> str:
+        if self.phase == "PAD":
+            return "ARMED" if self.armed else "STANDBY"
+        if self.phase == "LANDED":
+            return "AWAITING_RECOVERY"
+        return "IN_FLIGHT"
+
+    def set_armed(self, armed: bool) -> None:
+        if armed and not self.armed and self.phase == "PAD":
+            self._fire("ARMING_DETECTED")
+        self.armed = bool(armed)
+
+    def _transition(self, new_phase: str) -> None:
+        if new_phase == self.phase or new_phase not in FLIGHT_PHASES:
+            return
+        self.phase = new_phase
+        ev = _PHASE_EVENT.get(new_phase)
+        if ev:
+            self._fire(ev)
+
+    def update(self, alt: float | None, dt: float) -> None:
+        if alt is None or dt <= 0:
+            return
+        if self.ground_alt is None:
+            self.ground_alt = alt
+        # Smoothed vertical velocity / acceleration from successive baro samples.
+        if self._last_alt is not None:
+            v = (alt - self._last_alt) / dt
+            self._vvel = 0.7 * self._vvel + 0.3 * v
+            a = (self._vvel - self._last_vvel) / dt
+            self._vacc = 0.7 * self._vacc + 0.3 * a
+            self._last_vvel = self._vvel
+        self._last_alt = alt
+        agl = alt - self.ground_alt
+        self.max_alt = max(self.max_alt, agl)
+
+        p = self.phase
+        if p == "PAD":
+            if agl > 3.0 or self._vvel > 3.0:
+                self._transition("LIFTOFF")
+        elif p == "LIFTOFF":
+            self._transition("POWERED_ASCENT")
+        elif p == "POWERED_ASCENT":
+            if agl > 50.0 and self._vacc <= 0.0:        # motor burnout
+                self._transition("COASTING")
+        elif p == "COASTING":
+            if self.max_alt > 50.0 and self._vvel <= 0.0:
+                self._transition("APOGEE")
+        elif p == "APOGEE":
+            self._transition("DROGUE_DESCENT")
+        elif p == "DROGUE_DESCENT":
+            if agl <= MAIN_DEPLOY_ALT_M:
+                self._transition("MAIN_DESCENT")
+            elif self._vvel < -BALLISTIC_SPEED_MS:
+                self._transition("BALLISTIC_DESCENT")
+        elif p == "BALLISTIC_DESCENT":
+            if agl <= MAIN_DEPLOY_ALT_M:
+                self._transition("MAIN_DESCENT")
+        elif p == "MAIN_DESCENT":
+            if agl <= 2.0 and abs(self._vvel) < 2.0:
+                self._transition("LANDED")
+
+
 # ── CAN ID pack / unpack ─────────────────────────────────────────────────────
 
 def can_id_pack(msg: int, kind: int, board_id: int, channel: int,
@@ -686,6 +814,9 @@ class FasBridge:
         self._fas_pmb: dict[str, dict] = {}        # key → merged PMB telemetry fields
         self._fas_imc  = {"board_id": 0, "armed": False,
                            "arm_line": False, "disarm_line": False}
+        # Flight FSM (fas_state + flight_phase) derived from FMC baro + IMC arm.
+        self._fsm = FlightFsm()
+        self._fsm_last_t = time.monotonic()
         self._console_active = False
 
         # Serial — port/baud are mutable so the console can reconfigure them.
@@ -861,6 +992,18 @@ class FasBridge:
     def _publish_console(self, payload: dict) -> None:
         payload.setdefault("source", "novaGround")
         self._client.publish(CONSOLE_TOPIC, json.dumps(payload), qos=0)
+
+    def _publish_flight_event(self, event: dict) -> None:
+        """Publish a flight event as {"type":"flight_event","event":{id,name,
+        severity}} on nova/console (rebroadcast verbatim by the backend)."""
+        self._publish_console({
+            "type": "flight_event",
+            "event": {"id": event["id"], "name": event["name"],
+                      "severity": event["severity"]},
+            "source": self._node_id,
+        })
+        self._log(1, f"[bridge] flight_event #{event['id']} {event['name']} "
+                     f"({event['severity']})")
 
     def _reconnect_serial(self, port: str, baud: int) -> tuple[bool, str | None]:
         """Open a new serial port and swap it in. The read loop picks up the new
@@ -1212,6 +1355,24 @@ class FasBridge:
                 fas_fmc_snap = {k: dict(v) for k, v in self._fas_fmc.items()}
                 fas_pmb_snap = {k: dict(v) for k, v in self._fas_pmb.items()}
                 fas_imc_snap = dict(self._fas_imc)
+                # Latest FMC barometric altitude (if any) drives the flight FSM.
+                fmc_alt = None
+                for k, v in self._fas_fmc.items():
+                    if k.startswith("FMC") and isinstance(v.get("baro"), dict):
+                        fmc_alt = v["baro"].get("altitude_m")
+                        break
+
+            # Advance the flight FSM from IMC arm + baro altitude, then collect
+            # any events it raised this cycle. (Only the publish thread touches
+            # the FSM, so no extra locking is needed here.)
+            t_now = time.monotonic()
+            dt = t_now - self._fsm_last_t
+            self._fsm_last_t = t_now
+            self._fsm.set_armed(fas_imc_snap.get("armed", False))
+            self._fsm.update(fmc_alt, dt)
+            fas_fsm_snap = {"fas_state": self._fsm.fas_state(),
+                            "flight_phase": self._fsm.phase}
+            flight_events = self._fsm.drain()
 
             # Source must be a FAS alias so the backend routes these to FAS
             # sensor bindings; it is independent of --node-id (the MQTT client id).
@@ -1229,12 +1390,14 @@ class FasBridge:
                     "fas_fmc":          fas_fmc_snap,
                     "fas_pmb":          fas_pmb_snap,
                     "fas_imc":          fas_imc_snap,
-                    "fas_fsm":          {"state": "ARMED" if fas_imc_snap.get("armed") else "STANDBY"}
+                    "fas_fsm":          fas_fsm_snap,
                 },
             }
             if engine_snap:
                 self._client.publish(TELEMETRY_TOPIC, json.dumps(engine_payload), qos=0)
             self._client.publish(FLIGHT_TOPIC,    json.dumps(flight_payload), qos=0)
+            for ev in flight_events:
+                self._publish_flight_event(ev)
 
             time.sleep(self._publish_ms / 1000.0)
 

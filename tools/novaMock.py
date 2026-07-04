@@ -120,20 +120,142 @@ SENSORS = dict([
     _sensor("fas", "PFT", "sine", 0.2, 0.9, 25, 0.005, node="EPB_4", channel=1),
 ])
 
-# Flight states (Flight_State_t / lookupTableFlightState in flight.h).
-FLIGHT_STATES = [
-    "INIT", "STANDBY", "ARMED", "POWERED_ASCENT",
-    "COASTING", "APOGEE", "DESCENT", "LANDED",
+# ---------------------------------------------------------------------------
+# Flight FSM taxonomy — shared with tools/fas_bridge.py (keep the two in sync).
+#   fas_state    : top-level avionics state machine
+#   flight_phase : finer-grained phase of flight, reported alongside fas_state
+#   FLIGHT_EVENTS: discrete events, each name -> (id, default severity)
+# ---------------------------------------------------------------------------
+FAS_STATES = ["INIT", "STANDBY", "ARMED", "IN_FLIGHT", "AWAITING_RECOVERY"]
+
+FLIGHT_PHASES = [
+    "PAD", "LIFTOFF", "POWERED_ASCENT", "COASTING", "APOGEE",
+    "DROGUE_DESCENT", "MAIN_DESCENT", "BALLISTIC_DESCENT", "LANDED",
 ]
+
+EVENT_SEVERITY = ["DEBUG", "INFO", "WARNING", "ERROR", "FATAL"]
+
+# name -> (id, default severity)
+FLIGHT_EVENTS = {
+    "ARMING_DETECTED":  (10, "INFO"),
+    "LAUNCH_DETECTED":  (11, "INFO"),
+    "BURNOUT_DETECTED": (12, "INFO"),
+    "APOGEE_DETECTED":  (13, "INFO"),
+    "DROGUE_DEPLOYED":  (14, "INFO"),
+    "MAIN_DEPLOYED":    (15, "INFO"),
+    "IMPACT_DETECTED":  (16, "WARNING"),
+}
+
+# Phase -> the event fired on entering it.
+_PHASE_EVENT = {
+    "LIFTOFF":        "LAUNCH_DETECTED",
+    "COASTING":       "BURNOUT_DETECTED",
+    "APOGEE":         "APOGEE_DETECTED",
+    "DROGUE_DESCENT": "DROGUE_DEPLOYED",
+    "MAIN_DESCENT":   "MAIN_DEPLOYED",
+    "LANDED":         "IMPACT_DETECTED",
+}
+
+# Descent faster than this (m/s) with no chute is treated as ballistic.
+_BALLISTIC_SPEED = 75.0
+# Altitude AGL (m) at/below which the main chute is expected to deploy.
+_MAIN_DEPLOY_ALT = 450.0
+
+
+class FlightFsm:
+    """Tracks fas_state + flight_phase and emits flight events on transitions.
+
+    Drive it either by trajectory/telemetry (``update``) or manually
+    (``set_phase``). Arming is separate (``set_armed``). Emitted events queue up
+    in ``_events``; call ``drain`` to collect them for publishing."""
+
+    def __init__(self) -> None:
+        self.phase = "PAD"
+        self.armed = False
+        self.ground_alt = 0.0
+        self.max_alt = 0.0
+        self._events: deque = deque()
+
+    def _fire(self, name: str, severity: str | None = None) -> None:
+        eid, default_sev = FLIGHT_EVENTS[name]
+        self._events.append({"id": eid, "name": name,
+                             "severity": severity or default_sev})
+
+    def drain(self) -> list[dict]:
+        out = list(self._events)
+        self._events.clear()
+        return out
+
+    def fas_state(self) -> str:
+        if self.phase == "PAD":
+            return "ARMED" if self.armed else "STANDBY"
+        if self.phase == "LANDED":
+            return "AWAITING_RECOVERY"
+        return "IN_FLIGHT"
+
+    def set_armed(self, armed: bool) -> None:
+        if armed and not self.armed and self.phase == "PAD":
+            self._fire("ARMING_DETECTED")
+        self.armed = bool(armed)
+
+    def _transition(self, new_phase: str) -> None:
+        if new_phase == self.phase or new_phase not in FLIGHT_PHASES:
+            return
+        self.phase = new_phase
+        ev = _PHASE_EVENT.get(new_phase)
+        if ev:
+            self._fire(ev)
+
+    def set_phase(self, new_phase: str) -> None:
+        """Manual override (e.g. from the UI). Fires the entry event if any."""
+        self._transition(new_phase)
+
+    def reset(self) -> None:
+        self.phase = "PAD"
+        self.max_alt = 0.0
+        self._events.clear()
+
+    def update(self, alt: float, vvel: float, vacc: float) -> None:
+        """Advance the phase from a trajectory/telemetry sample (altitude m AGL
+        baseline, vertical velocity m/s, vertical accel m/s^2)."""
+        agl = alt - self.ground_alt
+        self.max_alt = max(self.max_alt, agl)
+        p = self.phase
+        if p == "PAD":
+            if agl > 2.0 or vvel > 2.0:
+                self._transition("LIFTOFF")
+        elif p == "LIFTOFF":
+            self._transition("POWERED_ASCENT")
+        elif p == "POWERED_ASCENT":
+            if vacc <= 0.0:                      # motor burnout
+                self._transition("COASTING")
+        elif p == "COASTING":
+            if vvel <= 0.0:                      # stopped climbing
+                self._transition("APOGEE")
+        elif p == "APOGEE":
+            self._transition("DROGUE_DESCENT")
+        elif p == "DROGUE_DESCENT":
+            if agl <= _MAIN_DEPLOY_ALT:
+                self._transition("MAIN_DESCENT")
+            elif vvel < -_BALLISTIC_SPEED:
+                self._transition("BALLISTIC_DESCENT")
+        elif p == "BALLISTIC_DESCENT":
+            if agl <= _MAIN_DEPLOY_ALT:
+                self._transition("MAIN_DESCENT")
+        elif p == "MAIN_DESCENT":
+            if agl <= 2.0 and abs(vvel) < 2.0:
+                self._transition("LANDED")
 
 # ---------------------------------------------------------------------------
 # Mutable sim state
 # ---------------------------------------------------------------------------
 _boot_time = time.time()
-_flight_state = "STANDBY"
+_fsm = FlightFsm()
 _imc_armed = False
 _imc_board_id = 0
 _console_active = False
+# Recent flight events (drained from the FSM and published), kept for the UI.
+_event_log: deque = deque(maxlen=100)
 # Per-EPB actuator state, keyed board_id → {channel_idx → state dict}, updated
 # as relay/servo/op commands come in so the flight snapshot reflects them.
 _epb_actuators: dict[int, dict[int, dict]] = {}
@@ -382,42 +504,29 @@ def sample_at(rows: list[dict], times: list[float], t: float) -> dict:
     return {k: a[k] + (b[k] - a[k]) * f for k in _SIM_FIELDS}
 
 
-def _derive_flight_state(s: dict, apogee_t: float, end_t: float) -> str:
-    """Map a trajectory sample onto a Flight_State_t value."""
-    t = s["t"]
-    if t >= end_t - 1e-6 or (t > apogee_t and s["alt"] <= 2.0 and s["vvel"] <= 0.0):
-        return "LANDED"
-    if abs(t - apogee_t) < 0.3:
-        return "APOGEE"
-    if t < apogee_t:
-        if s["alt"] < 1.0 and s["vvel"] < 1.0:
-            return "POWERED_ASCENT"   # on the pad at ignition
-        if s["vvel"] > 0.0:
-            return "POWERED_ASCENT" if s["vacc"] > 5.0 else "COASTING"
-    if t > apogee_t:
-        if s["alt"] > 1.0 and s["vvel"] < 0.0:
-            return "DESCENT"
-
-
 def _launch_sample() -> dict | None:
     """If a launch is active, advance it and return the current trajectory
-    sample (also updating _flight_state); else None. Caller must hold _lock."""
-    global _flight_state
+    sample (also advancing the flight FSM); else None. Caller must hold _lock."""
     if not _launch["active"]:
         return None
     elapsed = (time.time() - _launch["t0"]) * _launch["speed"]
     rows, times = _launch["samples"], _launch["times"]
     if elapsed >= _launch["end_t"]:
         _launch["active"] = False
-        _flight_state = "LANDED"
-        return rows[-1] if rows else None
+        s = rows[-1] if rows else None
+        if s is not None:
+            _fsm.update(s["alt"], s["vvel"], s["vacc"])
+        _fsm.set_phase("LANDED")          # touchdown at end of trajectory
+        return s
     s = sample_at(rows, times, elapsed)
-    _flight_state = _derive_flight_state(s, _launch["apogee_t"], _launch["end_t"])
+    if s is not None:
+        _fsm.update(s["alt"], s["vvel"], s["vacc"])
     return s
 
 
 def _fmc_snapshot(t: float, ov: dict | None = None) -> dict:
     uptime = t - _boot_time
+    phase = _fsm.phase
     if ov is not None:
         # Driven by a replayed trajectory.
         pressure_pa = ov["pmbar"] * 100.0
@@ -428,14 +537,15 @@ def _fmc_snapshot(t: float, ov: dict | None = None) -> dict:
         az_g = ov["vacc"] / 9.80665 + 1.0   # sensed: motion + gravity
         gyro = [ov["roll"], ov["pitch"], ov["yaw"]]
     else:
-        ascent = _flight_state in {"POWERED_ASCENT", "COASTING", "APOGEE", "DESCENT"}
+        ascent = phase in {"LIFTOFF", "POWERED_ASCENT", "COASTING", "APOGEE",
+                           "DROGUE_DESCENT", "MAIN_DESCENT", "BALLISTIC_DESCENT"}
         pressure_pa = 101325.0 - (uptime * 12.0 if ascent else 0.0)
         altitude_m = max(0.0, (uptime * 30.0) if ascent else 0.0)
         temp_c = 24.0 + random.uniform(-0.3, 0.3)
         lat = 34.0561 + random.uniform(-1e-4, 1e-4)
         lon = -117.8443 + random.uniform(-1e-4, 1e-4)
         speed_mps = altitude_m / max(uptime, 1.0) if ascent else 0.0
-        az_g = (4.0 if _flight_state == "POWERED_ASCENT" else 1.0) + random.uniform(-0.01, 0.01)
+        az_g = (4.0 if phase in {"LIFTOFF", "POWERED_ASCENT"} else 1.0) + random.uniform(-0.01, 0.01)
         gyro = [random.uniform(-5, 5), random.uniform(-5, 5), random.uniform(-5, 5)]
 
     return {
@@ -532,7 +642,9 @@ def build_flight_packet() -> dict:
     ]
 
     with _lock:
-        # Advance an in-progress launch first; it updates _flight_state and
+        # Arming follows the IMC; set_armed handles the ARMING_DETECTED edge.
+        _fsm.set_armed(_imc_armed)
+        # Advance an in-progress launch first; it drives the flight FSM and
         # supplies the trajectory sample that drives the FMC snapshot.
         ov = _launch_sample()
         actuators = {
@@ -541,7 +653,7 @@ def build_flight_packet() -> dict:
         }
         imc = {"board_id": _imc_board_id, "armed": _imc_armed,
                "arm_line": _imc_armed, "disarm_line": not _imc_armed, "flags": 0}
-        fsm_state = "ARMED" if _imc_armed and _flight_state == "STANDBY" else _flight_state
+        fas_fsm = {"fas_state": _fsm.fas_state(), "flight_phase": _fsm.phase}
 
     data = {
         "fas_boards": boards,
@@ -559,9 +671,19 @@ def build_flight_packet() -> dict:
         "fas_fmc": {"FMC:0": _fmc_snapshot(t, ov)},
         "fas_pmb": {"PMB:0": _pmb_snapshot(t)},
         "fas_imc": imc,
-        "fas_fsm": {"state": fsm_state},
+        "fas_fsm": fas_fsm,
     }
     return {"source": "FAS", "data": data}
+
+
+def drain_flight_events() -> list[dict]:
+    """Collect any flight events the FSM has queued, recording them for the UI.
+    Returns event dicts shaped {id, name, severity}."""
+    with _lock:
+        events = _fsm.drain()
+        for ev in events:
+            _event_log.append({**ev, "t": int(time.time() * 1000)})
+    return events
 
 
 # ---------------------------------------------------------------------------
@@ -682,6 +804,17 @@ def _record_command(topic: str, payload) -> None:
 def _publish_console(client: mqtt.Client, payload: dict) -> None:
     payload.setdefault("source", "novaGround")
     client.publish(CONSOLE_TOPIC, _dumps(payload), qos=0)
+
+
+def _publish_flight_event(client: mqtt.Client, event: dict) -> None:
+    """Publish one flight event as {"type":"flight_event","event":{id,name,
+    severity}} on nova/console, which the backend rebroadcasts verbatim."""
+    payload = {"type": "flight_event",
+               "event": {"id": event["id"], "name": event["name"],
+                         "severity": event["severity"]},
+               "source": "FAS"}
+    client.publish(CONSOLE_TOPIC, _dumps(payload), qos=0)
+    print(f"[novaMock] flight_event #{event['id']} {event['name']} ({event['severity']})")
 
 
 def _handle_console(client: mqtt.Client, cmd: dict) -> None:
@@ -927,8 +1060,10 @@ def _ui_state() -> dict:
         return {
             "sensors": sensors,
             "waves": WAVES,
-            "flight_state": _flight_state,
-            "flight_states": FLIGHT_STATES,
+            "fas_state": _fsm.fas_state(),
+            "flight_phase": _fsm.phase,
+            "flight_phases": FLIGHT_PHASES,
+            "events": list(_event_log)[-15:],
             "imc": {"armed": _imc_armed, "board_id": _imc_board_id},
             "console_active": _console_active,
             "sd": {"filling": _sd["filling"], "pct": round(_sd["pct"], 2),
@@ -962,13 +1097,14 @@ def _ui_apply_sensor(body: dict) -> None:
 
 
 def _ui_apply_flight(body: dict) -> None:
-    global _flight_state, _imc_armed
+    global _imc_armed
     with _lock:
-        st = body.get("state")
-        if st in FLIGHT_STATES:
-            _flight_state = st
+        phase = body.get("phase") or body.get("state")
+        if phase in FLIGHT_PHASES and not _launch["active"]:
+            _fsm.set_phase(phase)
         if "imc_armed" in body:
             _imc_armed = bool(body["imc_armed"])
+            _fsm.set_armed(_imc_armed)
 
 
 def _ui_apply_sd(body: dict) -> None:
@@ -992,12 +1128,11 @@ def _ui_apply_sd(body: dict) -> None:
 
 def _ui_apply_launch(body: dict) -> str:
     """Start or abort a flight replay. Returns a short status string."""
-    global _flight_state
     action = str(body.get("action", "")).lower()
     if action == "abort":
         with _lock:
             _launch["active"] = False
-            _flight_state = "STANDBY"
+            _fsm.set_phase("LANDED")
         return "aborted"
 
     if action != "launch":
@@ -1020,6 +1155,8 @@ def _ui_apply_launch(body: dict) -> str:
 
     idx = _index_trajectory(rows)
     with _lock:
+        _fsm.reset()                       # back to PAD for a fresh flight
+        _fsm.ground_alt = rows[0]["alt"] if rows else 0.0
         _launch.update({
             "active": True, "t0": time.time(), "speed": speed, "src": src,
             "samples": rows, "times": idx["times"],
@@ -1137,13 +1274,17 @@ _UI_HTML = """<!doctype html>
     <p class="muted">value is used by the <b>flat</b> wave. period in seconds.</p>
   </section>
   <section style="grid-column:2/3">
-    <h2>Flight state</h2>
+    <h2>Flight FSM</h2>
     <div class="row">
       <select id="fstate"></select>
-      <button onclick="setFlight()">Set state</button>
-      <span class="muted">live:</span> <span id="livestate" class="pill on">?</span>
+      <button onclick="setFlight()">Set phase</button>
       <span id="imc" class="pill off">IMC ?</span>
     </div>
+    <div class="row">
+      <span class="muted">fas_state:</span> <span id="fasstate" class="pill on">?</span>
+      <span class="muted">phase:</span> <span id="livestate" class="pill on">?</span>
+    </div>
+    <div id="events" style="max-height:120px;overflow:auto;font-family:ui-monospace,Consolas,monospace;font-size:12px;margin-top:6px"></div>
     <h2 style="margin-top:16px">Launch (trajectory replay)</h2>
     <div class="row">
       <button id="launchbtn" onclick="toggleLaunch()">🚀 Launch</button>
@@ -1198,17 +1339,19 @@ function renderSensors(){
     tb.appendChild(tr);
   }
 }
+const SEV_COLOR={DEBUG:'#8b949e',INFO:'#79c0ff',WARNING:'#d29922',ERROR:'#f85149',FATAL:'#ff7b72'};
 function renderFlight(){
   const sel=$('fstate');
-  if(sel.options.length!==state.flight_states.length){
-    sel.innerHTML=state.flight_states.map(s=>`<option>${s}</option>`).join('');
-    sel.value=state.flight_state;
+  if(sel.options.length!==state.flight_phases.length){
+    sel.innerHTML=state.flight_phases.map(s=>`<option>${s}</option>`).join('');
+    sel.value=state.flight_phase;
   }
   // Don't clobber the dropdown while the user is choosing or a launch is live.
   if(document.activeElement!==sel && !state.launch.active){
-    sel.value=state.flight_state;
+    sel.value=state.flight_phase;
   }
-  $('livestate').textContent=state.flight_state;
+  $('livestate').textContent=state.flight_phase;
+  $('fasstate').textContent=state.fas_state;
   const imc=$('imc');
   imc.textContent='IMC '+(state.imc.armed?'ARMED':'safe')+' (b'+state.imc.board_id+')';
   imc.className='pill '+(state.imc.armed?'on':'off');
@@ -1217,6 +1360,12 @@ function renderFlight(){
   $('sdbar').style.width=state.sd.pct+'%';
   $('sdbar').style.background=state.sd.pct>=80?'#f85149':'#3fb950';
   $('sdtoggle').textContent=state.sd.filling?'stop fill':'start fill';
+  // Flight events (most recent first)
+  $('events').innerHTML=(state.events||[]).slice().reverse().map(e=>{
+    const ts=new Date(e.t).toLocaleTimeString();
+    const col=SEV_COLOR[e.severity]||'#e6edf3';
+    return `<div>${ts} <span style="color:${col}">#${e.id} ${e.name}</span> <span class="muted">${e.severity}</span></div>`;
+  }).join('')||'<span class="muted">no events yet</span>';
   // Launch
   const L=state.launch;
   $('launchbtn').textContent=L.active?'■ Abort':'🚀 Launch';
@@ -1227,7 +1376,7 @@ function renderFlight(){
     ? `— ${L.src}, T+${L.elapsed}s / ${L.duration}s ×${L.speed}`
     : (L.src&&L.src!=='none'?`— last: ${L.src}`:'');
 }
-function setFlight(){post('/api/flight',{state:$('fstate').value});}
+function setFlight(){post('/api/flight',{phase:$('fstate').value});}
 function toggleLaunch(){
   if(state.launch.active){post('/api/launch',{action:'abort'});}
   else{post('/api/launch',{action:'launch',speed:num($('lspeed').value)||1,path:$('lpath').value});}
@@ -1329,6 +1478,9 @@ def main() -> None:
             client.publish(TELEMETRY_TOPIC, _dumps(build_fas_engine_packet()), qos=0)
             if now >= next_flight:
                 client.publish(FLIGHT_TOPIC, _dumps(build_flight_packet()), qos=0)
+                # Publish any flight events the FSM raised this cycle.
+                for ev in drain_flight_events():
+                    _publish_flight_event(client, ev)
                 _maybe_publish_console_frame(client)
                 next_flight = now + flight_interval
             time.sleep(sensor_interval)
