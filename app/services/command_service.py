@@ -302,7 +302,13 @@ class CommandService:
 
     def apply_fas_rab(self, payload: FasRabPayload) -> list[dict]:
         """Recovery Arming Board arm/disarm. The RAB is addressed by board_id
-        (0 = A, 1 = B); the bridge routes to the RAB board kind on the wire."""
+        (0 = A, 1 = B); the bridge routes to the RAB board kind on the wire.
+
+        ARMING is hazardous, so it is blocked while Nova is locked (same gate as
+        hazardous actuator commands). DISARMING is a safing action and is always
+        permitted — the lock must never be able to trap a RAB in the armed state."""
+        if payload.action == "arm" and self._ctx.runtime.lockout_is_locked:
+            raise ValueError("Nova is locked; RAB arming is disabled")
         op = "rab_arm" if payload.action == "arm" else "rab_disarm"
         command = {
             "type": "fas", "board_type": "RAB", "board_id": payload.rab_id,

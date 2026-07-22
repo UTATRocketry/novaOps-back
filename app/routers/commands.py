@@ -181,7 +181,11 @@ async def post_fas_rab(
     caller_role = ctx.role_service.resolve_caller_role(x_client_id)
     if caller_role < ClientRole.operator:
         raise HTTPException(status_code=403, detail="Insufficient role: operator or admin required")
-    commands = ctx.command_service.apply_fas_rab(payload)
+    try:
+        commands = ctx.command_service.apply_fas_rab(payload)
+    except ValueError as exc:
+        # Nova-lock blocks RAB arming (disarm is always allowed). 423 = Locked.
+        raise HTTPException(status_code=423, detail=str(exc)) from exc
     return {"published_commands": commands}
 
 

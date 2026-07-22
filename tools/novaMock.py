@@ -22,7 +22,8 @@ Publishes:
                        exactly like fas_bridge's persistent engine dict.
     nova/telemetry/flight  — source="FAS", a single nested snapshot under
                        "data": fas_boards / fas_actuators / fas_sensors /
-                       fas_board_status / fas_fmc / fas_pmb / fas_imc / fas_fsm.
+                       fas_board_status / fas_fmc / fas_pmb / fas_imc / fas_fsm /
+                       fas_rab / fas_aux / fas_rf / fas_sound.
     nova/console           — console responses, and (while console mode is on)
                        a mocked "fas_frame" RX stream.
 
@@ -265,6 +266,29 @@ _sd = {"filling": False, "pct": 12.0, "total_mb": 32000, "rate": 1.0,
 # Ring buffer of received commands, with a format-validation verdict for the UI.
 _recent: deque = deque(maxlen=300)
 _cmd_seq = 0
+
+# Protocol-update state (mirrors fas_bridge): RAB recovery arming (A/B), FMC aux
+# load switches, RF telemetry rate/power mode, and the soundboard.
+# RAB flag bits (mirror RT_RAB_FLAG_*), soundboard tone flag (RT_SND_FLAG_TONE).
+RAB_FLAG_FMC_RX       = 1 << 2
+RAB_FLAG_ARM_MISMATCH = 1 << 3
+RAB_FLAG_ARM_EXPECTED = 1 << 4
+SND_FLAG_TONE         = 1 << 3
+# Per-RAB arming state: expected = last commanded, armed = readback. A mismatch
+# is published when they disagree (drive it from the UI/a fault to exercise the
+# frontend alarm). rx = rolling FMC-RX byte counter (link liveness).
+_rab = {0: {"expected": False, "armed": False, "rx": 0},
+        1: {"expected": False, "armed": False, "rx": 0}}
+# FMC aux load switches. RFD defaults on (radio mirrors telemetry), RunCam off.
+_aux = {"rfd": True, "runcam": False}
+# RF telemetry rate/power mode, PERSISTED on the FMC. Default LOW, like firmware.
+_rf_mode = 0   # 0 = low (default), 1 = normal, 2 = high
+_RF_RATE_NAMES = {0: "low", 1: "normal", 2: "high"}
+# Soundboard: stored clips (seeded so the list is non-empty), current playback,
+# volume, and a tone end-time for the RT_SND_FLAG_TONE indicator.
+_sound = {"clips": [{"name": "test_chime", "length": 8000},
+                    {"name": "launch_horn", "length": 24000}],
+          "playing": None, "volume": 200, "tone_until": 0.0}
 
 # Flight replay ("Launch"). When active, the flight snapshot is driven by a
 # loaded trajectory (an OpenRocket-style CSV or a synthetic profile) instead of
@@ -608,7 +632,7 @@ def _pmb_snapshot(t: float) -> dict:
                  "v_gse": round(0.0, 3),
                  "buck_on": True, "boost_on": False, "pg_3v3": True,
                  "pg_8v4": True, "pg_24v0": True, "charger": False,
-                 "batt_src": True},
+                 "batt_src": True, "protect": False},
         "temp": {"temp_amb": round(23.0 + random.uniform(-0.5, 0.5), 2),
                  "temp_buck": round(40.0 + random.uniform(-1, 1), 2),
                  "temp_boost": None},
@@ -616,7 +640,87 @@ def _pmb_snapshot(t: float) -> dict:
                     "present": True, "enabled": False, "vin_good": False,
                     "charging": False, "state": "off", "status": "off",
                     "cells": 4},
+        # Charger configured limits (read-back), mirrors rt_pmb_chg_cfg_t.
+        "chg_cfg": {"i_setting": 16, "v_setting": 20, "cells": 4,
+                    "flags": 0, "vlimit": False},
     }
+
+
+def _rab_snapshot(rab_id: int) -> dict:
+    """RAB recovery-arming status (mirrors fas_bridge fas_rab[key]). The readback
+    (fc_armed) follows the last commanded state unless a mismatch is injected."""
+    with _lock:
+        st = _rab[rab_id]
+        expected = bool(st["expected"])
+        armed = bool(st["armed"])
+        st["rx"] = (st["rx"] + 3) & 0xFF
+        rx = st["rx"]
+    mismatch = expected != armed
+    flags = RAB_FLAG_FMC_RX
+    if mismatch:
+        flags |= RAB_FLAG_ARM_MISMATCH
+    if expected:
+        flags |= RAB_FLAG_ARM_EXPECTED
+    return {
+        "rab_id": rab_id,
+        "fc_armed": int(armed),
+        "arm_line": 0,
+        "disarm_line": 0,
+        "flags": flags,
+        "fc_armed_gpio": int(armed),
+        "disagree": 0,
+        "fmc_rx": True,
+        "rx_count8": rx,
+        "arm_mismatch": mismatch,
+        "arm_expected": expected,
+        "online": True,
+    }
+
+
+def _aux_snapshot() -> dict:
+    """FMC aux status (mirrors fas_bridge fas_aux): RunCam power + GNSS PPS."""
+    with _lock:
+        runcam = bool(_aux["runcam"])
+    return {
+        "runcam_powered": runcam,
+        "pps_present": True,
+        "pps_count": int(time.time() - _boot_time) & 0xFFFF,
+        "pps_age_ms": random.randint(0, 999),
+    }
+
+
+def _rf_snapshot() -> dict:
+    """FMC RF telemetry rate/power mode (mirrors fas_bridge fas_rf). Echoed ~1 Hz;
+    the value is the FMC's persisted mode."""
+    with _lock:
+        mode = _rf_mode
+    return {"rate_mode": mode, "rate_name": _RF_RATE_NAMES.get(mode, "?")}
+
+
+def _sound_snapshot() -> dict:
+    """Soundboard status + clip directory (mirrors fas_bridge fas_sound)."""
+    with _lock:
+        clips = [
+            {"idx": i, "format": 2, "length": c["length"],
+             "sample_rate": 31250, "name": c["name"]}
+            for i, c in enumerate(_sound["clips"])
+        ]
+        playing = _sound["playing"]
+        tone = _sound["tone_until"] > time.time()
+        used_kb = sum(c["length"] for c in _sound["clips"]) // 1024
+    status = {
+        "flags": SND_FLAG_TONE if tone else 0,
+        "clip_count": len(clips),
+        "playing_idx": playing,          # None = idle
+        "pct": 100,
+        "used_kb": used_kb,
+        "cap_kb": 4096,
+        "busy": False,
+        "ul_active": False,
+        "ul_ready": False,
+        "tone": tone,
+    }
+    return {"status": status, "clips": clips}
 
 
 def _epb_sensor_status() -> dict:
@@ -639,6 +743,8 @@ def build_flight_packet() -> dict:
         _board_entry("EPB", 4, 2, 2),
         _board_entry("PMB", 0, 0, 0),
         _board_entry("FMC", 0, 0, 0),
+        _board_entry("RAB", 0, 0, 0),
+        _board_entry("RAB", 1, 0, 0),
     ]
 
     with _lock:
@@ -672,6 +778,10 @@ def build_flight_packet() -> dict:
         "fas_pmb": {"PMB:0": _pmb_snapshot(t)},
         "fas_imc": imc,
         "fas_fsm": fas_fsm,
+        "fas_rab": {"RAB:0": _rab_snapshot(0), "RAB:1": _rab_snapshot(1)},
+        "fas_aux": _aux_snapshot(),
+        "fas_rf": _rf_snapshot(),
+        "fas_sound": _sound_snapshot(),
     }
     return {"source": "FAS", "data": data}
 
@@ -714,7 +824,8 @@ def _resolve_board_id(cmd: dict) -> int:
 # Command format validation (surfaced in the UI's command log)
 # ---------------------------------------------------------------------------
 _FAS_OPS = {"pwm_set", "load_sw_set", "imc_arm", "imc_disarm", "failsafe",
-            "discover", "actuator_query", "buzzer", "sd_cmd"}
+            "discover", "actuator_query", "buzzer", "sd_cmd",
+            "rab_arm", "rab_disarm", "aux_power", "rf_cfg", "sound"}
 _CONSOLE_ACTIONS = {"start", "stop", "list_ports", "configure", "tx"}
 
 
@@ -897,7 +1008,7 @@ def _handle_fas_port(cmd: dict) -> None:
 
 
 def _handle_fas_op(cmd: dict) -> None:
-    global _imc_armed, _imc_board_id
+    global _imc_armed, _imc_board_id, _rf_mode
     op = str(cmd.get("op", ""))
     board_id = int(cmd.get("board_id", 0))
     channel = int(cmd.get("channel", 0))
@@ -942,8 +1053,53 @@ def _handle_fas_op(cmd: dict) -> None:
             elif sub == "set_rate":
                 _sd["rate"] = max(0.0, float(cmd.get("divisor", cmd.get("arg", 1))))
         print(f"[novaMock] fas op=sd_cmd FMC:{board_id} action={sub}")
+    elif op in ("rab_arm", "rab_disarm"):
+        # RAB recovery arming, addressed by board_id (0 = A, 1 = B). The readback
+        # follows the command so no mismatch fires (inject one from the UI to test).
+        arm = op == "rab_arm"
+        with _lock:
+            r = _rab.setdefault(board_id, {"expected": False, "armed": False, "rx": 0})
+            r["expected"] = arm
+            r["armed"] = arm
+        print(f"[novaMock] fas op={op} RAB:{board_id} -> {'ARMED' if arm else 'DISARMED'}")
+    elif op == "aux_power":
+        dev = str(cmd.get("device", "rfd")).lower()
+        enable = bool(cmd.get("enable"))
+        with _lock:
+            _aux["runcam" if dev in ("runcam", "cam") else "rfd"] = enable
+        print(f"[novaMock] fas op=aux_power {dev} {'ON' if enable else 'OFF'}")
+    elif op == "rf_cfg":
+        with _lock:
+            _rf_mode = int(cmd.get("mode", cmd.get("rate_mode", 0)))
+        print(f"[novaMock] fas op=rf_cfg mode={_RF_RATE_NAMES.get(_rf_mode, _rf_mode)}")
+    elif op == "sound":
+        _handle_sound(cmd)
     else:
         print(f"[novaMock] fas: unknown op {op!r}")
+
+
+def _handle_sound(cmd: dict) -> None:
+    """Soundboard control (buzzer replacement): play/stop/volume/tone/list/clear.
+    Reflects into _sound so the published fas_sound snapshot changes."""
+    action = str(cmd.get("action", "")).lower()
+    with _lock:
+        if action == "play":
+            idx = int(cmd.get("idx", 0))
+            if 0 <= idx < len(_sound["clips"]):
+                _sound["playing"] = idx
+        elif action == "stop":
+            _sound["playing"] = None
+        elif action == "volume":
+            _sound["volume"] = int(cmd.get("volume", 255))
+        elif action == "tone":
+            ms = int(cmd.get("ms", 0)) or 300
+            _sound["tone_until"] = time.time() + ms / 1000.0
+        elif action == "list":
+            pass  # the snapshot already carries the clip directory
+        elif action == "clear":
+            _sound["clips"] = []
+            _sound["playing"] = None
+    print(f"[novaMock] fas op=sound action={action}")
 
 
 def _handle_data_file(cmd: dict) -> None:
