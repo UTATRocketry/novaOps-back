@@ -1,0 +1,303 @@
+<!doctype html>
+<html>
+
+<head>
+    <meta charset="utf-8">
+    <title>novaMock control</title>
+    <style>
+        body {
+            font: 14px/1.4 system-ui, sans-serif;
+            margin: 0;
+            background: #0e1116;
+            color: #e6edf3
+        }
+
+        header {
+            padding: 10px 16px;
+            background: #161b22;
+            border-bottom: 1px solid #30363d;
+            display: flex;
+            gap: 16px;
+            align-items: center;
+            flex-wrap: wrap
+        }
+
+        h1 {
+            font-size: 16px;
+            margin: 0
+        }
+
+        main {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 14px;
+            padding: 14px
+        }
+
+        section {
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 8px;
+            padding: 12px
+        }
+
+        h2 {
+            font-size: 13px;
+            text-transform: uppercase;
+            letter-spacing: .05em;
+            color: #9da7b3;
+            margin: 0 0 10px
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse
+        }
+
+        th,
+        td {
+            padding: 4px 6px;
+            text-align: left;
+            border-bottom: 1px solid #21262d;
+            font-size: 13px
+        }
+
+        th {
+            color: #9da7b3;
+            font-weight: 600
+        }
+
+        input,
+        select,
+        button {
+            background: #0d1117;
+            color: #e6edf3;
+            border: 1px solid #30363d;
+            border-radius: 5px;
+            padding: 3px 6px;
+            font: inherit
+        }
+
+        input[type=number] {
+            width: 64px
+        }
+
+        button {
+            cursor: pointer
+        }
+
+        button:hover {
+            border-color: #58a6ff
+        }
+
+        .pill {
+            padding: 1px 8px;
+            border-radius: 10px;
+            font-size: 12px
+        }
+
+        .on {
+            background: #1f6feb33;
+            color: #79c0ff
+        }
+
+        .off {
+            background: #6e768166;
+            color: #9da7b3
+        }
+
+        .grp {
+            font-size: 11px;
+            color: #8b949e
+        }
+
+        #cmds {
+            max-height: 420px;
+            overflow: auto;
+            font-family: ui-monospace, Consolas, monospace;
+            font-size: 12px
+        }
+
+        .cmd {
+            border-bottom: 1px solid #21262d;
+            padding: 5px 4px
+        }
+
+        .ok {
+            border-left: 3px solid #3fb950
+        }
+
+        .bad {
+            border-left: 3px solid #f85149
+        }
+
+        .cmd .meta {
+            color: #8b949e
+        }
+
+        .issues {
+            color: #f85149;
+            margin: 2px 0 0
+        }
+
+        .bar {
+            height: 10px;
+            background: #21262d;
+            border-radius: 5px;
+            overflow: hidden;
+            margin-top: 6px
+        }
+
+        .bar>div {
+            height: 100%;
+            background: #3fb950;
+            width: 0
+        }
+
+        .row {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+            flex-wrap: wrap;
+            margin: 6px 0
+        }
+
+        .muted {
+            color: #8b949e
+        }
+    </style>
+</head>
+
+<body>
+    <header>
+        <h1>novaMock control</h1>
+        <span id="conn" class="muted">connecting…</span>
+        <label><input type="checkbox" id="auto" checked> auto-refresh</label>
+    </header>
+    <main>
+        <section style="grid-column:1/2">
+            <h2>Sensors</h2>
+            <table id="sensors">
+                <thead>
+                    <tr>
+                        <th>name</th>
+                        <th>src</th>
+                        <th>wave</th>
+                        <th>min</th>
+                        <th>max</th>
+                        <th>period</th>
+                        <th>noise</th>
+                        <th>value</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody></tbody>
+            </table>
+            <p class="muted">value is used by the <b>flat</b> wave. period in seconds.</p>
+        </section>
+        <section style="grid-column:2/3">
+            <h2>Flight state</h2>
+            <div class="row">
+                <select id="fstate"></select>
+                <button onclick="setFlight()">Set state</button>
+                <span id="imc" class="pill off">IMC ?</span>
+            </div>
+            <h2 style="margin-top:16px">SD card fill</h2>
+            <div class="row">
+                <button id="sdtoggle" onclick="toggleSd()">start fill</button>
+                rate <input type="number" id="sdrate" step="0.1" value="1"> %/s
+                <button onclick="sdReset()">reset</button>
+            </div>
+            <div>used <span id="sdpct">?</span>%</div>
+            <div class="bar">
+                <div id="sdbar"></div>
+            </div>
+            <p class="muted">console mode: <span id="console">?</span></p>
+        </section>
+        <section style="grid-column:1/3">
+            <h2>Received commands (live validation)</h2>
+            <div id="cmds"></div>
+        </section>
+    </main>
+    <script>
+        let lastSeq = 0, state = null;
+        const $ = id => document.getElementById(id);
+        async function post(path, body) { await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }); }
+        function num(v) { const n = parseFloat(v); return isNaN(n) ? null : n; }
+
+        function renderSensors() {
+            const tb = $('sensors').querySelector('tbody');
+            tb.innerHTML = '';
+            for (const [name, c] of Object.entries(state.sensors)) {
+                const tr = document.createElement('tr'); tr.dataset.name = name;
+                const opts = state.waves.map(w => `<option ${w === c.wave ? 'selected' : ''}>${w}</option>`).join('');
+                tr.innerHTML = `<td><b>${name}</b></td><td class="grp">${c.group}</td>
+      <td><select class="w">${opts}</select></td>
+      <td><input class="mn" type="number" step="0.01" value="${c.min}"></td>
+      <td><input class="mx" type="number" step="0.01" value="${c.max}"></td>
+      <td><input class="pd" type="number" step="0.5" value="${c.period}"></td>
+      <td><input class="ns" type="number" step="0.001" value="${c.noise}"></td>
+      <td><input class="vl" type="number" step="0.01" value="${c.value}"></td>
+      <td><button>apply</button></td>`;
+                tr.querySelector('button').onclick = () => {
+                    post('/api/sensor', {
+                        name, wave: tr.querySelector('.w').value,
+                        min: num(tr.querySelector('.mn').value), max: num(tr.querySelector('.mx').value),
+                        period: num(tr.querySelector('.pd').value), noise: num(tr.querySelector('.ns').value),
+                        value: num(tr.querySelector('.vl').value)
+                    });
+                };
+                tb.appendChild(tr);
+            }
+        }
+        function renderFlight() {
+            const sel = $('fstate');
+            if (sel.options.length !== state.flight_states.length) {
+                sel.innerHTML = state.flight_states.map(s => `<option>${s}</option>`).join('');
+            }
+            sel.value = state.flight_state;
+            const imc = $('imc');
+            imc.textContent = 'IMC ' + (state.imc.armed ? 'ARMED' : 'safe') + ' (b' + state.imc.board_id + ')';
+            imc.className = 'pill ' + (state.imc.armed ? 'on' : 'off');
+            $('console').textContent = state.console_active ? 'active' : 'off';
+            $('sdpct').textContent = state.sd.pct;
+            $('sdbar').style.width = state.sd.pct + '%';
+            $('sdbar').style.background = state.sd.pct >= 80 ? '#f85149' : '#3fb950';
+            $('sdtoggle').textContent = state.sd.filling ? 'stop fill' : 'start fill';
+        }
+        function setFlight() { post('/api/flight', { state: $('fstate').value }); }
+        function toggleSd() { post('/api/sd', { filling: !state.sd.filling, rate: num($('sdrate').value) }); }
+        function sdReset() { post('/api/sd', { reset: true }); }
+
+        async function refresh() {
+            try {
+                state = await (await fetch('/api/state')).json();
+                $('conn').textContent = 'connected'; $('conn').className = 'muted';
+                if (!$('sensors').querySelector('tbody').children.length) renderSensors();
+                renderFlight();
+            } catch (e) { $('conn').textContent = 'disconnected'; }
+        }
+        async function pollCmds() {
+            try {
+                const r = await (await fetch('/api/commands?since=' + lastSeq)).json();
+                const box = $('cmds');
+                for (const c of r.commands) {
+                    lastSeq = Math.max(lastSeq, c.seq);
+                    const d = document.createElement('div');
+                    d.className = 'cmd ' + (c.ok ? 'ok' : 'bad');
+                    const ts = new Date(c.t).toLocaleTimeString();
+                    d.innerHTML = `<div class="meta">#${c.seq} ${ts} ${c.topic} ${c.ok ? '✓' : '✗'}</div>` +
+                        `<div>${escapeHtml(JSON.stringify(c.payload))}</div>` +
+                        (c.issues.length ? `<div class="issues">${c.issues.map(escapeHtml).join('<br>')}</div>` : '');
+                    box.insertBefore(d, box.firstChild);
+                }
+                while (box.children.length > 200) box.removeChild(box.lastChild);
+            } catch (e) { }
+        }
+        function escapeHtml(s) { return String(s).replace(/[&<>]/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[m])); }
+        setInterval(() => { if ($('auto').checked) { refresh(); pollCmds(); } }, 1000);
+        refresh(); pollCmds();
+    </script>
+</body>
+
+</html>

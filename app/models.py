@@ -368,6 +368,77 @@ class FasSdPayload(BaseModel):
     )
 
 
+class FasRabPayload(BaseModel):
+    """Recovery Arming Board (RAB) arm/disarm. Safety-critical: the FMC pulses the
+    addressed RAB's GPIO_ARM / GPIO_DISARM. rab_id selects the unit (0 = A, 1 = B)."""
+
+    model_config = ConfigDict(
+        json_schema_extra={"example": {"action": "arm", "rab_id": 0, "pulse_ms": 100}}
+    )
+
+    action: Literal["arm", "disarm"] = Field(
+        description="arm = pulse GPIO_ARM, disarm = pulse GPIO_DISARM on the addressed RAB",
+    )
+    rab_id: Literal[0, 1] = Field(description="RAB unit: 0 = A, 1 = B")
+    pulse_ms: int = Field(
+        default=100, ge=1, le=1000,
+        description="Momentary arm/disarm pulse length in milliseconds (spec default 100)",
+    )
+
+
+class FasAuxPayload(BaseModel):
+    """FMC auxiliary load-switch power: RFD900x radio or RunCam, on/off."""
+
+    model_config = ConfigDict(
+        json_schema_extra={"example": {"node": "FMC_0", "device": "runcam", "enable": True}}
+    )
+
+    node: str | None = Field(
+        default=None,
+        description='FAS board node string, e.g. "FMC_0". Parsed to board_type/board_id.',
+    )
+    device: Literal["rfd", "runcam"] = Field(description="Load switch to control")
+    enable: bool = Field(description="True = power on, False = power off")
+
+
+class FasRfPayload(BaseModel):
+    """FMC RF telemetry rate/power mode. The mode is PERSISTED ON THE FMC; only send
+    this on an explicit operator change (the FMC's LOW default is authoritative)."""
+
+    model_config = ConfigDict(
+        json_schema_extra={"example": {"node": "FMC_0", "mode": 0}}
+    )
+
+    node: str | None = Field(
+        default=None,
+        description='FAS board node string, e.g. "FMC_0". Parsed to board_type/board_id.',
+    )
+    mode: Literal[0, 1, 2] = Field(
+        description="RF telemetry rate/power mode: 0 = low (default, power-saving), 1 = normal, 2 = high",
+    )
+
+
+class FasSoundPayload(BaseModel):
+    """Soundboard control (replaces the removed FMC buzzer). play/stop/volume/tone/
+    list/clear; clip upload streaming is not handled through this endpoint."""
+
+    model_config = ConfigDict(
+        json_schema_extra={"example": {"node": "FMC_0", "action": "tone", "freq_hz": 2000, "ms": 300}}
+    )
+
+    node: str | None = Field(
+        default=None,
+        description='FAS board node string, e.g. "FMC_0". Parsed to board_type/board_id.',
+    )
+    action: Literal["play", "stop", "volume", "tone", "list", "clear"] = Field(
+        description="play (idx) / stop / volume (0..255) / tone (freq_hz,ms) / list / clear all clips",
+    )
+    idx: int = Field(default=0, ge=0, le=255, description="Clip index for action=play")
+    volume: int = Field(default=255, ge=0, le=255, description="Digital volume for action=volume")
+    freq_hz: int = Field(default=0, ge=0, le=20000, description="Tone frequency Hz (0 = default) for action=tone")
+    ms: int = Field(default=0, ge=0, le=60000, description="Tone duration ms (0 = default) for action=tone")
+
+
 class IncomingSensorPacket(BaseModel):
     source: str
     sensors: list[dict[str, Any]]

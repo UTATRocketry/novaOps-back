@@ -8,8 +8,12 @@ from app.models import (
     CommandPayload,
     DirectRelayPayload,
     DirectServoPayload,
+    FasAuxPayload,
     FasBuzzerPayload,
+    FasRabPayload,
+    FasRfPayload,
     FasSdPayload,
+    FasSoundPayload,
     SystemCommandPayload,
 )
 from app.services.role_service import ClientRole
@@ -157,6 +161,89 @@ async def post_fas_sd(
     if caller_role < ClientRole.operator:
         raise HTTPException(status_code=403, detail="Insufficient role: operator or admin required")
     commands = ctx.command_service.apply_fas_sd(payload)
+    return {"published_commands": commands}
+
+
+@router.post(
+    "/fas/rab",
+    summary="Recovery Arming Board arm/disarm",
+    description=(
+        "Arm or disarm a Recovery Arming Board (RAB). rab_id selects the unit "
+        "(0 = A, 1 = B); the FMC momentarily pulses GPIO_ARM / GPIO_DISARM on the "
+        "addressed RAB. Safety-critical: requires operator or admin role."
+    ),
+)
+async def post_fas_rab(
+    payload: FasRabPayload,
+    x_client_id: str | None = Header(default=None),
+    ctx: AppContext = Depends(get_context),
+) -> dict:
+    caller_role = ctx.role_service.resolve_caller_role(x_client_id)
+    if caller_role < ClientRole.operator:
+        raise HTTPException(status_code=403, detail="Insufficient role: operator or admin required")
+    commands = ctx.command_service.apply_fas_rab(payload)
+    return {"published_commands": commands}
+
+
+@router.post(
+    "/fas/aux",
+    summary="FMC auxiliary power (RFD / RunCam)",
+    description=(
+        "Switch an FMC auxiliary load switch on or off. device: rfd (RFD900x "
+        "radio) or runcam. Requires operator or admin role."
+    ),
+)
+async def post_fas_aux(
+    payload: FasAuxPayload,
+    x_client_id: str | None = Header(default=None),
+    ctx: AppContext = Depends(get_context),
+) -> dict:
+    caller_role = ctx.role_service.resolve_caller_role(x_client_id)
+    if caller_role < ClientRole.operator:
+        raise HTTPException(status_code=403, detail="Insufficient role: operator or admin required")
+    commands = ctx.command_service.apply_fas_aux(payload)
+    return {"published_commands": commands}
+
+
+@router.post(
+    "/fas/rf",
+    summary="Set FMC RF telemetry rate/power mode",
+    description=(
+        "Set the FMC RF telemetry rate/power mode: 0 = low (default, power-saving), "
+        "1 = normal, 2 = high. The mode is persisted on the FMC — only send this on "
+        "an explicit operator change. Requires operator or admin role."
+    ),
+)
+async def post_fas_rf(
+    payload: FasRfPayload,
+    x_client_id: str | None = Header(default=None),
+    ctx: AppContext = Depends(get_context),
+) -> dict:
+    caller_role = ctx.role_service.resolve_caller_role(x_client_id)
+    if caller_role < ClientRole.operator:
+        raise HTTPException(status_code=403, detail="Insufficient role: operator or admin required")
+    commands = ctx.command_service.apply_fas_rf(payload)
+    return {"published_commands": commands}
+
+
+@router.post(
+    "/fas/sound",
+    summary="Soundboard control (buzzer replacement)",
+    description=(
+        "Control the FMC soundboard. action: play (idx), stop, volume (0..255), "
+        "tone (freq_hz/ms — the buzzer replacement), list (request the clip list), "
+        "clear (erase all clips). Requires operator or admin role."
+    ),
+)
+async def post_fas_sound(
+    payload: FasSoundPayload,
+    x_client_id: str | None = Header(default=None),
+    ctx: AppContext = Depends(get_context),
+) -> dict:
+    caller_role = ctx.role_service.resolve_caller_role(x_client_id)
+    if caller_role < ClientRole.operator:
+        raise HTTPException(status_code=403, detail="Insufficient role: operator or admin required")
+    commands = ctx.command_service.apply_fas_sound(payload)
     return {"published_commands": commands}
 
 

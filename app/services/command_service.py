@@ -11,8 +11,12 @@ from app.models import (
     CommandPayload,
     DirectRelayPayload,
     DirectServoPayload,
+    FasAuxPayload,
     FasBuzzerPayload,
+    FasRabPayload,
+    FasRfPayload,
     FasSdPayload,
+    FasSoundPayload,
     SourceTarget,
     SystemCommandPayload,
     SystemConfig,
@@ -292,6 +296,42 @@ class CommandService:
         command = {
             "type": "fas", **board, "op": "sd_cmd",
             "action": payload.action, "divisor": payload.divisor,
+        }
+        self._ctx.mqtt_service.publish_device_commands([command])
+        return [command]
+
+    def apply_fas_rab(self, payload: FasRabPayload) -> list[dict]:
+        """Recovery Arming Board arm/disarm. The RAB is addressed by board_id
+        (0 = A, 1 = B); the bridge routes to the RAB board kind on the wire."""
+        op = "rab_arm" if payload.action == "arm" else "rab_disarm"
+        command = {
+            "type": "fas", "board_type": "RAB", "board_id": payload.rab_id,
+            "op": op, "pulse_ms": payload.pulse_ms,
+        }
+        self._ctx.mqtt_service.publish_device_commands([command])
+        return [command]
+
+    def apply_fas_aux(self, payload: FasAuxPayload) -> list[dict]:
+        board = self._fas_board(payload.node or "FMC_0")
+        command = {
+            "type": "fas", **board, "op": "aux_power",
+            "device": payload.device, "enable": payload.enable,
+        }
+        self._ctx.mqtt_service.publish_device_commands([command])
+        return [command]
+
+    def apply_fas_rf(self, payload: FasRfPayload) -> list[dict]:
+        board = self._fas_board(payload.node or "FMC_0")
+        command = {"type": "fas", **board, "op": "rf_cfg", "mode": payload.mode}
+        self._ctx.mqtt_service.publish_device_commands([command])
+        return [command]
+
+    def apply_fas_sound(self, payload: FasSoundPayload) -> list[dict]:
+        board = self._fas_board(payload.node or "FMC_0")
+        command = {
+            "type": "fas", **board, "op": "sound", "action": payload.action,
+            "idx": payload.idx, "volume": payload.volume,
+            "freq_hz": payload.freq_hz, "ms": payload.ms,
         }
         self._ctx.mqtt_service.publish_device_commands([command])
         return [command]

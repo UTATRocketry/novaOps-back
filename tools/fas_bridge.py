@@ -20,15 +20,22 @@ Telemetry published
                           fas_sensors:      SENSOR_STATUS masks per board
                           fas_board_status: EPB bus voltage / current rails
                           fas_fmc:          FMC IMU/baro/GPS/temp/SD/radio
-                          fas_pmb:          PMB power/vmon/temp/charger
+                          fas_pmb:          PMB power/vmon/temp/charger/chg_cfg
                           fas_imc:          IMC arm/disarm state
+                          fas_rab:          RAB recovery-arming status (A/B)
+                          fas_aux:          FMC aux (RunCam power + GNSS PPS)
+                          fas_rf:           FMC RF telemetry rate/power mode
+                          fas_sound:        soundboard status + clip directory
   All message types in gs/protocol.py are decoded via decode_payload().
 
 Inbound commands handled (on nova/command)
   {"type":"fas",     ...}   — both op-shape and board_type/port/action shape.
        op-shape ops: pwm_set, load_sw_set, failsafe, imc_arm, imc_disarm,
-       discover, actuator_query, buzzer (FMC buzzer; a "notes" array streams a
-       whole melody as BEGIN/NOTE.../PLAY), sd_cmd (FMC SD logger rate / clear).
+       discover, actuator_query, buzzer (DEPRECATED FMC buzzer; a "notes" array
+       streams a whole melody as BEGIN/NOTE.../PLAY), sd_cmd (FMC SD logger rate /
+       clear), rab_arm / rab_disarm (recovery arming board, board_id 0=A/1=B),
+       aux_power (RFD / RunCam load switch), rf_cfg (RF telemetry rate/power mode),
+       sound (soundboard: play/stop/volume/tone/list/clear — buzzer replacement).
   {"type":"console", ...}   — two-way console control + TX:
        action "start"/"stop"  toggle RX frame streaming to nova/console
        action "list_ports"    enumerate serial ports → nova/console
@@ -76,7 +83,11 @@ EXPECTED_SOURCE = "novaOps"
 
 # ── FAS wire constants ───────────────────────────────────────────────────────
 RS422_MAGIC       = 0xAA
-RS422_MAX_PAYLOAD = 12          # 4-byte CAN ID + up to 8 data bytes
+RS422_MAX_PAYLOAD = 12          # 4-byte CAN ID + up to 8 data bytes (classic frame)
+# The FMC's RS-422 link also carries large-payload "bulk" frames (up to 4-byte
+# CAN ID + 256 data bytes) for the soundboard clip list. Same magic/len16/crc16
+# framing, only the length ceiling differs — see egse_uart.c FRAME_BULK_MAX.
+RS422_BULK_PAYLOAD = 260
 
 # Board kinds
 RT_BOARD_GS  = 0
@@ -128,6 +139,22 @@ RT_MSG_PMB_CHG_EN         = 0x3A   # GS → PMB: allow / suspend charging
 RT_MSG_FMC_SD_CMD         = 0x3B   # GS → FMC: set SD log rate / clear card
 RT_MSG_DEBUG_LOG          = 0x3E
 RT_MSG_ACK                = 0x3F
+
+# --- Protocol update: RAB / FMC aux / RF rate / soundboard / PMB charge cfg ---
+# (mirrors shared/protocol/rt_proto.h + gs/protocol.py). RAB rides the FMC's
+# RS-422 link; RAB A -> board_id 0, RAB B -> board_id 1.
+RT_MSG_RAB_POLL           = 0x05   # FMC -> RAB (addressed): request status
+RT_MSG_RAB_STATUS         = 0x06   # RAB -> FMC -> GS: rt_rab_status_t
+RT_MSG_RAB_DISARM         = 0x07   # FMC -> RAB (addressed): pulse GPIO_DISARM
+RT_MSG_FMC_AUX_POWER      = 0x08   # GS -> FMC: RFD / RunCam load switch on/off
+RT_MSG_FMC_AUX_STATUS     = 0x09   # FMC -> GS: RunCam power + GNSS PPS
+RT_MSG_FMC_RF_CFG         = 0x0A   # GS <-> FMC: RF telemetry rate/power mode
+RT_MSG_FMC_SOUND_CMD      = 0x0B   # GS -> FMC: play/stop/clear/volume/list/tone
+RT_MSG_FMC_SOUND_BEGIN    = 0x0C   # GS -> FMC (bulk): start a clip upload
+RT_MSG_FMC_SOUND_DATA     = 0x0D   # GS -> FMC (bulk): raw clip bytes
+RT_MSG_FMC_SOUND_STATUS   = 0x0E   # FMC -> GS: usage / clip count / playing / busy
+RT_MSG_FMC_SOUND_CLIP     = 0x0F   # FMC -> GS (bulk): one per stored clip
+RT_MSG_PMB_CHG_CFG        = 0x3C   # PMB -> GS: configured charge limits (read-back)
 
 # Names for FMC vector sensors, keyed by msg type → snapshot field name
 FMC_VEC3_FIELDS = {
@@ -188,6 +215,47 @@ PMB_FLAG_PG_8V4 = 1 << 3
 PMB_FLAG_PG_24V0 = 1 << 4
 PMB_FLAG_CHARGER = 1 << 5
 PMB_FLAG_BATT_SRC = 1 << 6
+PMB_FLAG_PROTECT = 1 << 7   # firmware battery UVLO/OV protect: converters cut
+
+# Charge-config flag bits (mirror RT_CHGCFG_FLAG_*)
+CHGCFG_FLAG_VLIMIT = 1 << 0   # firmware charge-voltage cutoff active
+
+# RAB status flag bits (mirror RT_RAB_FLAG_*)
+RAB_FLAG_DUAL         = 1 << 0   # RAB in dual-debug mode (one board answers A+B)
+RAB_FLAG_DISAGREE     = 1 << 1   # LEGACY FMC PD8/PD9 read -- deprecated, ignored
+RAB_FLAG_FMC_RX       = 1 << 2   # link diag: RAB has RX'd FMC bytes within ~300 ms
+RAB_FLAG_ARM_MISMATCH = 1 << 3   # RAB-local: commanded arm state != readback (>~1 s)
+RAB_FLAG_ARM_EXPECTED = 1 << 4   # RAB-local: current expected/commanded arm state
+
+# FMC aux-power device selector (mirror RT_AUX_DEV_*)
+RT_AUX_DEV_RFD    = 0
+RT_AUX_DEV_RUNCAM = 1
+
+# RF telemetry rate/power mode (mirror RT_RF_RATE_*). Persisted on the FMC.
+RT_RF_RATE_LOW    = 0   # default, power-saving
+RT_RF_RATE_NORMAL = 1
+RT_RF_RATE_HIGH   = 2
+RF_RATE_NAMES = {0: "low", 1: "normal", 2: "high"}
+
+# Soundboard command ops (mirror RT_SND_OP_*)
+SND_OP_STOP     = 0
+SND_OP_PLAY     = 1   # arg = clip index
+SND_OP_CLEAR    = 2
+SND_OP_VOLUME   = 3   # arg = 0..255
+SND_OP_LIST     = 4
+SND_OP_UL_END   = 5   # arg32 = CRC32
+SND_OP_UL_ABORT = 6
+SND_OP_TONE     = 7   # arg32 = freq_hz | (ms << 16), 0 = default
+
+# Soundboard status flag bits (mirror RT_SND_FLAG_*)
+SND_FLAG_BUSY      = 1 << 0
+SND_FLAG_UL_ACTIVE = 1 << 1
+SND_FLAG_UL_READY  = 1 << 2
+SND_FLAG_TONE      = 1 << 3
+
+# On-flash clip encodings (mirror RT_SND_FMT_*). 0 = legacy IMA-ADPCM.
+SND_FMT_IMA_ADPCM = 1
+SND_FMT_PCM_S16   = 2
 
 # SD logger states (mirror RT_SD_STATE_*)
 SD_STATE_NAMES = {0: "absent", 1: "no-fs", 2: "mounted", 3: "logging", 4: "error"}
@@ -439,7 +507,7 @@ class FrameParser:
 
         elif s == _ParserState.WAIT_LEN_HI:
             self._len |= b << 8
-            if 4 <= self._len <= RS422_MAX_PAYLOAD:
+            if 4 <= self._len <= RS422_BULK_PAYLOAD:
                 self._buf.clear()
                 self._state = _ParserState.READ_PAYLOAD
             else:
@@ -555,6 +623,7 @@ def decode_payload(msg: int, data: bytes) -> dict:
             "pg_3v3": bool(flags & 0x04), "pg_8v4": bool(flags & 0x08),
             "pg_24v0": bool(flags & 0x10), "charger": bool(flags & 0x20),
             "batt_src": bool(flags & 0x40),
+            "protect": bool(flags & PMB_FLAG_PROTECT),
         }
     if msg == RT_MSG_PMB_TEMP and fits("<hhhH"):
         temp_amb_cc, temp_buck_cc, temp_boost_cc, _ = struct.unpack_from("<hhhH", data, 0)
@@ -620,6 +689,45 @@ def decode_payload(msg: int, data: bytes) -> dict:
         armed, arm_line, disarm_line, flags, _ = struct.unpack_from("<BBBBI", data, 0)
         return {"armed": armed, "arm_line": arm_line,
                 "disarm_line": disarm_line, "flags": flags}
+    if msg == RT_MSG_RAB_STATUS and fits("<8B"):
+        rid, fc, arm, disarm, flags, fc_gpio, disagree, rxlo = struct.unpack_from("<8B", data, 0)
+        return {
+            "rab_id": rid, "fc_armed": fc, "arm_line": arm, "disarm_line": disarm,
+            "flags": flags, "fc_armed_gpio": fc_gpio, "disagree": disagree,
+            "fmc_rx": bool(flags & RAB_FLAG_FMC_RX),        # RAB hears the FMC (FMC->RAB up)
+            "rx_count8": rxlo,                              # low 8 bits of RAB's FMC-RX byte count
+            "arm_mismatch": bool(flags & RAB_FLAG_ARM_MISMATCH),  # RAB-local expected != observed
+            "arm_expected": bool(flags & RAB_FLAG_ARM_EXPECTED),  # RAB last commanded ARMED
+        }
+    if msg == RT_MSG_FMC_AUX_STATUS and fits("<BBHI"):
+        runcam, pps_present, pps_count, pps_age = struct.unpack_from("<BBHI", data, 0)
+        return {"runcam_powered": bool(runcam), "pps_present": bool(pps_present),
+                "pps_count": pps_count, "pps_age_ms": pps_age}
+    if msg == RT_MSG_FMC_RF_CFG and fits("<BBHI"):
+        rate_mode, _, _, _ = struct.unpack_from("<BBHI", data, 0)
+        return {"rate_mode": rate_mode, "rate_name": RF_RATE_NAMES.get(rate_mode, "?")}
+    if msg == RT_MSG_PMB_CHG_CFG and fits("<BBBB4x"):
+        i_set, v_set, cells, flags = struct.unpack_from("<BBBB4x", data, 0)
+        return {"i_setting": i_set, "v_setting": v_set, "cells": cells,
+                "flags": flags, "vlimit": bool(flags & CHGCFG_FLAG_VLIMIT)}
+    if msg == RT_MSG_FMC_SOUND_STATUS and fits("<BBBBHH"):
+        flags, count, playing, pct, used_kb, cap_kb = struct.unpack_from("<BBBBHH", data, 0)
+        return {
+            "flags": flags, "clip_count": count,
+            "playing_idx": (None if playing == 0xFF else playing),
+            "pct": pct, "used_kb": used_kb, "cap_kb": cap_kb,
+            "busy": bool(flags & SND_FLAG_BUSY),
+            "ul_active": bool(flags & SND_FLAG_UL_ACTIVE),
+            "ul_ready": bool(flags & SND_FLAG_UL_READY),
+            "tone": bool(flags & SND_FLAG_TONE),
+        }
+    if msg == RT_MSG_FMC_SOUND_CLIP and fits("<BBHII24s"):
+        idx, fmt, _, length, rate, name = struct.unpack_from("<BBHII24s", data, 0)
+        return {
+            "idx": idx, "format": fmt or SND_FMT_IMA_ADPCM,   # 0 = legacy ADPCM
+            "length": length, "sample_rate": rate,
+            "name": name.split(b"\x00", 1)[0].decode("ascii", "replace"),
+        }
     return {"raw_hex": data.hex()}
 
 
@@ -649,6 +757,26 @@ def _encode_buzzer(op: int, idx: int, freq_hz: int, dur_ms: int, vol: int) -> by
 def _encode_sd_cmd(op: int, arg: int) -> bytes:
     # rt_fmc_sd_cmd_t: u8 op, u8 arg, u16 reserved, u32 reserved
     return struct.pack("<BBHI", op & 0xFF, arg & 0xFF, 0, 0)
+
+
+def _encode_rab_cmd(pulse_ms: int) -> bytes:
+    # rt_rab_cmd_t: u16 pulse_ms, u16 reserved, u32 reserved
+    return struct.pack("<HHI", pulse_ms & 0xFFFF, 0, 0)
+
+
+def _encode_aux_power(device: int, enable: bool) -> bytes:
+    # rt_fmc_aux_power_t: u8 device, u8 enable, 6 reserved
+    return struct.pack("<BB6x", device & 0xFF, 1 if enable else 0)
+
+
+def _encode_rf_cfg(rate_mode: int) -> bytes:
+    # rt_fmc_rf_cfg_t: u8 rate_mode, u8 reserved, u16 reserved, u32 reserved
+    return struct.pack("<BBHI", rate_mode & 0xFF, 0, 0, 0)
+
+
+def _encode_sound_cmd(op: int, arg: int = 0, arg32: int = 0) -> bytes:
+    # rt_fmc_sound_cmd_t: u8 op, u8 arg, u16 reserved, u32 arg32
+    return struct.pack("<BBHI", op & 0xFF, arg & 0xFF, 0, arg32 & 0xFFFFFFFF)
 
 
 def _pad8() -> bytes:
@@ -726,6 +854,46 @@ def op_to_frame(op: str, cmd: dict, seq: int) -> tuple[int, bytes] | None:
             return None
         cid = can_id_pack(RT_MSG_FMC_SD_CMD, RT_BOARD_FMC, board_id, channel, 0, seq)
         return cid, _encode_sd_cmd(sd_op, arg)
+    if op in ("rab_arm", "rab_disarm"):
+        # Recovery Arming Board arm/disarm. Addressed to the RAB by board_id
+        # (0 = A, 1 = B); the FMC pulses GPIO_ARM / GPIO_DISARM for pulse_ms.
+        pulse_ms = int(cmd.get("pulse_ms", 100))
+        rab_msg = RT_MSG_RECOVERY_ARM if op == "rab_arm" else RT_MSG_RAB_DISARM
+        cid = can_id_pack(rab_msg, RT_BOARD_RAB, board_id, 0, 0, seq)
+        return cid, _encode_rab_cmd(pulse_ms)
+    if op == "aux_power":
+        # FMC aux load switch: RFD900x or RunCam on/off. Handled FMC-locally.
+        dev = str(cmd.get("device", "rfd")).lower()
+        device = RT_AUX_DEV_RUNCAM if dev in ("runcam", "cam") else RT_AUX_DEV_RFD
+        enable = bool(cmd.get("enable", False))
+        cid = can_id_pack(RT_MSG_FMC_AUX_POWER, RT_BOARD_FMC, board_id, 0, 0, seq)
+        return cid, _encode_aux_power(device, enable)
+    if op == "rf_cfg":
+        # RF telemetry rate/power mode. The FMC persists this in flash; only send
+        # on an explicit operator change (LOW default is authoritative on the FMC).
+        mode = int(cmd.get("mode", cmd.get("rate_mode", RT_RF_RATE_LOW)))
+        cid = can_id_pack(RT_MSG_FMC_RF_CFG, RT_BOARD_FMC, board_id, 0, 0, seq)
+        return cid, _encode_rf_cfg(mode)
+    if op == "sound":
+        # Soundboard control (buzzer replacement). action = play/stop/volume/tone/
+        # list/clear. Clip upload (BEGIN/DATA bulk streaming) is not handled here.
+        sub = str(cmd.get("action", "")).lower()
+        snd_op = {"stop": SND_OP_STOP, "play": SND_OP_PLAY, "clear": SND_OP_CLEAR,
+                  "volume": SND_OP_VOLUME, "list": SND_OP_LIST,
+                  "tone": SND_OP_TONE}.get(sub)
+        if snd_op is None:
+            return None
+        arg, arg32 = 0, 0
+        if snd_op == SND_OP_PLAY:
+            arg = int(cmd.get("idx", 0))
+        elif snd_op == SND_OP_VOLUME:
+            arg = int(cmd.get("volume", 255))
+        elif snd_op == SND_OP_TONE:
+            freq = int(cmd.get("freq_hz", 0)) & 0xFFFF
+            ms = int(cmd.get("ms", 0)) & 0xFFFF
+            arg32 = freq | (ms << 16)
+        cid = can_id_pack(RT_MSG_FMC_SOUND_CMD, RT_BOARD_FMC, board_id, 0, 0, seq)
+        return cid, _encode_sound_cmd(snd_op, arg, arg32)
     return None
 
 
@@ -814,6 +982,12 @@ class FasBridge:
         self._fas_pmb: dict[str, dict] = {}        # key → merged PMB telemetry fields
         self._fas_imc  = {"board_id": 0, "armed": False,
                            "arm_line": False, "disarm_line": False}
+        # Protocol update: RAB (recovery arming) keyed "RAB:0"(A)/"RAB:1"(B),
+        # FMC aux (RunCam + PPS), FMC RF rate/power mode, and soundboard.
+        self._fas_rab: dict[str, dict] = {}
+        self._fas_aux: dict = {}
+        self._fas_rf: dict = {}
+        self._fas_sound: dict = {"status": {}, "clips": {}}  # clips: idx -> clip dict
         # Flight FSM (fas_state + flight_phase) derived from FMC baro + IMC arm.
         self._fsm = FlightFsm()
         self._fsm_last_t = time.monotonic()
@@ -1229,12 +1403,13 @@ class FasBridge:
                 self._fas_fmc.setdefault(key, {})[field] = d
 
         elif msg in (RT_MSG_PMB_PWR, RT_MSG_PMB_VMON,
-                     RT_MSG_PMB_TEMP, RT_MSG_PMB_CHARGER):
+                     RT_MSG_PMB_TEMP, RT_MSG_PMB_CHARGER, RT_MSG_PMB_CHG_CFG):
             field = {
                 RT_MSG_PMB_PWR:     "pwr",
                 RT_MSG_PMB_VMON:    "vmon",
                 RT_MSG_PMB_TEMP:    "temp",
                 RT_MSG_PMB_CHARGER: "charger",
+                RT_MSG_PMB_CHG_CFG: "chg_cfg",
             }[msg]
             with self._lock:
                 self._fas_pmb.setdefault(key, {})[field] = d
@@ -1253,6 +1428,50 @@ class FasBridge:
                         "flags":       d.get("flags", 0),
                     })
                 self._log(2, f"[bridge] IMC status board={board_id} armed={bool(d.get('armed'))}")
+
+        elif msg == RT_MSG_RAB_STATUS:
+            # Store the RAB status AND register the RAB as an online board so it
+            # appears in the fleet. RABs report over the FMC's link, keyed by the
+            # polled ID (RAB:0 = A, RAB:1 = B).
+            with self._lock:
+                self._fas_rab[key] = {**d, "online": True, "last_seen": now}
+                prev = self._fas_boards.get(key, {})
+                self._fas_boards[key] = {
+                    **prev, "kind": kind_name, "board_id": board_id,
+                    "online": True, "last_seen": now,
+                    "uptime_ms": prev.get("uptime_ms", 0),
+                    "num_channels": prev.get("num_channels", 0),
+                    "num_sensors": prev.get("num_sensors", 0),
+                    "fw_version": prev.get("fw_version", 0),
+                }
+            self._log(2, f"[bridge] RAB status {key} fc_armed={d.get('fc_armed')} "
+                         f"mismatch={d.get('arm_mismatch')}")
+
+        elif msg == RT_MSG_FMC_AUX_STATUS:
+            with self._lock:
+                self._fas_aux = {**d, "last_seen": now}
+            self._log(2, f"[bridge] FMC aux runcam={d.get('runcam_powered')} "
+                         f"pps={d.get('pps_present')}")
+
+        elif msg == RT_MSG_FMC_RF_CFG:
+            with self._lock:
+                self._fas_rf = {**d, "last_seen": now}
+            self._log(2, f"[bridge] FMC RF mode={d.get('rate_name')}")
+
+        elif msg == RT_MSG_FMC_SOUND_STATUS:
+            with self._lock:
+                self._fas_sound["status"] = d
+                # A fresh count of 0 means the board was cleared — drop the dir.
+                if d.get("clip_count") == 0:
+                    self._fas_sound["clips"] = {}
+            self._log(2, f"[bridge] sound status clips={d.get('clip_count')} "
+                         f"playing={d.get('playing_idx')}")
+
+        elif msg == RT_MSG_FMC_SOUND_CLIP:
+            if "idx" in d:
+                with self._lock:
+                    self._fas_sound["clips"][d["idx"]] = d
+                self._log(2, f"[bridge] sound clip #{d.get('idx')} {d.get('name')!r}")
 
     # ── FAS frame send helpers ────────────────────────────────────────────────
 
@@ -1355,6 +1574,19 @@ class FasBridge:
                 fas_fmc_snap = {k: dict(v) for k, v in self._fas_fmc.items()}
                 fas_pmb_snap = {k: dict(v) for k, v in self._fas_pmb.items()}
                 fas_imc_snap = dict(self._fas_imc)
+                # Protocol-update blocks: RAB (recovery arming), FMC aux, RF mode,
+                # soundboard. Drop the internal last_seen bookkeeping key.
+                fas_rab_snap = {
+                    k: {kk: vv for kk, vv in v.items() if kk != "last_seen"}
+                    for k, v in self._fas_rab.items()
+                }
+                fas_aux_snap = {kk: vv for kk, vv in self._fas_aux.items() if kk != "last_seen"}
+                fas_rf_snap = {kk: vv for kk, vv in self._fas_rf.items() if kk != "last_seen"}
+                fas_sound_snap = {
+                    "status": dict(self._fas_sound.get("status", {})),
+                    "clips": [self._fas_sound["clips"][i]
+                              for i in sorted(self._fas_sound["clips"])],
+                }
                 # Latest FMC barometric altitude (if any) drives the flight FSM.
                 fmc_alt = None
                 for k, v in self._fas_fmc.items():
@@ -1391,6 +1623,10 @@ class FasBridge:
                     "fas_pmb":          fas_pmb_snap,
                     "fas_imc":          fas_imc_snap,
                     "fas_fsm":          fas_fsm_snap,
+                    "fas_rab":          fas_rab_snap,
+                    "fas_aux":          fas_aux_snap,
+                    "fas_rf":           fas_rf_snap,
+                    "fas_sound":        fas_sound_snap,
                 },
             }
             if engine_snap:
