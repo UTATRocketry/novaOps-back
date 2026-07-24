@@ -799,30 +799,35 @@ def op_to_frame(op: str, cmd: dict, seq: int) -> tuple[int, bytes] | None:
     board_id = int(cmd.get("board_id", 0))
     channel  = int(cmd.get("channel", 0))
 
+    # Actuator + IMC commands are addressed to the TARGET board kind (EPB), not
+    # the sender (GS). The EPB firmware only applies its per-board_id filter when
+    # the frame's kind == RT_BOARD_EPB (see epb main.c); with kind=GS the filter
+    # is skipped and EVERY EPB executes the command regardless of board_id.
     if op == "pwm_set":
         pulse_us  = int(cmd.get("pulse_us", 0))
         period_us = int(cmd.get("period_us", 20000))
-        cid  = can_id_pack(RT_MSG_PWM_SET, RT_BOARD_GS, board_id, channel, 0, seq)
+        cid  = can_id_pack(RT_MSG_PWM_SET, RT_BOARD_EPB, board_id, channel, 0, seq)
         return cid, _encode_pwm_set(pulse_to_q15(pulse_us, period_us), period_us)
     if op == "load_sw_set":
         enable  = bool(cmd.get("enable", False))
         hold_ms = int(cmd.get("hold_ms", 0))
-        cid = can_id_pack(RT_MSG_LOAD_SW_SET, RT_BOARD_GS, board_id, channel, 0, seq)
+        cid = can_id_pack(RT_MSG_LOAD_SW_SET, RT_BOARD_EPB, board_id, channel, 0, seq)
         return cid, _encode_load_sw_set(enable, hold_ms)
     if op == "failsafe":
-        cid = can_id_pack(RT_MSG_ACTUATOR_FAILSAFE, RT_BOARD_GS, board_id, 0, 0, seq)
+        cid = can_id_pack(RT_MSG_ACTUATOR_FAILSAFE, RT_BOARD_EPB, board_id, 0, 0, seq)
         return cid, _pad8()
     if op == "imc_arm":
-        cid = can_id_pack(RT_MSG_IGN_ARM, RT_BOARD_GS, board_id, 0, 0, seq)
+        cid = can_id_pack(RT_MSG_IGN_ARM, RT_BOARD_EPB, board_id, 0, 0, seq)
         return cid, _encode_imc_cmd(int(cmd.get("pulse_ms", 0)))
     if op == "imc_disarm":
-        cid = can_id_pack(RT_MSG_IGN_DISARM, RT_BOARD_GS, board_id, 0, 0, seq)
+        cid = can_id_pack(RT_MSG_IGN_DISARM, RT_BOARD_EPB, board_id, 0, 0, seq)
         return cid, _encode_imc_cmd(int(cmd.get("pulse_ms", 0)))
     if op == "discover":
+        # Broadcast: DISCOVERY_REQ is sent from the GS to all boards.
         cid = can_id_pack(RT_MSG_DISCOVERY_REQ, RT_BOARD_GS, 0, 0, 0, seq)
         return cid, _pad8()
     if op == "actuator_query":
-        cid = can_id_pack(RT_MSG_ACTUATOR_QUERY, RT_BOARD_GS, board_id, channel, 0, seq)
+        cid = can_id_pack(RT_MSG_ACTUATOR_QUERY, RT_BOARD_EPB, board_id, channel, 0, seq)
         return cid, _pad8()
     if op == "buzzer":
         # Single low-level FMC buzzer frame. action selects the melody opcode:
@@ -1496,23 +1501,23 @@ class FasBridge:
 
     def _send_pwm_set(self, board_id: int, channel: int,
                       pulse_us: int, period_us: int = 20000) -> None:
-        cid     = can_id_pack(RT_MSG_PWM_SET, RT_BOARD_GS, board_id, channel, 0, self._next_seq())
+        cid     = can_id_pack(RT_MSG_PWM_SET, RT_BOARD_EPB, board_id, channel, 0, self._next_seq())
         duty    = pulse_to_q15(pulse_us, period_us)
         payload = _encode_pwm_set(duty, period_us)
         self._send_frame(cid, payload)
 
     def _send_load_sw_set(self, board_id: int, channel: int,
                           enable: bool, hold_ms: int = 0) -> None:
-        cid     = can_id_pack(RT_MSG_LOAD_SW_SET, RT_BOARD_GS, board_id, channel, 0, self._next_seq())
+        cid     = can_id_pack(RT_MSG_LOAD_SW_SET, RT_BOARD_EPB, board_id, channel, 0, self._next_seq())
         payload = _encode_load_sw_set(enable, hold_ms)
         self._send_frame(cid, payload)
 
     def _send_imc_arm(self, board_id: int, pulse_ms: int = 0) -> None:
-        cid     = can_id_pack(RT_MSG_IGN_ARM, RT_BOARD_GS, board_id, 0, 0, self._next_seq())
+        cid     = can_id_pack(RT_MSG_IGN_ARM, RT_BOARD_EPB, board_id, 0, 0, self._next_seq())
         self._send_frame(cid, _encode_imc_cmd(pulse_ms))
 
     def _send_imc_disarm(self, board_id: int, pulse_ms: int = 0) -> None:
-        cid     = can_id_pack(RT_MSG_IGN_DISARM, RT_BOARD_GS, board_id, 0, 0, self._next_seq())
+        cid     = can_id_pack(RT_MSG_IGN_DISARM, RT_BOARD_EPB, board_id, 0, 0, self._next_seq())
         self._send_frame(cid, _encode_imc_cmd(pulse_ms))
 
     # ── Background loops ─────────────────────────────────────────────────────
@@ -1671,7 +1676,7 @@ def main() -> None:
     p.add_argument("--publish-ms", type=int, default=50,
                    help="Telemetry publish interval ms")
     p.add_argument("--verbosity",  type=int, default=1, choices=[0, 1, 2])
-    p.add_argument("--imc-board-id", type=int, default=None,
+    p.add_argument("--imc-board-id", type=int, default=0,
                    help="If set, only update IMC arm state from this board_id; "
                         "IMC_STATUS frames from other boards are ignored "
                         "(default: accept any board)")
