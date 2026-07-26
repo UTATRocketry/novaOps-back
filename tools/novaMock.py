@@ -260,9 +260,11 @@ _event_log: deque = deque(maxlen=100)
 # Per-EPB actuator state, keyed board_id → {channel_idx → state dict}, updated
 # as relay/servo/op commands come in so the flight snapshot reflects them.
 _epb_actuators: dict[int, dict[int, dict]] = {}
-# SD card fill simulation, surfaced in the FMC "sd" snapshot.
+# SD card fill simulation, surfaced in the FMC "sd" snapshot. "rate" is the
+# UI fill SPEED (%/sec); "rate_div" is the log decimation divisor set by the
+# sd_cmd(set_rate) command and echoed back in the status (1 = full rate).
 _sd = {"filling": False, "pct": 12.0, "total_mb": 32000, "rate": 1.0,
-       "last_tick": time.time()}
+       "rate_div": 1, "last_tick": time.time()}
 # Ring buffer of received commands, with a format-validation verdict for the UI.
 _recent: deque = deque(maxlen=300)
 _cmd_seq = 0
@@ -289,6 +291,17 @@ _RF_RATE_NAMES = {0: "low", 1: "normal", 2: "high"}
 _sound = {"clips": [{"name": "test_chime", "length": 8000},
                     {"name": "launch_horn", "length": 24000}],
           "playing": None, "volume": 200, "tone_until": 0.0}
+# PMB battery charger sim: enabled = charging allowed; i/v_setting = LTC4162 DAC
+# codes (0..31). Derived charging/state fields follow `enabled` in the snapshot.
+_charger = {"enabled": False, "i_setting": 16, "v_setting": 20}
+# PMB firmware battery-protection flag (UVLO/OV cut). Toggle from the sim UI.
+_pmb_protect = False
+# Per-board online state, keyed by board key. Offline boards drop out of the
+# fleet and stop publishing their telemetry, so the frontend shows them gone.
+_board_online = {"EPB:0": True, "EPB:2": True, "EPB:4": True,
+                 "PMB:0": True, "FMC:0": True, "RAB:0": True, "RAB:1": True}
+# RAB link-alive (FMC->RAB). When False, published fmc_rx goes low (link down).
+_rab_link = True
 
 # Flight replay ("Launch"). When active, the flight snapshot is driven by a
 # loaded trajectory (an OpenRocket-style CSV or a synthetic profile) instead of
@@ -432,9 +445,9 @@ def _tick_sd() -> dict:
             "logging": _sd["filling"] and not full,
             "near_full": pct >= 80.0,
             "full": full,
-            "rate_reduced": False,
+            "rate_reduced": _sd["rate_div"] > 1,
             "stalled": False,
-            "rate_div": 1,
+            "rate_div": _sd["rate_div"],
         }
 
 
@@ -614,13 +627,15 @@ def _fmc_snapshot(t: float, ov: dict | None = None) -> dict:
         "temp": {"temp_h7": round(31.0 + 4.0 * math.sin(t * 0.1), 2),
                  "temp_pwr": round(36.0 + random.uniform(-0.4, 0.4), 2)},
         "sd": _tick_sd(),
-        "radio": {"powered": True, "enabled": True, "every_n": 1,
+        "radio": {"powered": bool(_aux["rfd"]), "enabled": bool(_aux["rfd"]), "every_n": 1,
                   "tx_frames": int(uptime * 10), "tx_bytes": int(uptime * 800)},
     }
 
 
 def _pmb_snapshot(t: float) -> dict:
     uptime = t - _boot_time
+    with _lock:
+        chg = {**_charger, "protect": _pmb_protect}
     return {
         "pwr": {"v_8v4": round(8.4 + random.uniform(-0.03, 0.03), 3),
                 "i_8v4": round(0.42 + random.uniform(-0.01, 0.01), 3),
@@ -631,18 +646,20 @@ def _pmb_snapshot(t: float) -> dict:
                  "v_batt": round(16.6 - 0.0005 * uptime, 3),
                  "v_gse": round(0.0, 3),
                  "buck_on": True, "boost_on": False, "pg_3v3": True,
-                 "pg_8v4": True, "pg_24v0": True, "charger": False,
-                 "batt_src": True, "protect": False},
+                 "pg_8v4": True, "pg_24v0": True, "charger": True,
+                 "batt_src": True, "protect": chg["protect"]},
         "temp": {"temp_amb": round(23.0 + random.uniform(-0.5, 0.5), 2),
                  "temp_buck": round(40.0 + random.uniform(-1, 1), 2),
                  "temp_boost": None},
-        "charger": {"i_chg_a": 0.0, "v_bat": round(16.6 - 0.0005 * uptime, 3),
-                    "present": True, "enabled": False, "vin_good": False,
-                    "charging": False, "state": "off", "status": "off",
-                    "cells": 4},
+        "charger": {
+            "i_chg_a": round(0.5 + 0.05 * math.sin(t), 3) if chg["enabled"] else 0.0,
+            "v_bat": round(16.6 - 0.0005 * uptime, 3),
+            "present": True, "enabled": chg["enabled"], "vin_good": chg["enabled"],
+            "charging": chg["enabled"], "state": "CC/CV" if chg["enabled"] else "off",
+            "status": "const-current" if chg["enabled"] else "off", "cells": 4},
         # Charger configured limits (read-back), mirrors rt_pmb_chg_cfg_t.
-        "chg_cfg": {"i_setting": 16, "v_setting": 20, "cells": 4,
-                    "flags": 0, "vlimit": False},
+        "chg_cfg": {"i_setting": chg["i_setting"], "v_setting": chg["v_setting"],
+                    "cells": 4, "flags": 0, "vlimit": False},
     }
 
 
@@ -654,9 +671,12 @@ def _rab_snapshot(rab_id: int) -> dict:
         expected = bool(st["expected"])
         armed = bool(st["armed"])
         st["rx"] = (st["rx"] + 3) & 0xFF
-        rx = st["rx"]
+        rx = st["rx"] if _rab_link else st["rx"]
+        link = _rab_link
     mismatch = expected != armed
-    flags = RAB_FLAG_FMC_RX
+    flags = 0
+    if link:
+        flags |= RAB_FLAG_FMC_RX
     if mismatch:
         flags |= RAB_FLAG_ARM_MISMATCH
     if expected:
@@ -669,7 +689,7 @@ def _rab_snapshot(rab_id: int) -> dict:
         "flags": flags,
         "fc_armed_gpio": int(armed),
         "disagree": 0,
-        "fmc_rx": True,
+        "fmc_rx": link,
         "rx_count8": rx,
         "arm_mismatch": mismatch,
         "arm_expected": expected,
@@ -737,15 +757,17 @@ def _epb_board_status(board_id: int, t: float) -> dict:
 def build_flight_packet() -> dict:
     t = time.time()
 
-    boards = [
-        _board_entry("EPB", 0, 2, 2),
-        _board_entry("EPB", 2, 2, 2),
-        _board_entry("EPB", 4, 2, 2),
-        _board_entry("PMB", 0, 0, 0),
-        _board_entry("FMC", 0, 0, 0),
-        _board_entry("RAB", 0, 0, 0),
-        _board_entry("RAB", 1, 0, 0),
-    ]
+    with _lock:
+        online = dict(_board_online)
+
+    def up(key: str) -> bool:
+        return online.get(key, True)
+
+    # Only online boards appear in the fleet and publish telemetry, so toggling a
+    # board offline in the sim UI makes it disappear from the frontend.
+    _spec = [("EPB", 0, 2, 2), ("EPB", 2, 2, 2), ("EPB", 4, 2, 2),
+             ("PMB", 0, 0, 0), ("FMC", 0, 0, 0), ("RAB", 0, 0, 0), ("RAB", 1, 0, 0)]
+    boards = [_board_entry(k, b, nc, ns) for (k, b, nc, ns) in _spec if up(f"{k}:{b}")]
 
     with _lock:
         # Arming follows the IMC; set_armed handles the ARMING_DETECTED edge.
@@ -761,27 +783,20 @@ def build_flight_packet() -> dict:
                "arm_line": _imc_armed, "disarm_line": not _imc_armed, "flags": 0}
         fas_fsm = {"fas_state": _fsm.fas_state(), "flight_phase": _fsm.phase}
 
+    epb_ids = [b for b in (0, 2, 4) if up(f"EPB:{b}")]
     data = {
         "fas_boards": boards,
-        "fas_actuators": actuators,
-        "fas_sensors": {
-            "EPB:0": _epb_sensor_status(),
-            "EPB:2": _epb_sensor_status(),
-            "EPB:4": _epb_sensor_status(),
-        },
-        "fas_board_status": {
-            "EPB:0": _epb_board_status(0, t),
-            "EPB:2": _epb_board_status(2, t),
-            "EPB:4": _epb_board_status(4, t),
-        },
-        "fas_fmc": {"FMC:0": _fmc_snapshot(t, ov)},
-        "fas_pmb": {"PMB:0": _pmb_snapshot(t)},
+        "fas_actuators": {k: v for k, v in actuators.items() if up(k)},
+        "fas_sensors": {f"EPB:{b}": _epb_sensor_status() for b in epb_ids},
+        "fas_board_status": {f"EPB:{b}": _epb_board_status(b, t) for b in epb_ids},
+        "fas_fmc": {"FMC:0": _fmc_snapshot(t, ov)} if up("FMC:0") else {},
+        "fas_pmb": {"PMB:0": _pmb_snapshot(t)} if up("PMB:0") else {},
         "fas_imc": imc,
         "fas_fsm": fas_fsm,
-        "fas_rab": {"RAB:0": _rab_snapshot(0), "RAB:1": _rab_snapshot(1)},
-        "fas_aux": _aux_snapshot(),
-        "fas_rf": _rf_snapshot(),
-        "fas_sound": _sound_snapshot(),
+        "fas_rab": {f"RAB:{i}": _rab_snapshot(i) for i in (0, 1) if up(f"RAB:{i}")},
+        "fas_aux": _aux_snapshot() if up("FMC:0") else {},
+        "fas_rf": _rf_snapshot() if up("FMC:0") else {},
+        "fas_sound": _sound_snapshot() if up("FMC:0") else {"status": {}, "clips": []},
     }
     return {"source": "FAS", "data": data}
 
@@ -825,7 +840,8 @@ def _resolve_board_id(cmd: dict) -> int:
 # ---------------------------------------------------------------------------
 _FAS_OPS = {"pwm_set", "load_sw_set", "imc_arm", "imc_disarm", "failsafe",
             "discover", "actuator_query", "buzzer", "sd_cmd",
-            "rab_arm", "rab_disarm", "aux_power", "rf_cfg", "sound"}
+            "rab_arm", "rab_disarm", "aux_power", "rf_cfg", "sound",
+            "sound_upload", "pmb_charger"}
 _CONSOLE_ACTIONS = {"start", "stop", "list_ports", "configure", "tx"}
 
 
@@ -1051,7 +1067,9 @@ def _handle_fas_op(cmd: dict) -> None:
             if sub == "clear":
                 _sd["pct"] = 0.0
             elif sub == "set_rate":
-                _sd["rate"] = max(0.0, float(cmd.get("divisor", cmd.get("arg", 1))))
+                # Decimation divisor (1..255, 1 = full rate) — echoed back as
+                # rate_div in the SD status, NOT the UI fill speed (_sd["rate"]).
+                _sd["rate_div"] = max(1, int(cmd.get("divisor", cmd.get("arg", 1))))
         print(f"[novaMock] fas op=sd_cmd FMC:{board_id} action={sub}")
     elif op in ("rab_arm", "rab_disarm"):
         # RAB recovery arming, addressed by board_id (0 = A, 1 = B). The readback
@@ -1074,8 +1092,39 @@ def _handle_fas_op(cmd: dict) -> None:
         print(f"[novaMock] fas op=rf_cfg mode={_RF_RATE_NAMES.get(_rf_mode, _rf_mode)}")
     elif op == "sound":
         _handle_sound(cmd)
+    elif op == "sound_upload":
+        _handle_sound_upload(cmd)
+    elif op == "pmb_charger":
+        global _charger
+        with _lock:
+            _charger["enabled"] = bool(cmd.get("enable", False))
+            i = int(cmd.get("i_setting", 0xFF))
+            v = int(cmd.get("v_setting", 0xFF))
+            if i != 0xFF:
+                _charger["i_setting"] = max(0, min(31, i))
+            if v != 0xFF:
+                _charger["v_setting"] = max(0, min(31, v))
+            en, iset, vset = _charger["enabled"], _charger["i_setting"], _charger["v_setting"]
+        print(f"[novaMock] fas op=pmb_charger enable={en} i={iset} v={vset}")
     else:
         print(f"[novaMock] fas: unknown op {op!r}")
+
+
+def _handle_sound_upload(cmd: dict) -> None:
+    """Simulate a soundboard clip upload: decode the base64 clip just to size it,
+    then add it to the clip directory so the frontend list updates."""
+    import base64
+    import binascii
+    name = str(cmd.get("name", "clip"))[:24]
+    fmt = int(cmd.get("format", 2))
+    try:
+        length = len(base64.b64decode(str(cmd.get("data_b64", "")), validate=True))
+    except (binascii.Error, ValueError):
+        length = int(cmd.get("total_len", 0))
+    with _lock:
+        _sound["clips"].append({"name": name, "length": length, "format": fmt})
+        n = len(_sound["clips"])
+    print(f"[novaMock] fas op=sound_upload {name!r} ({length} B, fmt={fmt}) -> {n} clips")
 
 
 def _handle_sound(cmd: dict) -> None:
@@ -1233,6 +1282,21 @@ def _ui_state() -> dict:
                 "duration": round(_launch["end_t"], 1),
                 "default_csv": _sim_csv_default,
             },
+            # Protocol-update sim state, all operator-tweakable from the UI.
+            "boards": dict(_board_online),
+            "charger": {**_charger, "protect": _pmb_protect},
+            "rab": {
+                "link": _rab_link,
+                "0": {"armed": _rab[0]["armed"], "expected": _rab[0]["expected"]},
+                "1": {"armed": _rab[1]["armed"], "expected": _rab[1]["expected"]},
+            },
+            "aux": {"runcam": _aux["runcam"], "rfd": _aux["rfd"], "rf_mode": _rf_mode},
+            "rf_modes": _RF_RATE_NAMES,
+            "sound": {
+                "clips": [{"name": c["name"], "length": c["length"]} for c in _sound["clips"]],
+                "playing": _sound["playing"], "volume": _sound["volume"],
+                "tone": _sound["tone_until"] > time.time(),
+            },
         }
 
 
@@ -1323,6 +1387,86 @@ def _ui_apply_launch(body: dict) -> str:
     return src
 
 
+def _ui_apply_boards(body: dict) -> None:
+    """Toggle a FAS board online/offline in the sim (it drops out of the fleet)."""
+    key = body.get("key")
+    with _lock:
+        if key in _board_online and "online" in body:
+            _board_online[key] = bool(body["online"])
+
+
+def _ui_apply_charger(body: dict) -> None:
+    global _pmb_protect
+    with _lock:
+        if "enable" in body:
+            _charger["enabled"] = bool(body["enable"])
+        for key in ("i_setting", "v_setting"):
+            if body.get(key) is not None:
+                try:
+                    _charger[key] = max(0, min(31, int(body[key])))
+                except (TypeError, ValueError):
+                    pass
+        if "protect" in body:
+            _pmb_protect = bool(body["protect"])
+
+
+def _ui_apply_rab(body: dict) -> None:
+    global _rab_link
+    with _lock:
+        if "link" in body:
+            _rab_link = bool(body["link"])
+        rid = int(body.get("rab_id", -1))
+        if rid in _rab:
+            if "armed" in body:
+                a = bool(body["armed"])
+                _rab[rid]["expected"] = a
+                _rab[rid]["armed"] = a
+            if body.get("mismatch"):
+                # Force a disagreement: readback differs from the commanded state.
+                _rab[rid]["armed"] = not _rab[rid]["expected"]
+
+
+def _ui_apply_aux(body: dict) -> None:
+    global _rf_mode
+    with _lock:
+        if "runcam" in body:
+            _aux["runcam"] = bool(body["runcam"])
+        if "rfd" in body:
+            _aux["rfd"] = bool(body["rfd"])
+        if body.get("rf_mode") is not None:
+            try:
+                _rf_mode = max(0, min(2, int(body["rf_mode"])))
+            except (TypeError, ValueError):
+                pass
+
+
+def _ui_apply_sound(body: dict) -> None:
+    """Directly manipulate the sim's soundboard state (independent of backend
+    commands) so the frontend clip list / playback can be exercised."""
+    action = str(body.get("action", "")).lower()
+    with _lock:
+        if action == "add":
+            name = str(body.get("name", "clip"))[:24]
+            length = int(body.get("length", 8000) or 8000)
+            _sound["clips"].append({"name": name, "length": length, "format": 2})
+        elif action == "clear":
+            _sound["clips"] = []
+            _sound["playing"] = None
+        elif action == "remove":
+            idx = int(body.get("idx", -1))
+            if 0 <= idx < len(_sound["clips"]):
+                _sound["clips"].pop(idx)
+                _sound["playing"] = None
+        elif action == "play":
+            idx = int(body.get("idx", 0))
+            if 0 <= idx < len(_sound["clips"]):
+                _sound["playing"] = idx
+        elif action == "stop":
+            _sound["playing"] = None
+        elif action == "tone":
+            _sound["tone_until"] = time.time() + (int(body.get("ms", 300)) / 1000.0)
+
+
 def _ui_commands(since: int) -> list:
     with _lock:
         return [c for c in _recent if c["seq"] > since]
@@ -1370,6 +1514,16 @@ def _make_ui_handler():
                 _ui_apply_sd(body)
             elif path == "/api/launch":
                 _ui_apply_launch(body)
+            elif path == "/api/boards":
+                _ui_apply_boards(body)
+            elif path == "/api/charger":
+                _ui_apply_charger(body)
+            elif path == "/api/rab":
+                _ui_apply_rab(body)
+            elif path == "/api/aux":
+                _ui_apply_aux(body)
+            elif path == "/api/sound":
+                _ui_apply_sound(body)
             else:
                 self._send(404, json.dumps({"error": "not found"}))
                 return
@@ -1404,6 +1558,7 @@ _UI_HTML = """<!doctype html>
   button:hover{border-color:#58a6ff}
   .pill{padding:1px 8px;border-radius:10px;font-size:12px}
   .on{background:#1f6feb33;color:#79c0ff}.off{background:#6e768166;color:#9da7b3}
+  .warn2{background:#f8514933;color:#ff7b72}
   .grp{font-size:11px;color:#8b949e}
   #cmds{max-height:420px;overflow:auto;font-family:ui-monospace,Consolas,monospace;font-size:12px}
   .cmd{border-bottom:1px solid #21262d;padding:5px 4px}
@@ -1460,6 +1615,58 @@ _UI_HTML = """<!doctype html>
     <div>used <span id="sdpct">?</span>%</div>
     <div class="bar"><div id="sdbar"></div></div>
     <p class="muted">console mode: <span id="console">?</span></p>
+  </section>
+  <section style="grid-column:1/2">
+    <h2>FAS boards — connect / disconnect</h2>
+    <div id="boards" class="row"></div>
+    <p class="muted">unchecking a board drops it from the fleet and stops its telemetry.</p>
+  </section>
+  <section style="grid-column:2/3">
+    <h2>RAB recovery arming</h2>
+    <div class="row"><b style="width:14px">A</b> <span id="rabA" class="pill off">?</span>
+      <button onclick="rabArm(0,true)">arm</button>
+      <button onclick="rabArm(0,false)">disarm</button>
+      <button onclick="rabMismatch(0)">force mismatch</button></div>
+    <div class="row"><b style="width:14px">B</b> <span id="rabB" class="pill off">?</span>
+      <button onclick="rabArm(1,true)">arm</button>
+      <button onclick="rabArm(1,false)">disarm</button>
+      <button onclick="rabMismatch(1)">force mismatch</button></div>
+    <div class="row">FMC→RAB link: <button id="rablink" onclick="rabLink()">?</button></div>
+  </section>
+  <section style="grid-column:1/2">
+    <h2>Battery charger (PMB)</h2>
+    <div class="row">
+      <label><input type="checkbox" id="chgEn" onchange="applyCharger()"> charging enabled</label>
+      <span id="chgState" class="pill off">?</span>
+    </div>
+    <div class="row">i <input type="number" id="chgI" min="0" max="31" style="width:54px">
+      v <input type="number" id="chgV" min="0" max="31" style="width:54px">
+      <button onclick="applyCharger()">apply limits</button></div>
+    <div class="row"><label><input type="checkbox" id="chgProt" onchange="applyCharger()">
+      battery protect (fault — converters cut)</label></div>
+    <p class="muted">DAC codes 0..31. Mirrors the /api/fas/charger command effect.</p>
+  </section>
+  <section style="grid-column:2/3">
+    <h2>FMC aux / RF</h2>
+    <div class="row">
+      <label><input type="checkbox" id="auxRuncam" onchange="applyAux()"> RunCam power</label>
+      <label><input type="checkbox" id="auxRfd" onchange="applyAux()"> RFD900 power</label>
+    </div>
+    <div class="row">RF telemetry mode <select id="rfMode" onchange="applyAux()"></select></div>
+    <div class="row muted">PPS is always simulated present.</div>
+  </section>
+  <section style="grid-column:1/3">
+    <h2>Soundboard</h2>
+    <div class="row">
+      add clip <input type="text" id="clipName" placeholder="name" style="width:120px">
+      len <input type="number" id="clipLen" value="8000" style="width:74px"> B
+      <button onclick="soundAdd()">add</button>
+      <button onclick="soundClear()">clear all</button>
+      <button onclick="soundTone()">tone</button>
+      <span id="sndInfo" class="muted"></span>
+    </div>
+    <table id="clips"><thead><tr><th>#</th><th>name</th><th>bytes</th><th></th></tr></thead><tbody></tbody></table>
+    <p class="muted">real uploads arrive via the /api/fas/sound/upload backend command and append here too.</p>
   </section>
   <section style="grid-column:1/3">
     <h2>Received commands (live validation)</h2>
@@ -1532,6 +1739,63 @@ function renderFlight(){
     ? `— ${L.src}, T+${L.elapsed}s / ${L.duration}s ×${L.speed}`
     : (L.src&&L.src!=='none'?`— last: ${L.src}`:'');
 }
+function renderExtras(){
+  // FAS boards online toggles
+  const bd=$('boards');
+  if(bd.children.length!==Object.keys(state.boards||{}).length){
+    bd.innerHTML='';
+    for(const k of Object.keys(state.boards||{})){
+      const lbl=document.createElement('label');
+      lbl.innerHTML=`<input type="checkbox"> ${k}`;
+      lbl.querySelector('input').onchange=e=>post('/api/boards',{key:k,online:e.target.checked});
+      lbl.dataset.key=k; bd.appendChild(lbl);
+    }
+  }
+  for(const lbl of bd.children){lbl.querySelector('input').checked=!!(state.boards||{})[lbl.dataset.key];}
+  // RAB A/B
+  const rab=state.rab||{};
+  for(const [id,elid] of [['0','rabA'],['1','rabB']]){
+    const r=rab[id]||{}, el=$(elid), mm=r.armed!==r.expected;
+    el.textContent=(r.armed?'ARMED':'safe')+(mm?' ⚠MISMATCH':'');
+    el.className='pill '+(mm?'warn2':(r.armed?'on':'off'));
+  }
+  $('rablink').textContent=rab.link?'up':'DOWN';
+  // Charger
+  const c=state.charger||{};
+  if(document.activeElement!==$('chgI'))$('chgI').value=c.i_setting;
+  if(document.activeElement!==$('chgV'))$('chgV').value=c.v_setting;
+  $('chgEn').checked=!!c.enabled; $('chgProt').checked=!!c.protect;
+  $('chgState').textContent=c.enabled?'CC/CV':'off';
+  $('chgState').className='pill '+(c.enabled?'on':'off');
+  // Aux / RF
+  const a=state.aux||{};
+  $('auxRuncam').checked=!!a.runcam; $('auxRfd').checked=!!a.rfd;
+  const rf=$('rfMode');
+  if(rf.options.length!==Object.keys(state.rf_modes||{}).length){
+    rf.innerHTML=Object.entries(state.rf_modes||{}).map(([k,v])=>`<option value="${k}">${v}</option>`).join('');
+  }
+  if(document.activeElement!==rf)rf.value=String(a.rf_mode);
+  // Soundboard
+  const s=state.sound||{clips:[]};
+  $('sndInfo').textContent=`playing: ${s.playing==null?'—':'#'+s.playing} · vol ${s.volume}`+(s.tone?' · TONE':'');
+  const tb=$('clips').querySelector('tbody'); tb.innerHTML='';
+  (s.clips||[]).forEach((cl,i)=>{
+    const tr=document.createElement('tr');
+    tr.innerHTML=`<td>${i}</td><td>${escapeHtml(cl.name)}</td><td>${cl.length}</td>`+
+      `<td><button onclick="soundPlay(${i})">play</button> <button onclick="soundRemove(${i})">✕</button></td>`;
+    tb.appendChild(tr);
+  });
+}
+function rabArm(id,a){post('/api/rab',{rab_id:id,armed:a});}
+function rabMismatch(id){post('/api/rab',{rab_id:id,mismatch:true});}
+function rabLink(){post('/api/rab',{link:!(state.rab&&state.rab.link)});}
+function applyCharger(){post('/api/charger',{enable:$('chgEn').checked,i_setting:num($('chgI').value),v_setting:num($('chgV').value),protect:$('chgProt').checked});}
+function applyAux(){post('/api/aux',{runcam:$('auxRuncam').checked,rfd:$('auxRfd').checked,rf_mode:num($('rfMode').value)});}
+function soundAdd(){post('/api/sound',{action:'add',name:$('clipName').value||'clip',length:num($('clipLen').value)||8000});}
+function soundClear(){post('/api/sound',{action:'clear'});}
+function soundTone(){post('/api/sound',{action:'tone',ms:400});}
+function soundPlay(i){post('/api/sound',{action:'play',idx:i});}
+function soundRemove(i){post('/api/sound',{action:'remove',idx:i});}
 function setFlight(){post('/api/flight',{phase:$('fstate').value});}
 function toggleLaunch(){
   if(state.launch.active){post('/api/launch',{action:'abort'});}
@@ -1546,6 +1810,7 @@ async function refresh(){
     $('conn').textContent='connected';$('conn').className='muted';
     if(!$('sensors').querySelector('tbody').children.length)renderSensors();
     renderFlight();
+    renderExtras();
   }catch(e){$('conn').textContent='disconnected';}
 }
 async function pollCmds(){

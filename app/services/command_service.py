@@ -13,6 +13,7 @@ from app.models import (
     DirectServoPayload,
     FasAuxPayload,
     FasBuzzerPayload,
+    FasChargerPayload,
     FasRabPayload,
     FasRfPayload,
     FasSdPayload,
@@ -341,6 +342,35 @@ class CommandService:
         }
         self._ctx.mqtt_service.publish_device_commands([command])
         return [command]
+
+    def apply_fas_charger(self, payload: FasChargerPayload) -> list[dict]:
+        board = self._fas_board(payload.node or "PMB_0")
+        # 0xFF = leave the persisted limit unchanged (matches the firmware).
+        command = {
+            "type": "fas", **board, "op": "pmb_charger",
+            "enable": payload.enable,
+            "i_setting": 0xFF if payload.i_setting is None else payload.i_setting,
+            "v_setting": 0xFF if payload.v_setting is None else payload.v_setting,
+        }
+        self._ctx.mqtt_service.publish_device_commands([command])
+        return [command]
+
+    def apply_fas_sound_upload(self, name: str, clip: bytes, fmt: int, crc32: int,
+                               sample_rate: int, node: str | None = None) -> dict:
+        """Forward an already-transcoded soundboard clip to the bridge. The clip
+        bytes ride the MQTT command base64-encoded; the bridge streams them to the
+        FMC as BEGIN/DATA/END. Returns a small summary (not the clip bytes)."""
+        import base64
+
+        board = self._fas_board(node or "FMC_0")
+        command = {
+            "type": "fas", **board, "op": "sound_upload",
+            "name": name, "format": fmt, "sample_rate": sample_rate,
+            "crc32": crc32, "data_b64": base64.b64encode(clip).decode("ascii"),
+        }
+        self._ctx.mqtt_service.publish_device_commands([command])
+        return {"name": name, "format": fmt, "bytes": len(clip),
+                "crc32": crc32, "sample_rate": sample_rate}
 
     def apply_system_command(self, payload: SystemCommandPayload) -> dict:
         ctx = self._ctx

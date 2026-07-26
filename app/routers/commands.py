@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, UploadFile
 
 from app.context import AppContext
 from app.deps import get_context
@@ -10,6 +10,7 @@ from app.models import (
     DirectServoPayload,
     FasAuxPayload,
     FasBuzzerPayload,
+    FasChargerPayload,
     FasRabPayload,
     FasRfPayload,
     FasSdPayload,
@@ -17,6 +18,16 @@ from app.models import (
     SystemCommandPayload,
 )
 from app.services.role_service import ClientRole
+from app.services.sound import (
+    SND_FMT_IMA_ADPCM,
+    SND_FMT_PCM_S16,
+    TranscodeError,
+    audio_to_clip,
+    have_ffmpeg,
+)
+
+# Cap the transcoded clip so a base64 clip in one MQTT command stays sane.
+SOUND_UPLOAD_MAX_BYTES = 400_000
 
 router = APIRouter(prefix="/api", tags=["Commands"])
 
@@ -249,6 +260,81 @@ async def post_fas_sound(
         raise HTTPException(status_code=403, detail="Insufficient role: operator or admin required")
     commands = ctx.command_service.apply_fas_sound(payload)
     return {"published_commands": commands}
+
+
+@router.post(
+    "/fas/charger",
+    summary="PMB battery charging control",
+    description=(
+        "Enable or suspend PMB battery charging and optionally set the LTC4162 "
+        "charge current/voltage limit DAC codes (0..31; omit to leave unchanged). "
+        "Charging is default-OFF. Requires operator or admin role."
+    ),
+)
+async def post_fas_charger(
+    payload: FasChargerPayload,
+    x_client_id: str | None = Header(default=None),
+    ctx: AppContext = Depends(get_context),
+) -> dict:
+    caller_role = ctx.role_service.resolve_caller_role(x_client_id)
+    if caller_role < ClientRole.operator:
+        raise HTTPException(status_code=403, detail="Insufficient role: operator or admin required")
+    commands = ctx.command_service.apply_fas_charger(payload)
+    return {"published_commands": commands}
+
+
+@router.post(
+    "/fas/sound/upload",
+    summary="Upload a soundboard clip",
+    description=(
+        "Transcode an uploaded audio file (any format ffmpeg reads) to the FMC "
+        "on-flash clip format and stream it to the soundboard via the bridge. "
+        "format: 'pcm' (clean, 4x size) or 'adpcm' (compact, better over MQTT). "
+        "Requires operator or admin role; ffmpeg must be installed on the backend."
+    ),
+)
+async def post_fas_sound_upload(
+    file: UploadFile = File(..., description="Audio file to transcode and upload"),
+    name: str = Form(..., description="Clip name (<=24 chars on the FMC)"),
+    format: str = Form("adpcm", description="'pcm' or 'adpcm'"),
+    highpass_hz: int = Form(700, description="High-pass cutoff Hz (speaker shaping)"),
+    pitch_semitones: float = Form(0.0, description="Pitch shift up in semitones (tempo kept)"),
+    node: str | None = Form(None, description='FAS board node, default "FMC_0"'),
+    x_client_id: str | None = Header(default=None),
+    ctx: AppContext = Depends(get_context),
+) -> dict:
+    caller_role = ctx.role_service.resolve_caller_role(x_client_id)
+    if caller_role < ClientRole.operator:
+        raise HTTPException(status_code=403, detail="Insufficient role: operator or admin required")
+    if not have_ffmpeg():
+        raise HTTPException(status_code=503, detail="ffmpeg not installed on the backend host")
+
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="Empty upload")
+
+    fmt = SND_FMT_IMA_ADPCM if str(format).lower() in ("adpcm", "ima_adpcm") else SND_FMT_PCM_S16
+    try:
+        clip = audio_to_clip(raw, highpass_hz=highpass_hz,
+                             pitch_semitones=pitch_semitones, fmt=fmt)
+    except TranscodeError as exc:
+        raise HTTPException(status_code=422, detail=f"Transcode failed: {exc}") from exc
+
+    data = clip["data"]
+    if not data:
+        raise HTTPException(status_code=422, detail="Transcode produced no audio")
+    if len(data) > SOUND_UPLOAD_MAX_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=(f"Clip is {len(data)} bytes (> {SOUND_UPLOAD_MAX_BYTES}). "
+                    "Use a shorter clip or 'adpcm' format."),
+        )
+
+    summary = ctx.command_service.apply_fas_sound_upload(
+        name=name[:24], clip=data, fmt=clip["format"], crc32=clip["crc32"],
+        sample_rate=clip["sample_rate"], node=node,
+    )
+    return {"uploaded": {**summary, "seconds": round(clip["seconds"], 2)}}
 
 
 @router.post(

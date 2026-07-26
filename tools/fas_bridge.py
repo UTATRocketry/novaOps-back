@@ -35,7 +35,9 @@ Inbound commands handled (on nova/command)
        streams a whole melody as BEGIN/NOTE.../PLAY), sd_cmd (FMC SD logger rate /
        clear), rab_arm / rab_disarm (recovery arming board, board_id 0=A/1=B),
        aux_power (RFD / RunCam load switch), rf_cfg (RF telemetry rate/power mode),
-       sound (soundboard: play/stop/volume/tone/list/clear — buzzer replacement).
+       sound (soundboard: play/stop/volume/tone/list/clear — buzzer replacement),
+       sound_upload (stream a base64 clip to the FMC as BEGIN/DATA/END),
+       pmb_charger (enable/suspend battery charging + current/voltage limits).
   {"type":"console", ...}   — two-way console control + TX:
        action "start"/"stop"  toggle RX frame streaming to nova/console
        action "list_ports"    enumerate serial ports → nova/console
@@ -63,10 +65,13 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import json
 import os
 import struct
 import threading
+import zlib
 import time
 from enum import IntEnum
 
@@ -779,6 +784,20 @@ def _encode_sound_cmd(op: int, arg: int = 0, arg32: int = 0) -> bytes:
     return struct.pack("<BBHI", op & 0xFF, arg & 0xFF, 0, arg32 & 0xFFFFFFFF)
 
 
+def _encode_sound_begin(name: str, total_len: int, sample_rate: int, fmt: int) -> bytes:
+    # rt_fmc_sound_begin_t (bulk): u32 total_len, u32 sample_rate, u16 format,
+    # u16 reserved, char name[24]
+    nb = name.encode("ascii", "replace")[:24]
+    return struct.pack("<IIHH24s", total_len & 0xFFFFFFFF, sample_rate & 0xFFFFFFFF,
+                       fmt & 0xFFFF, 0, nb)
+
+
+def _encode_chg_en(enable: bool, i_setting: int = 0xFF, v_setting: int = 0xFF) -> bytes:
+    # rt_pmb_chg_en_t: u8 enable, u8 i_setting, u8 v_setting + 5 reserved.
+    # i_setting / v_setting = 0xFF means "leave the configured limit unchanged".
+    return struct.pack("<BBB5x", 1 if enable else 0, i_setting & 0xFF, v_setting & 0xFF)
+
+
 def _pad8() -> bytes:
     return b"\x00" * 8
 
@@ -899,6 +918,15 @@ def op_to_frame(op: str, cmd: dict, seq: int) -> tuple[int, bytes] | None:
             arg32 = freq | (ms << 16)
         cid = can_id_pack(RT_MSG_FMC_SOUND_CMD, RT_BOARD_FMC, board_id, 0, 0, seq)
         return cid, _encode_sound_cmd(snd_op, arg, arg32)
+    if op == "pmb_charger":
+        # PMB battery charging (default-OFF). enable allows/suspends charging;
+        # i_setting/v_setting are LTC4162 DAC codes (0..31), 0xFF = leave the
+        # persisted limit unchanged so a plain enable/suspend never clobbers it.
+        enable = bool(cmd.get("enable", False))
+        i_set = int(cmd.get("i_setting", 0xFF)) & 0xFF
+        v_set = int(cmd.get("v_setting", 0xFF)) & 0xFF
+        cid = can_id_pack(RT_MSG_PMB_CHG_EN, RT_BOARD_PMB, board_id, 0, 0, seq)
+        return cid, _encode_chg_en(enable, i_set, v_set)
     return None
 
 
@@ -993,6 +1021,9 @@ class FasBridge:
         self._fas_aux: dict = {}
         self._fas_rf: dict = {}
         self._fas_sound: dict = {"status": {}, "clips": {}}  # clips: idx -> clip dict
+        # Soundboard clip upload runs on its own thread; only one at a time.
+        self._upload_lock = threading.Lock()
+        self._uploading = False
         # Flight FSM (fas_state + flight_phase) derived from FMC baro + IMC arm.
         self._fsm = FlightFsm()
         self._fsm_last_t = time.monotonic()
@@ -1248,6 +1279,12 @@ class FasBridge:
         if op == "buzzer" and "notes" in cmd:
             self._cmd_fas_buzzer(cmd)
             return
+        # A soundboard clip upload streams BEGIN/DATA(bulk)/END to the FMC over
+        # many frames, paced to what the flash can sustain — run it off-thread so
+        # it never blocks the MQTT/command loop.
+        if op == "sound_upload":
+            self._cmd_sound_upload(cmd)
+            return
         frame = op_to_frame(op, cmd, self._next_seq())
         if frame is None:
             self._log(2, f"[bridge] fas: unknown op {op!r}")
@@ -1289,6 +1326,114 @@ class FasBridge:
             sent += 1
         buz(BUZZER_OP_PLAY)
         self._log(1, f"[bridge] fas buzzer melody FMC:{board_id} notes={sent}")
+
+    # ── Soundboard clip upload (BEGIN / DATA bulk / END) ──────────────────────
+    #
+    # The clip bytes (already transcoded to the on-flash format by the backend)
+    # arrive base64-encoded in the MQTT command. We stream them to the FMC:
+    #   ABORT (until idle) -> BEGIN (bulk) -> wait UL_READY (erase done) ->
+    #   DATA (<=256-byte bulk frames, paced) -> END (crc32) -> verify clip_count.
+    # Mirrors the gs server's _upload_once; the pacing keeps the FMC's flash
+    # programming from overrunning its USB/serial RX ring (see gs comments).
+    UL_BULK_MAX   = 256      # data bytes per bulk DATA frame
+    UL_BYTES_PER_S = 40000   # pacing: safe below the FMC flash-write knee
+    UL_BURST      = 16       # frames per burst before pacing sleep
+
+    def _cmd_sound_upload(self, cmd: dict) -> None:
+        name = str(cmd.get("name", "clip"))
+        fmt = int(cmd.get("format", SND_FMT_PCM_S16))
+        rate = int(cmd.get("sample_rate", 31250))
+        try:
+            data = base64.b64decode(str(cmd.get("data_b64", "")), validate=True)
+        except (binascii.Error, ValueError):
+            self._log(0, "[bridge] sound_upload: invalid base64 data")
+            return
+        if not data:
+            self._log(0, "[bridge] sound_upload: empty clip")
+            return
+        crc32 = int(cmd.get("crc32", zlib.crc32(data) & 0xFFFFFFFF)) & 0xFFFFFFFF
+        with self._upload_lock:
+            if self._uploading:
+                self._log(0, "[bridge] sound_upload: another upload is in progress")
+                return
+            self._uploading = True
+        threading.Thread(target=self._run_sound_upload,
+                         args=(name, data, crc32, rate, fmt), daemon=True).start()
+
+    def _run_sound_upload(self, name, data, crc32, rate, fmt) -> None:
+        try:
+            ok = self._do_sound_upload(name, data, crc32, rate, fmt)
+            self._log(1, f"[bridge] sound_upload {name!r} ({len(data)} B) "
+                         f"{'OK' if ok else 'FAILED'}")
+        except Exception as e:                       # noqa: BLE001
+            self._log(0, f"[bridge] sound_upload error: {e}")
+        finally:
+            with self._upload_lock:
+                self._uploading = False
+
+    def _snd_status(self, key, default=None):
+        with self._lock:
+            st = self._fas_sound.get("status")
+            return st.get(key, default) if isinstance(st, dict) else default
+
+    def _send_bulk_frame(self, can_id: int, data: bytes) -> None:
+        """Send a large-payload frame (up to 256 data bytes). Same framing as a
+        classic frame — only the length is larger (see egse_uart.c)."""
+        self._send_frame(can_id, data[:self.UL_BULK_MAX])
+
+    def _do_sound_upload(self, name, data, crc32, rate, fmt) -> bool:
+        total = len(data)
+        count0 = self._snd_status("clip_count", 0) or 0
+
+        # Reset any half-finished prior upload; retry ABORT until the FMC reports
+        # it actually went idle (a single ABORT can be lost).
+        for _ in range(20):
+            self._send_frame(
+                can_id_pack(RT_MSG_FMC_SOUND_CMD, RT_BOARD_FMC, 0, 0, 0, self._next_seq()),
+                _encode_sound_cmd(SND_OP_UL_ABORT))
+            time.sleep(0.12)
+            if not self._snd_status("ul_active"):
+                break
+
+        # BEGIN (bulk) — the FMC erases the clip region, then reports UL_READY.
+        self._send_bulk_frame(
+            can_id_pack(RT_MSG_FMC_SOUND_BEGIN, RT_BOARD_FMC, 0, 0, 0, self._next_seq()),
+            _encode_sound_begin(name, total, rate, fmt))
+        t0 = time.monotonic()
+        while not self._snd_status("ul_ready"):
+            if time.monotonic() - t0 > 25.0:
+                self._log(0, "[bridge] sound_upload: timed out waiting for erase")
+                return False
+            time.sleep(0.03)
+
+        # DATA — stream the clip in <=256-byte bulk frames, paced so the FMC's
+        # per-frame flash programming doesn't overrun its RX ring.
+        sent = 0
+        t_pace = time.monotonic()
+        for i, off in enumerate(range(0, total, self.UL_BULK_MAX)):
+            self._send_bulk_frame(
+                can_id_pack(RT_MSG_FMC_SOUND_DATA, RT_BOARD_FMC, 0, 0, 0, self._next_seq()),
+                data[off:off + self.UL_BULK_MAX])
+            sent += min(self.UL_BULK_MAX, total - off)
+            if (i % self.UL_BURST) == (self.UL_BURST - 1):
+                behind = (t_pace + sent / self.UL_BYTES_PER_S) - time.monotonic()
+                if behind > 0:
+                    time.sleep(behind)
+
+        # END — the FMC verifies CRC + length and commits. Let TX drain first so
+        # END never overtakes the last DATA frames.
+        time.sleep(0.15)
+        self._send_frame(
+            can_id_pack(RT_MSG_FMC_SOUND_CMD, RT_BOARD_FMC, 0, 0, 0, self._next_seq()),
+            _encode_sound_cmd(SND_OP_UL_END, arg32=crc32))
+
+        # Verify the commit landed (clip_count rose).
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < 3.0:
+            if (self._snd_status("clip_count", 0) or 0) > count0:
+                return True
+            time.sleep(0.05)
+        return False
 
     # ── FAS frame receive ────────────────────────────────────────────────────
 

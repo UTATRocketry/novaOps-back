@@ -439,6 +439,30 @@ class FasSoundPayload(BaseModel):
     ms: int = Field(default=0, ge=0, le=60000, description="Tone duration ms (0 = default) for action=tone")
 
 
+class FasChargerPayload(BaseModel):
+    """PMB battery charging control. Charging is DEFAULT-OFF; this enables or
+    suspends it and optionally sets the LTC4162 current/voltage limit DAC codes.
+    Omit i_setting/v_setting to leave the persisted limits unchanged."""
+
+    model_config = ConfigDict(
+        json_schema_extra={"example": {"enable": True, "i_setting": 16, "v_setting": 20}}
+    )
+
+    node: str | None = Field(
+        default=None,
+        description='FAS board node string, e.g. "PMB_0". Parsed to board_type/board_id.',
+    )
+    enable: bool = Field(description="True = allow charging, False = suspend")
+    i_setting: int | None = Field(
+        default=None, ge=0, le=31,
+        description="Charge-current DAC code (0..31); omit to leave unchanged",
+    )
+    v_setting: int | None = Field(
+        default=None, ge=0, le=31,
+        description="Charge-voltage DAC code (0..31); omit to leave unchanged",
+    )
+
+
 class IncomingSensorPacket(BaseModel):
     source: str
     sensors: list[dict[str, Any]]
