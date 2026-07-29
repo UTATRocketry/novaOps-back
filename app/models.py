@@ -435,8 +435,8 @@ class FasSoundPayload(BaseModel):
     )
     idx: int = Field(default=0, ge=0, le=255, description="Clip index for action=play")
     volume: int = Field(default=255, ge=0, le=255, description="Digital volume for action=volume")
-    freq_hz: int = Field(default=0, ge=0, le=20000, description="Tone frequency Hz (0 = default) for action=tone")
-    ms: int = Field(default=0, ge=0, le=60000, description="Tone duration ms (0 = default) for action=tone")
+    freq_hz: int = Field(default=2000, ge=0, le=20000, description="Tone frequency Hz (0 = default) for action=tone")
+    ms: int = Field(default=500, ge=0, le=60000, description="Tone duration ms (0 = default) for action=tone")
 
 
 class FasChargerPayload(BaseModel):

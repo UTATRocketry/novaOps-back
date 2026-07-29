@@ -36,7 +36,10 @@ Inbound commands handled (on nova/command)
        clear), rab_arm / rab_disarm (recovery arming board, board_id 0=A/1=B),
        aux_power (RFD / RunCam load switch), rf_cfg (RF telemetry rate/power mode),
        sound (soundboard: play/stop/volume/tone/list/clear — buzzer replacement),
-       sound_upload (stream a base64 clip to the FMC as BEGIN/DATA/END),
+       sound_upload (download the staged clip from the backend's url/path — see
+       --ops-url — then stream it to the FMC as BEGIN/DATA/END, reporting
+       progress and the outcome on nova/console; a legacy inline data_b64 clip
+       is still accepted),
        pmb_charger (enable/suspend battery charging + current/voltage limits).
   {"type":"console", ...}   — two-way console control + TX:
        action "start"/"stop"  toggle RX frame streaming to nova/console
@@ -53,6 +56,9 @@ Console output published (on nova/console)
   {"type":"console_ports", "ports":[...]}    available serial ports
   {"type":"console_config","ok":..., "port":..., "baud":...}  reconfigure result
   {"type":"console_status","active":bool}    start/stop acknowledgement
+  {"type":"sound_upload_progress", "upload_id":..., "sent":..., "total":...}
+  {"type":"sound_upload_result",   "upload_id":..., "ok":bool, "stage":...,
+                                   "error":..., "clip_count":...}
 
 Dependencies: pip install paho-mqtt pyserial
 
@@ -60,7 +66,7 @@ Usage:
     python fas_bridge.py --port /dev/ttyUSB0 [--baud 460800]
                          [--broker localhost:1883] [--node-id FAS]
                          [--publish-ms 50] [--verbosity 0|1|2]
-                         [--imc-board-id N]
+                         [--imc-board-id N] [--ops-url http://host:8000]
 """
 from __future__ import annotations
 
@@ -70,7 +76,11 @@ import binascii
 import json
 import os
 import struct
+import tempfile
 import threading
+import urllib.error
+import urllib.parse
+import urllib.request
 import zlib
 import time
 from enum import IntEnum
@@ -983,10 +993,15 @@ def _resolve_fas_board_id(cmd: dict) -> int:
 class FasBridge:
     def __init__(self, port: str, baud: int, broker: str,
                  node_id: str, publish_ms: int, verbosity: int,
-                 imc_board_id: int | None = None, data_dir: str = "data") -> None:
+                 imc_board_id: int | None = None, data_dir: str = "data",
+                 ops_url: str = "") -> None:
         self._port       = port
         self._baud       = baud
         self._node_id    = node_id
+        # Base URL of the novaOps backend, used to download staged soundboard
+        # clips. Overrides the URL the backend put in the command, which may name
+        # an address (e.g. localhost) that is not reachable from this host.
+        self._ops_url    = ops_url or ""
         self._publish_ms = publish_ms
         self._verbosity  = verbosity
         # When set, only IMC_STATUS frames from this board_id update _fas_imc.
@@ -1329,47 +1344,196 @@ class FasBridge:
 
     # ── Soundboard clip upload (BEGIN / DATA bulk / END) ──────────────────────
     #
-    # The clip bytes (already transcoded to the on-flash format by the backend)
-    # arrive base64-encoded in the MQTT command. We stream them to the FMC:
-    #   ABORT (until idle) -> BEGIN (bulk) -> wait UL_READY (erase done) ->
-    #   DATA (<=256-byte bulk frames, paced) -> END (crc32) -> verify clip_count.
+    # The clip bytes are already transcoded to the on-flash format by the backend.
+    # They are NOT carried in the MQTT command (that capped clips at a few hundred
+    # KB); the command carries a one-shot download URL instead, which we fetch to
+    # a temp file and then stream to the FMC:
+    #   download (verify length + crc32) -> ABORT (until idle) -> BEGIN (bulk) ->
+    #   wait UL_READY (erase done) -> DATA (<=256-byte bulk frames, paced) ->
+    #   END (crc32) -> verify clip_count.
+    # A legacy `data_b64` command is still accepted for older backends.
+    # Progress and the final outcome are published on the console topic as
+    # sound_upload_progress / sound_upload_result so the backend can complete the
+    # HTTP request that started the upload.
     # Mirrors the gs server's _upload_once; the pacing keeps the FMC's flash
     # programming from overrunning its USB/serial RX ring (see gs comments).
     UL_BULK_MAX   = 256      # data bytes per bulk DATA frame
     UL_BYTES_PER_S = 40000   # pacing: safe below the FMC flash-write knee
     UL_BURST      = 16       # frames per burst before pacing sleep
+    UL_DOWNLOAD_TIMEOUT_S = 30.0   # per-read timeout on the clip download
+    UL_DOWNLOAD_MAX_BYTES = 32 << 20  # refuse an absurd clip before writing it
+    UL_PROGRESS_INTERVAL_S = 1.0   # how often to publish upload progress
 
     def _cmd_sound_upload(self, cmd: dict) -> None:
         name = str(cmd.get("name", "clip"))
         fmt = int(cmd.get("format", SND_FMT_PCM_S16))
         rate = int(cmd.get("sample_rate", 31250))
-        try:
-            data = base64.b64decode(str(cmd.get("data_b64", "")), validate=True)
-        except (binascii.Error, ValueError):
-            self._log(0, "[bridge] sound_upload: invalid base64 data")
+        upload_id = str(cmd.get("upload_id") or "")
+        url = self._clip_url(cmd)
+        raw_b64 = str(cmd.get("data_b64", "")) if "data_b64" in cmd else ""
+
+        if not url and not raw_b64:
+            self._ul_result(upload_id, name, False, "command",
+                            "no clip url and no inline data")
             return
-        if not data:
-            self._log(0, "[bridge] sound_upload: empty clip")
-            return
-        crc32 = int(cmd.get("crc32", zlib.crc32(data) & 0xFFFFFFFF)) & 0xFFFFFFFF
+
         with self._upload_lock:
             if self._uploading:
-                self._log(0, "[bridge] sound_upload: another upload is in progress")
+                self._ul_result(upload_id, name, False, "busy",
+                                "another upload is in progress")
                 return
             self._uploading = True
-        threading.Thread(target=self._run_sound_upload,
-                         args=(name, data, crc32, rate, fmt), daemon=True).start()
+        threading.Thread(
+            target=self._run_sound_upload,
+            args=(upload_id, name, url, raw_b64, cmd.get("crc32"),
+                  int(cmd.get("bytes", 0) or 0), rate, fmt),
+            daemon=True).start()
 
-    def _run_sound_upload(self, name, data, crc32, rate, fmt) -> None:
+    def _clip_url(self, cmd: dict) -> str:
+        """Absolute URL to download the staged clip from, or "" if the command
+        carries none. --ops-url (if given) overrides the host the backend
+        guessed, which matters when the backend sees itself as localhost."""
+        url = str(cmd.get("url") or "")
+        path = str(cmd.get("path") or "")
+        if self._ops_url:
+            if not path and url:
+                parts = urllib.parse.urlsplit(url)
+                path = urllib.parse.urlunsplit(("", "", parts.path, parts.query, ""))
+            return urllib.parse.urljoin(self._ops_url.rstrip("/") + "/",
+                                        path.lstrip("/")) if path else ""
+        if url.startswith(("http://", "https://")):
+            return url
+        if url or path:
+            self._log(0, "[bridge] sound_upload: relative clip url and no "
+                         "--ops-url configured — cannot download the clip")
+        return ""
+
+    def _run_sound_upload(self, upload_id, name, url, raw_b64, crc_hint,
+                          size_hint, rate, fmt) -> None:
+        tmp_path = None
         try:
-            ok = self._do_sound_upload(name, data, crc32, rate, fmt)
-            self._log(1, f"[bridge] sound_upload {name!r} ({len(data)} B) "
-                         f"{'OK' if ok else 'FAILED'}")
+            crc32 = (int(crc_hint) & 0xFFFFFFFF) if crc_hint is not None else None
+            if url:
+                tmp_path, total, crc_actual = self._download_clip(url)
+                if tmp_path is None:
+                    self._ul_result(upload_id, name, False, "download",
+                                    f"download failed: {crc_actual}")
+                    return
+                if size_hint and total != size_hint:
+                    self._ul_result(upload_id, name, False, "download",
+                                    f"clip length {total} != expected {size_hint}")
+                    return
+                if crc32 is not None and crc_actual != crc32:
+                    self._ul_result(upload_id, name, False, "download",
+                                    f"clip crc32 {crc_actual:08x} != "
+                                    f"expected {crc32:08x}")
+                    return
+                crc32 = crc_actual
+                chunks = self._file_chunks(tmp_path)
+            else:
+                try:
+                    data = base64.b64decode(raw_b64, validate=True)
+                except (binascii.Error, ValueError):
+                    self._ul_result(upload_id, name, False, "decode",
+                                    "invalid base64 data")
+                    return
+                total = len(data)
+                if crc32 is None:
+                    crc32 = zlib.crc32(data) & 0xFFFFFFFF
+                chunks = self._bytes_chunks(data)
+
+            if not total:
+                self._ul_result(upload_id, name, False, "decode", "empty clip")
+                return
+
+            ok, stage, err, count = self._do_sound_upload(
+                upload_id, name, chunks, total, crc32, rate, fmt)
+            self._log(1, f"[bridge] sound_upload {name!r} ({total} B) "
+                         f"{'OK' if ok else 'FAILED at ' + stage}")
+            self._ul_result(upload_id, name, ok, stage, err,
+                            total=total, clip_count=count)
         except Exception as e:                       # noqa: BLE001
             self._log(0, f"[bridge] sound_upload error: {e}")
+            self._ul_result(upload_id, name, False, "error", str(e))
         finally:
+            if tmp_path:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
             with self._upload_lock:
                 self._uploading = False
+
+    def _download_clip(self, url: str):
+        """Fetch the staged clip to a temp file. Returns (path, bytes, crc32) on
+        success, or (None, 0, error_message) on failure."""
+        fd, tmp_path = tempfile.mkstemp(prefix="fas_clip_", suffix=".bin")
+        crc = 0
+        total = 0
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "fas_bridge"})
+            with urllib.request.urlopen(req, timeout=self.UL_DOWNLOAD_TIMEOUT_S) as resp, \
+                    os.fdopen(fd, "wb") as out:
+                fd = None  # now owned by `out`
+                while True:
+                    chunk = resp.read(64 * 1024)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > self.UL_DOWNLOAD_MAX_BYTES:
+                        raise ValueError(
+                            f"clip exceeds {self.UL_DOWNLOAD_MAX_BYTES} bytes")
+                    crc = zlib.crc32(chunk, crc)
+                    out.write(chunk)
+        except (urllib.error.URLError, OSError, ValueError) as e:
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            return None, 0, str(e)
+        self._log(1, f"[bridge] sound_upload: downloaded {total} B from {url}")
+        return tmp_path, total, crc & 0xFFFFFFFF
+
+    def _file_chunks(self, path: str):
+        def gen():
+            with open(path, "rb") as f:
+                while True:
+                    block = f.read(self.UL_BULK_MAX)
+                    if not block:
+                        return
+                    yield block
+        return gen()
+
+    def _bytes_chunks(self, data: bytes):
+        def gen():
+            for off in range(0, len(data), self.UL_BULK_MAX):
+                yield data[off:off + self.UL_BULK_MAX]
+        return gen()
+
+    def _ul_result(self, upload_id, name, ok, stage, error=None,
+                   total=None, clip_count=None) -> None:
+        """Publish the outcome of an upload so the backend's HTTP request can
+        finish. Failures are logged too, since a bridge run may have no backend."""
+        if not ok:
+            self._log(0, f"[bridge] sound_upload {name!r} failed at {stage}: {error}")
+        self._publish_console({
+            "type": "sound_upload_result", "upload_id": upload_id,
+            "name": name, "ok": bool(ok), "stage": stage, "error": error,
+            "bytes": total, "clip_count": clip_count, "source": self._node_id,
+        })
+
+    def _ul_progress(self, upload_id, name, sent, total) -> None:
+        self._publish_console({
+            "type": "sound_upload_progress", "upload_id": upload_id,
+            "name": name, "sent": sent, "total": total,
+            "pct": round(100.0 * sent / total, 1) if total else 0.0,
+            "source": self._node_id,
+        })
 
     def _snd_status(self, key, default=None):
         with self._lock:
@@ -1381,8 +1545,9 @@ class FasBridge:
         classic frame — only the length is larger (see egse_uart.c)."""
         self._send_frame(can_id, data[:self.UL_BULK_MAX])
 
-    def _do_sound_upload(self, name, data, crc32, rate, fmt) -> bool:
-        total = len(data)
+    def _do_sound_upload(self, upload_id, name, chunks, total, crc32, rate, fmt):
+        """Stream `chunks` (<=UL_BULK_MAX blocks totalling `total` bytes) to the
+        FMC. Returns (ok, stage, error, clip_count)."""
         count0 = self._snd_status("clip_count", 0) or 0
 
         # Reset any half-finished prior upload; retry ABORT until the FMC reports
@@ -1402,23 +1567,27 @@ class FasBridge:
         t0 = time.monotonic()
         while not self._snd_status("ul_ready"):
             if time.monotonic() - t0 > 25.0:
-                self._log(0, "[bridge] sound_upload: timed out waiting for erase")
-                return False
+                return False, "begin", "timed out waiting for flash erase", None
             time.sleep(0.03)
 
         # DATA — stream the clip in <=256-byte bulk frames, paced so the FMC's
         # per-frame flash programming doesn't overrun its RX ring.
         sent = 0
         t_pace = time.monotonic()
-        for i, off in enumerate(range(0, total, self.UL_BULK_MAX)):
+        t_report = t_pace
+        for i, block in enumerate(chunks):
             self._send_bulk_frame(
                 can_id_pack(RT_MSG_FMC_SOUND_DATA, RT_BOARD_FMC, 0, 0, 0, self._next_seq()),
-                data[off:off + self.UL_BULK_MAX])
-            sent += min(self.UL_BULK_MAX, total - off)
+                block)
+            sent += len(block)
             if (i % self.UL_BURST) == (self.UL_BURST - 1):
                 behind = (t_pace + sent / self.UL_BYTES_PER_S) - time.monotonic()
                 if behind > 0:
                     time.sleep(behind)
+                now = time.monotonic()
+                if now - t_report >= self.UL_PROGRESS_INTERVAL_S:
+                    t_report = now
+                    self._ul_progress(upload_id, name, sent, total)
 
         # END — the FMC verifies CRC + length and commits. Let TX drain first so
         # END never overtakes the last DATA frames.
@@ -1427,13 +1596,28 @@ class FasBridge:
             can_id_pack(RT_MSG_FMC_SOUND_CMD, RT_BOARD_FMC, 0, 0, 0, self._next_seq()),
             _encode_sound_cmd(SND_OP_UL_END, arg32=crc32))
 
-        # Verify the commit landed (clip_count rose).
+        # Verify the commit landed: normally clip_count rises, but overwriting an
+        # existing clip leaves the count unchanged — so also accept the clip
+        # directory reporting this name at this length. LIST refreshes it.
+        self._send_frame(
+            can_id_pack(RT_MSG_FMC_SOUND_CMD, RT_BOARD_FMC, 0, 0, 0, self._next_seq()),
+            _encode_sound_cmd(SND_OP_LIST))
         t0 = time.monotonic()
-        while time.monotonic() - t0 < 3.0:
-            if (self._snd_status("clip_count", 0) or 0) > count0:
-                return True
+        while time.monotonic() - t0 < 6.0:
+            count = self._snd_status("clip_count", 0) or 0
+            if count > count0 or self._has_clip(name, total):
+                return True, "done", None, count
             time.sleep(0.05)
-        return False
+        return (False, "verify",
+                "the FMC did not report the new clip (CRC or length mismatch?)",
+                self._snd_status("clip_count", 0))
+
+    def _has_clip(self, name: str, length: int) -> bool:
+        """True when the FMC's clip directory lists `name` at exactly `length`."""
+        want = name.encode("ascii", "replace")[:24].decode("ascii", "replace")
+        with self._lock:
+            clips = list(self._fas_sound.get("clips", {}).values())
+        return any(c.get("name") == want and c.get("length") == length for c in clips)
 
     # ── FAS frame receive ────────────────────────────────────────────────────
 
@@ -1827,6 +2011,11 @@ def main() -> None:
                         "(default: accept any board)")
     p.add_argument("--data-dir",   default="data",
                    help="Directory for recorded data-saving CSV files")
+    p.add_argument("--ops-url",    default=os.getenv("NOVA_OPS_URL", ""),
+                   help="novaOps backend base URL (e.g. http://10.0.0.5:8000) "
+                        "used to download staged soundboard clips. Defaults to "
+                        "$NOVA_OPS_URL; when unset, the URL in the command is "
+                        "used as-is")
     args = p.parse_args()
 
     FasBridge(
@@ -1838,6 +2027,7 @@ def main() -> None:
         verbosity=args.verbosity,
         imc_board_id=args.imc_board_id,
         data_dir=args.data_dir,
+        ops_url=args.ops_url,
     ).run()
 
 

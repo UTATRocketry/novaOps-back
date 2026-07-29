@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, UploadFile
+import asyncio
+import os
+
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse
 
 from app.context import AppContext
 from app.deps import get_context
@@ -26,8 +30,14 @@ from app.services.sound import (
     have_ffmpeg,
 )
 
-# Cap the transcoded clip so a base64 clip in one MQTT command stays sane.
-SOUND_UPLOAD_MAX_BYTES = 400_000
+# Clip bytes no longer ride the MQTT command (the bridge downloads them from
+# /api/fas/sound/clip/{token}), so these limits are only sanity guards against a
+# clip that could never fit the FMC's flash or would exhaust backend memory.
+# The real ceiling is the soundboard's free space, checked below against the
+# cap_kb/used_kb the FMC reports in flight telemetry.
+SOUND_CLIP_MAX_BYTES = int(os.getenv("NOVA_SOUND_CLIP_MAX_BYTES", str(8 * 1024 * 1024)))
+SOUND_SOURCE_MAX_BYTES = int(os.getenv("NOVA_SOUND_SOURCE_MAX_BYTES", str(64 * 1024 * 1024)))
+_SOURCE_READ_CHUNK = 1 << 20
 
 router = APIRouter(prefix="/api", tags=["Commands"])
 
@@ -283,17 +293,51 @@ async def post_fas_charger(
     return {"published_commands": commands}
 
 
+def _soundboard_free_bytes(ctx: AppContext) -> int | None:
+    """Free soundboard flash in bytes from the FMC's last reported status, or
+    None when no soundboard telemetry has been seen."""
+    flight = ctx.runtime.latest_flight_data or {}
+    status = (flight.get("fas_sound") or {}).get("status") or {}
+    cap_kb, used_kb = status.get("cap_kb"), status.get("used_kb")
+    if not isinstance(cap_kb, (int, float)) or not cap_kb:
+        return None
+    used = used_kb if isinstance(used_kb, (int, float)) else 0
+    return max(0, int((cap_kb - used) * 1024))
+
+
+async def _read_upload(file: UploadFile) -> bytes:
+    """Read an upload into memory, refusing anything past the source cap."""
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(_SOURCE_READ_CHUNK)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > SOUND_SOURCE_MAX_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"Source file exceeds {SOUND_SOURCE_MAX_BYTES} bytes",
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 @router.post(
     "/fas/sound/upload",
     summary="Upload a soundboard clip",
     description=(
         "Transcode an uploaded audio file (any format ffmpeg reads) to the FMC "
-        "on-flash clip format and stream it to the soundboard via the bridge. "
-        "format: 'pcm' (clean, 4x size) or 'adpcm' (compact, better over MQTT). "
+        "on-flash clip format, stage it for download, and tell the bridge to "
+        "fetch and stream it to the soundboard. The request waits for the "
+        "bridge's confirmation, so it can take a while for a long clip. "
+        "format: 'pcm' (clean, 4x size) or 'adpcm' (compact, ~1/4 the flash). "
+        "Clip size is bounded by the soundboard's free flash, not by MQTT. "
         "Requires operator or admin role; ffmpeg must be installed on the backend."
     ),
 )
 async def post_fas_sound_upload(
+    request: Request,
     file: UploadFile = File(..., description="Audio file to transcode and upload"),
     name: str = Form(..., description="Clip name (<=24 chars on the FMC)"),
     format: str = Form("adpcm", description="'pcm' or 'adpcm'"),
@@ -309,32 +353,74 @@ async def post_fas_sound_upload(
     if not have_ffmpeg():
         raise HTTPException(status_code=503, detail="ffmpeg not installed on the backend host")
 
-    raw = await file.read()
+    raw = await _read_upload(file)
     if not raw:
         raise HTTPException(status_code=400, detail="Empty upload")
 
     fmt = SND_FMT_IMA_ADPCM if str(format).lower() in ("adpcm", "ima_adpcm") else SND_FMT_PCM_S16
     try:
-        clip = audio_to_clip(raw, highpass_hz=highpass_hz,
-                             pitch_semitones=pitch_semitones, fmt=fmt)
+        # Transcoding is CPU/ffmpeg-bound and unbounded in length now — keep it
+        # off the event loop so telemetry and other requests keep flowing.
+        clip = await asyncio.to_thread(
+            audio_to_clip, raw, highpass_hz=highpass_hz,
+            pitch_semitones=pitch_semitones, fmt=fmt,
+        )
     except TranscodeError as exc:
         raise HTTPException(status_code=422, detail=f"Transcode failed: {exc}") from exc
 
     data = clip["data"]
     if not data:
         raise HTTPException(status_code=422, detail="Transcode produced no audio")
-    if len(data) > SOUND_UPLOAD_MAX_BYTES:
+    if len(data) > SOUND_CLIP_MAX_BYTES:
         raise HTTPException(
             status_code=413,
-            detail=(f"Clip is {len(data)} bytes (> {SOUND_UPLOAD_MAX_BYTES}). "
+            detail=(f"Clip is {len(data)} bytes (> {SOUND_CLIP_MAX_BYTES}). "
                     "Use a shorter clip or 'adpcm' format."),
         )
+    free = _soundboard_free_bytes(ctx)
+    if free is not None and len(data) > free:
+        raise HTTPException(
+            status_code=413,
+            detail=(f"Clip is {len(data)} bytes but the soundboard has only {free} "
+                    "bytes free. Clear clips or use a shorter clip / 'adpcm'."),
+        )
 
-    summary = ctx.command_service.apply_fas_sound_upload(
+    # The bridge may live on another host, so prefer an explicitly configured
+    # public base URL over this request's (which could be localhost).
+    base_url = os.getenv("NOVA_PUBLIC_BASE_URL") or str(request.base_url)
+    result = await ctx.command_service.apply_fas_sound_upload(
         name=name[:24], clip=data, fmt=clip["format"], crc32=clip["crc32"],
-        sample_rate=clip["sample_rate"], node=node,
+        sample_rate=clip["sample_rate"], node=node, base_url=base_url,
     )
-    return {"uploaded": {**summary, "seconds": round(clip["seconds"], 2)}}
+    payload = {"uploaded": {**result, "seconds": round(clip["seconds"], 2)}}
+    if not result.get("ok"):
+        status = 504 if result.get("stage") == "timeout" else 502
+        raise HTTPException(status_code=status, detail=payload["uploaded"])
+    return payload
+
+
+@router.get(
+    "/fas/sound/clip/{token}",
+    summary="Download a staged soundboard clip",
+    description=(
+        "Serve the raw on-flash clip bytes for a pending upload. The FAS bridge "
+        "fetches this URL after a /fas/sound/upload command; the token is "
+        "single-use in practice (dropped once the bridge acknowledges) and "
+        "expires on its own. Not intended for direct client use."
+    ),
+    response_class=FileResponse,
+)
+async def get_fas_sound_clip(token: str, ctx: AppContext = Depends(get_context)) -> FileResponse:
+    clip = ctx.clip_store.get(token)
+    if clip is None:
+        raise HTTPException(status_code=404, detail="Unknown or expired clip token")
+    return FileResponse(
+        path=clip.path,
+        media_type="application/octet-stream",
+        filename=f"{clip.meta.get('name') or 'clip'}.bin",
+        headers={"X-Clip-Crc32": str(clip.meta.get("crc32", "")),
+                 "X-Clip-Bytes": str(clip.size)},
+    )
 
 
 @router.post(

@@ -1023,7 +1023,7 @@ def _handle_fas_port(cmd: dict) -> None:
         print(f"[novaMock] fas: unknown port {port!r}")
 
 
-def _handle_fas_op(cmd: dict) -> None:
+def _handle_fas_op(cmd: dict, client: mqtt.Client | None = None) -> None:
     global _imc_armed, _imc_board_id, _rf_mode
     op = str(cmd.get("op", ""))
     board_id = int(cmd.get("board_id", 0))
@@ -1093,7 +1093,7 @@ def _handle_fas_op(cmd: dict) -> None:
     elif op == "sound":
         _handle_sound(cmd)
     elif op == "sound_upload":
-        _handle_sound_upload(cmd)
+        _handle_sound_upload(cmd, client)
     elif op == "pmb_charger":
         global _charger
         with _lock:
@@ -1110,21 +1110,65 @@ def _handle_fas_op(cmd: dict) -> None:
         print(f"[novaMock] fas: unknown op {op!r}")
 
 
-def _handle_sound_upload(cmd: dict) -> None:
-    """Simulate a soundboard clip upload: decode the base64 clip just to size it,
-    then add it to the clip directory so the frontend list updates."""
+def _handle_sound_upload(cmd: dict, client: mqtt.Client | None = None) -> None:
+    """Simulate a soundboard clip upload.
+
+    Like the real bridge, the clip bytes are downloaded from the url the backend
+    staged (falling back to a legacy inline data_b64 clip) and the outcome is
+    published back as sound_upload_result — the backend's upload request blocks
+    on that ack. The download is done off-thread so it cannot stall the MQTT
+    callback, then the clip is added to the directory the frontend lists.
+    """
     import base64
     import binascii
+    import urllib.error
+    import urllib.request
+
     name = str(cmd.get("name", "clip"))[:24]
     fmt = int(cmd.get("format", 2))
-    try:
-        length = len(base64.b64decode(str(cmd.get("data_b64", "")), validate=True))
-    except (binascii.Error, ValueError):
-        length = int(cmd.get("total_len", 0))
-    with _lock:
-        _sound["clips"].append({"name": name, "length": length, "format": fmt})
-        n = len(_sound["clips"])
-    print(f"[novaMock] fas op=sound_upload {name!r} ({length} B, fmt={fmt}) -> {n} clips")
+    upload_id = str(cmd.get("upload_id") or "")
+    url = str(cmd.get("url") or "")
+
+    def ack(ok: bool, stage: str, length: int, error: str | None = None) -> None:
+        if ok:
+            with _lock:
+                _sound["clips"].append({"name": name, "length": length, "format": fmt})
+                n = len(_sound["clips"])
+            print(f"[novaMock] fas op=sound_upload {name!r} ({length} B, fmt={fmt}) "
+                  f"-> {n} clips")
+        else:
+            with _lock:
+                n = len(_sound["clips"])
+            print(f"[novaMock] fas op=sound_upload {name!r} FAILED at {stage}: {error}")
+        if client is not None:
+            _publish_console(client, {
+                "type": "sound_upload_result", "upload_id": upload_id,
+                "name": name, "ok": ok, "stage": stage, "error": error,
+                "bytes": length, "clip_count": n,
+            })
+
+    def run() -> None:
+        if url.startswith(("http://", "https://")):
+            try:
+                with urllib.request.urlopen(url, timeout=30) as resp:
+                    length = len(resp.read())
+            except (urllib.error.URLError, OSError) as exc:
+                ack(False, "download", 0, str(exc))
+                return
+            # Pretend the FMC took a moment to program its flash.
+            time.sleep(min(2.0, length / 40000.0))
+            ack(True, "done", length)
+            return
+        try:
+            length = len(base64.b64decode(str(cmd.get("data_b64", "")), validate=True))
+        except (binascii.Error, ValueError):
+            length = int(cmd.get("bytes", cmd.get("total_len", 0)) or 0)
+        if not length:
+            ack(False, "command", 0, "no clip url and no inline data")
+            return
+        ack(True, "done", length)
+
+    threading.Thread(target=run, daemon=True).start()
 
 
 def _handle_sound(cmd: dict) -> None:
@@ -1222,7 +1266,7 @@ def on_message(client, _userdata, message) -> None:
             if "port" in cmd:
                 _handle_fas_port(cmd)
             elif "op" in cmd:
-                _handle_fas_op(cmd)
+                _handle_fas_op(cmd, client)
             else:
                 print(f"[novaMock] fas: unrecognised shape {cmd}")
 

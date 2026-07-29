@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+import logging
+import threading
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -25,6 +28,8 @@ from app.models import (
 
 if TYPE_CHECKING:
     from app.context import AppContext
+
+LOGGER = logging.getLogger(__name__)
 
 
 class CommandParser:
@@ -221,6 +226,10 @@ class CommandParser:
 class CommandService:
     def __init__(self, ctx: AppContext) -> None:
         self._ctx = ctx
+        # upload_id -> asyncio.Future resolved with the bridge's ack payload.
+        # Written from the request coroutine, resolved from the MQTT thread.
+        self._sound_uploads: dict[str, asyncio.Future] = {}
+        self._sound_uploads_lock = threading.Lock()
 
     async def apply_command(self, command: CommandPayload) -> list[dict]:
         ctx = self._ctx
@@ -355,22 +364,90 @@ class CommandService:
         self._ctx.mqtt_service.publish_device_commands([command])
         return [command]
 
-    def apply_fas_sound_upload(self, name: str, clip: bytes, fmt: int, crc32: int,
-                               sample_rate: int, node: str | None = None) -> dict:
-        """Forward an already-transcoded soundboard clip to the bridge. The clip
-        bytes ride the MQTT command base64-encoded; the bridge streams them to the
-        FMC as BEGIN/DATA/END. Returns a small summary (not the clip bytes)."""
-        import base64
+    async def apply_fas_sound_upload(self, name: str, clip: bytes, fmt: int, crc32: int,
+                                     sample_rate: int, node: str | None = None,
+                                     base_url: str | None = None,
+                                     timeout_s: float | None = None) -> dict:
+        """Stage a transcoded soundboard clip and have the bridge fetch it.
 
+        The clip bytes are written to a temp file and the MQTT command carries
+        only a one-shot download URL, so clip size is no longer bounded by what
+        fits in an MQTT message. The bridge downloads the file, streams it to the
+        FMC as BEGIN/DATA/END, and publishes a ``sound_upload_result`` ack on the
+        console topic; we wait for that ack (or time out) and return its outcome.
+        """
         board = self._fas_board(node or "FMC_0")
+        clip_ref = self._ctx.clip_store.stage(
+            clip, meta={"name": name, "format": fmt, "crc32": crc32})
+        path = f"/api/fas/sound/clip/{clip_ref.token}"
         command = {
             "type": "fas", **board, "op": "sound_upload",
+            "upload_id": clip_ref.token,
             "name": name, "format": fmt, "sample_rate": sample_rate,
-            "crc32": crc32, "data_b64": base64.b64encode(clip).decode("ascii"),
+            "crc32": crc32, "bytes": len(clip),
+            # `path` lets a bridge configured with its own --ops-url ignore the
+            # backend's guess at its externally reachable address.
+            "path": path,
+            "url": f"{(base_url or '').rstrip('/')}{path}" if base_url else path,
         }
-        self._ctx.mqtt_service.publish_device_commands([command])
-        return {"name": name, "format": fmt, "bytes": len(clip),
-                "crc32": crc32, "sample_rate": sample_rate}
+
+        if timeout_s is None:
+            # The bridge paces DATA frames at ~40 kB/s into the FMC's flash, plus
+            # erase/verify round trips at each end. Allow generous slack.
+            timeout_s = 45.0 + len(clip) / 20_000.0
+
+        waiter = self._register_sound_upload(clip_ref.token)
+        summary = {"upload_id": clip_ref.token, "name": name, "format": fmt,
+                   "bytes": len(clip), "crc32": crc32, "sample_rate": sample_rate,
+                   "url": command["url"]}
+        try:
+            self._ctx.mqtt_service.publish_device_commands([command])
+            try:
+                ack = await asyncio.wait_for(waiter, timeout_s)
+            except asyncio.TimeoutError:
+                # Leave the staged clip in place: a slow bridge may still collect
+                # it, and the store expires it on its own.
+                return {**summary, "ok": False, "stage": "timeout",
+                        "error": f"No bridge acknowledgement within {timeout_s:.0f}s"}
+            self._ctx.clip_store.discard(clip_ref.token)
+            return {
+                **summary,
+                "ok": bool(ack.get("ok")),
+                "stage": ack.get("stage"),
+                "error": ack.get("error"),
+                "clip_count": ack.get("clip_count"),
+            }
+        finally:
+            self._forget_sound_upload(clip_ref.token)
+
+    def _register_sound_upload(self, upload_id: str) -> asyncio.Future:
+        future: asyncio.Future = asyncio.get_running_loop().create_future()
+        with self._sound_uploads_lock:
+            self._sound_uploads[upload_id] = future
+        return future
+
+    def _forget_sound_upload(self, upload_id: str) -> None:
+        with self._sound_uploads_lock:
+            self._sound_uploads.pop(upload_id, None)
+
+    def resolve_sound_upload(self, payload: dict) -> None:
+        """Resolve a pending upload with the bridge's ack. Called from the MQTT
+        thread, so the future is completed on its own event loop."""
+        upload_id = str(payload.get("upload_id") or "")
+        with self._sound_uploads_lock:
+            future = self._sound_uploads.get(upload_id)
+        if future is None or future.done():
+            return
+        loop = future.get_loop()
+
+        def _set() -> None:
+            if not future.done():
+                future.set_result(payload)
+
+        try:
+            loop.call_soon_threadsafe(_set)
+        except RuntimeError as exc:  # loop closed mid-shutdown
+            LOGGER.warning("Could not deliver sound upload ack %s: %s", upload_id, exc)
 
     def apply_system_command(self, payload: SystemCommandPayload) -> dict:
         ctx = self._ctx

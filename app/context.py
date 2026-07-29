@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from app.services.clip_store import ClipStore
 from app.services.command_service import CommandService
 from app.services.config_service import ConfigService
 from app.services.data_service import RollingAverageStore, SensorParser
@@ -32,6 +33,11 @@ class AppContext:
         self.role_service = RoleService(self.ws_manager)
         self.data_dir = data_dir
         self.data_dir.mkdir(parents=True, exist_ok=True)
+
+        # Soundboard clips are staged in a temp dir and pulled by the bridge over
+        # HTTP instead of riding an MQTT message (see services/clip_store.py).
+        self.clip_store = ClipStore(
+            ttl_s=float(os.getenv("NOVA_CLIP_TTL_S", "900")))
 
         rolling_store = RollingAverageStore(window_size=5)
         self.sensor_parser = SensorParser(rolling_store)
@@ -188,6 +194,10 @@ class AppContext:
             pass
 
     def _on_console_message(self, payload: dict[str, Any]) -> None:
+        # A soundboard clip upload ack completes the waiting /fas/sound/upload
+        # request; it is still rebroadcast so clients can show the outcome.
+        if str(payload.get("type", "")) == "sound_upload_result":
+            self.command_service.resolve_sound_upload(payload)
         self._broadcast_from_mqtt(payload)
 
     def _on_control_message(self, payload: dict[str, Any]) -> None:
