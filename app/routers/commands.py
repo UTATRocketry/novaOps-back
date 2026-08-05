@@ -9,6 +9,7 @@ from fastapi.responses import FileResponse
 from app.context import AppContext
 from app.deps import get_context
 from app.models import (
+    CONSOLE_ACTIONS,
     CommandPayload,
     DirectRelayPayload,
     DirectServoPayload,
@@ -77,7 +78,7 @@ async def post_console(payload: dict, ctx: AppContext = Depends(get_context)) ->
     description=(
         "Publish a console control/TX command to the device command topic so the "
         "FAS bridge acts on it. Supports actions: start, stop, list_ports, "
-        "configure, tx. Requires operator or admin role (raw frame TX is "
+        "configure, disconnect, status, tx. Requires operator or admin role (raw frame TX is "
         "powerful). Output is delivered back over the WebSocket console stream."
     ),
 )
@@ -93,7 +94,7 @@ async def post_console_command(
             detail="Insufficient role: operator or admin required for console commands",
         )
     action = str(payload.get("action", "")).lower()
-    if action not in {"start", "stop", "list_ports", "configure", "tx"}:
+    if action not in CONSOLE_ACTIONS:
         raise HTTPException(status_code=400, detail=f"Unknown console action '{action}'")
     ctx.mqtt_service.publish_console_command(payload)
     return {"published": True, "action": action}

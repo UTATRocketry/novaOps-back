@@ -45,6 +45,8 @@ Inbound commands handled (on nova/command)
        action "start"/"stop"  toggle RX frame streaming to nova/console
        action "list_ports"    enumerate serial ports → nova/console
        action "configure"     switch serial port/baud and reconnect
+       action "disconnect"    close the serial port and stay idle
+       action "status"        report the current serial link state
        action "tx"            encode a packet (op/fields/raw) and write to FAS
   {"type":"data_file", ...} — record ADC samples to a CSV in --data-dir:
        action "start_data_saving" (filename) / "stop_data_saving"
@@ -56,14 +58,23 @@ Console output published (on nova/console)
   {"type":"console_ports", "ports":[...]}    available serial ports
   {"type":"console_config","ok":..., "port":..., "baud":...}  reconfigure result
   {"type":"console_status","active":bool}    start/stop acknowledgement
+  {"type":"console_serial","connected":bool,"port":...,"baud":...,"error":...}
+                                             serial link state, published on
+                                             every connect/disconnect and on
+                                             an explicit "status" request
   {"type":"sound_upload_progress", "upload_id":..., "sent":..., "total":...}
   {"type":"sound_upload_result",   "upload_id":..., "ok":bool, "stage":...,
                                    "error":..., "clip_count":...}
 
 Dependencies: pip install paho-mqtt pyserial
 
+The serial port is optional: with no (or an unavailable) port the bridge still
+starts, connects to MQTT and serves console commands, so novaOps can list ports
+and pick one at runtime with a console "configure" command. A configured port
+that is missing or disappears mid-run is retried in the background.
+
 Usage:
-    python fas_bridge.py --port /dev/ttyUSB0 [--baud 460800]
+    python fas_bridge.py [--port /dev/ttyUSB0] [--baud 460800]
                          [--broker localhost:1883] [--node-id FAS]
                          [--publish-ms 50] [--verbosity 0|1|2]
                          [--imc-board-id N] [--ops-url http://host:8000]
@@ -303,6 +314,9 @@ BUZZER_OP_STOP = 3
 # Heartbeat timeout matching loops.cpp kBoardTimeoutS
 BOARD_TIMEOUT_S   = 3.0
 DISCOVERY_INTERVAL_S = 2.0
+# How long to wait before retrying a configured serial port that failed to open
+# or dropped out (unplugged adapter, port held by another process).
+SERIAL_RETRY_S    = 2.0
 # Drop an engine sensor from the published set if no fresh ADC sample has
 # arrived within this many seconds, so the bridge stops republishing values
 # for boards that have gone away.
@@ -978,6 +992,17 @@ def _parse_broker(broker: str) -> tuple[str, int]:
     return broker, 1883
 
 
+def _close_quietly(ser) -> None:
+    """Close a serial handle we are done with; a port that has already gone away
+    often raises on close, and there is nothing useful to do about it."""
+    if ser is None:
+        return
+    try:
+        ser.close()
+    except Exception:
+        pass
+
+
 def _resolve_fas_board_id(cmd: dict) -> int:
     if "board_id" in cmd:
         return int(cmd["board_id"])
@@ -1044,9 +1069,13 @@ class FasBridge:
         self._fsm_last_t = time.monotonic()
         self._console_active = False
 
-        # Serial — port/baud are mutable so the console can reconfigure them.
+        # Serial — port/baud are mutable so the console can reconfigure them, and
+        # _serial is None whenever no port is open. The bridge is fully functional
+        # without one: it still serves MQTT/console so novaOps can set the port.
         self._serial_lock = threading.Lock()
-        self._serial  = serial.Serial(port, baud, timeout=1)
+        self._serial: serial.Serial | None = None
+        self._serial_error: str | None = None
+        self._retry_at   = 0.0    # monotonic deadline for the next reopen attempt
         self._parser  = FrameParser(self._on_frame)
 
         # MQTT
@@ -1056,6 +1085,11 @@ class FasBridge:
         self._client.on_disconnect = self._on_disconnect
         host, port_num = _parse_broker(broker)
         self._client.connect(host, port_num, keepalive=60)
+
+        # Opened last so a failure is only reported, never fatal. The read loop
+        # keeps retrying a configured-but-unavailable port.
+        if port:
+            self._open_serial(port, baud)
 
     # ── MQTT callbacks ───────────────────────────────────────────────────────
 
@@ -1157,6 +1191,8 @@ class FasBridge:
           start | stop        — toggle RX frame streaming to nova/console
           list_ports          — enumerate serial ports → console_ports message
           configure           — switch serial port/baud and reconnect
+          disconnect          — close the serial port and stay idle
+          status              — report the current serial link state
           tx                  — encode a packet (op/fields/raw) and write to FAS
         """
         action = str(cmd.get("action", "")).lower()
@@ -1177,14 +1213,28 @@ class FasBridge:
             self._publish_console({"type": "console_ports", "ports": ports})
 
         elif action == "configure":
-            port = str(cmd.get("port", "")) or self._port
+            port = str(cmd.get("port", "")).strip() or self._port
             baud = int(cmd.get("baud", self._baud))
-            ok, err = self._reconnect_serial(port, baud)
+            if not port:
+                self._publish_console({
+                    "type": "console_config", "ok": False, "port": "", "baud": baud,
+                    "error": "no port given and none configured",
+                })
+                return
+            ok, err = self._open_serial(port, baud)
             self._publish_console({
                 "type": "console_config",
                 "ok": ok, "port": port, "baud": baud,
                 **({"error": err} if err else {}),
             })
+
+        elif action == "disconnect":
+            self._close_serial()
+            self._publish_console({"type": "console_config", "ok": True,
+                                   "port": "", "baud": self._baud})
+
+        elif action == "status":
+            self._publish_serial_state()
 
         elif action == "tx":
             frame = console_packet_to_frame(cmd, self._next_seq())
@@ -1194,14 +1244,16 @@ class FasBridge:
                                        "ok": False, "error": "unencodable packet"})
                 return
             can_id, data = frame
-            self._send_frame(can_id, data)
+            sent = self._send_frame(can_id, data)
             hex_frame = encode_frame(can_id, data).hex()
             decoded   = can_id_unpack(can_id)
             self._log(1, f"[bridge] console tx msg=0x{decoded['msg']:02x} "
-                         f"board={decoded['board_id']} ch={decoded['channel']}")
+                         f"board={decoded['board_id']} ch={decoded['channel']}"
+                         f"{'' if sent else ' (dropped: no serial port)'}")
             self._publish_console({
                 "type":      "console_tx",
-                "ok":        True,
+                "ok":        sent,
+                **({} if sent else {"error": "no serial port connected"}),
                 "can_id":    can_id,
                 "msg_type":  decoded["msg"],
                 "board_kind": decoded["kind"],
@@ -1230,25 +1282,72 @@ class FasBridge:
         self._log(1, f"[bridge] flight_event #{event['id']} {event['name']} "
                      f"({event['severity']})")
 
-    def _reconnect_serial(self, port: str, baud: int) -> tuple[bool, str | None]:
-        """Open a new serial port and swap it in. The read loop picks up the new
-        handle on its next iteration. Returns (ok, error_message)."""
+    # ── Serial link lifecycle ────────────────────────────────────────────────
+
+    def _serial_state(self) -> dict:
+        """Current link state, as published on nova/console and in the flight
+        payload so novaOps can show whether the bridge has a port."""
+        with self._serial_lock:
+            return {"connected": self._serial is not None,
+                    "port": self._port, "baud": self._baud,
+                    "error": self._serial_error}
+
+    def _publish_serial_state(self) -> None:
+        self._publish_console({"type": "console_serial", **self._serial_state()})
+
+    def _open_serial(self, port: str, baud: int) -> tuple[bool, str | None]:
+        """Open `port` and make it the active handle, closing any previous one.
+
+        Never raises — a failure is recorded, reported to novaOps and retried by
+        the read loop. Returns (ok, error_message)."""
         try:
             new_serial = serial.Serial(port, baud, timeout=1)
         except (serial.SerialException, ValueError, OSError) as e:
-            self._log(0, f"[bridge] serial reconfigure failed: {e}")
+            with self._serial_lock:
+                repeat = self._serial_error == str(e) and self._port == port
+                self._port, self._baud = port, baud
+                self._serial_error = str(e)
+                self._retry_at = time.monotonic() + SERIAL_RETRY_S
+            # Only shout the first time: the retry loop would otherwise spam.
+            self._log(2 if repeat else 0, f"[bridge] serial open failed on {port}: {e}")
+            if not repeat:
+                self._publish_serial_state()
             return False, str(e)
+
         with self._serial_lock:
             old = self._serial
             self._serial = new_serial
-            self._port = port
-            self._baud = baud
-        try:
-            old.close()
-        except Exception:
-            pass
-        self._log(1, f"[bridge] serial reconfigured -> {port} @ {baud} baud")
+            self._port, self._baud = port, baud
+            self._serial_error = None
+        _close_quietly(old)
+        self._log(1, f"[bridge] serial connected -> {port} @ {baud} baud")
+        self._publish_serial_state()
         return True, None
+
+    def _drop_serial(self, ser, reason: str) -> None:
+        """Retire a handle that failed mid-use. A no-op if it has already been
+        replaced (e.g. by a concurrent reconfigure), so the live port survives."""
+        with self._serial_lock:
+            if self._serial is not ser:
+                return
+            self._serial = None
+            self._serial_error = reason
+            self._retry_at = time.monotonic() + SERIAL_RETRY_S
+            port = self._port
+        _close_quietly(ser)
+        self._log(0, f"[bridge] serial port {port} lost: {reason}")
+        self._publish_serial_state()
+
+    def _close_serial(self) -> None:
+        """Explicitly disconnect and stay idle until a new port is configured."""
+        with self._serial_lock:
+            ser = self._serial
+            self._serial = None
+            self._serial_error = None
+            self._port = ""
+        _close_quietly(ser)
+        self._log(1, "[bridge] serial disconnected")
+        self._publish_serial_state()
 
     def _cmd_fas_port(self, cmd: dict) -> None:
         board_id = _resolve_fas_board_id(cmd)
@@ -1548,6 +1647,11 @@ class FasBridge:
     def _do_sound_upload(self, upload_id, name, chunks, total, crc32, rate, fmt):
         """Stream `chunks` (<=UL_BULK_MAX blocks totalling `total` bytes) to the
         FMC. Returns (ok, stage, error, clip_count)."""
+        with self._serial_lock:
+            connected = self._serial is not None
+        if not connected:
+            return False, "serial", "no serial port connected", None
+
         count0 = self._snd_status("clip_count", 0) or 0
 
         # Reset any half-finished prior upload; retry ABORT until the FMC reports
@@ -1815,14 +1919,22 @@ class FasBridge:
             self._seq = (self._seq + 1) & 0xFF
         return s
 
-    def _send_frame(self, can_id: int, data: bytes) -> None:
+    def _send_frame(self, can_id: int, data: bytes) -> bool:
+        """Write one frame. Returns False (without raising) when there is no port
+        or the write failed — a failed write retires the handle so the read loop
+        reconnects."""
         frame = encode_frame(can_id, data)
         with self._serial_lock:
             ser = self._serial
+        if ser is None:
+            self._log(2, "[bridge] no serial port — frame dropped")
+            return False
         try:
             ser.write(frame)
-        except serial.SerialException as e:
-            self._log(0, f"[bridge] serial write error: {e}")
+            return True
+        except (serial.SerialException, OSError) as e:
+            self._drop_serial(ser, str(e))
+            return False
 
     def _send_discovery_req(self) -> None:
         cid = can_id_pack(RT_MSG_DISCOVERY_REQ, RT_BOARD_GS, 0, 0, 0, self._next_seq())
@@ -1852,19 +1964,30 @@ class FasBridge:
     # ── Background loops ─────────────────────────────────────────────────────
 
     def _serial_read_loop(self) -> None:
-        self._log(1, f"[bridge] serial reader started on {self._port}")
+        self._log(1, f"[bridge] serial reader started on {self._port or '(no port)'}")
         while True:
             with self._serial_lock:
                 ser = self._serial
+                port, baud, retry_at = self._port, self._baud, self._retry_at
+
+            if ser is None:
+                # Either nothing is configured yet — idle until novaOps sends a
+                # console "configure" — or the configured port is due a retry.
+                if port and time.monotonic() >= retry_at:
+                    self._open_serial(port, baud)
+                else:
+                    time.sleep(0.2)
+                continue
+
             try:
                 chunk = ser.read(256)
                 if chunk:
                     self._parser.feed(chunk)
-            except serial.SerialException as e:
-                # A reconfigure may have closed this handle out from under us;
-                # loop around and pick up the current handle on the next pass.
-                self._log(2, f"[bridge] serial error (reconnecting?): {e}")
-                time.sleep(0.2)
+            except (serial.SerialException, OSError) as e:
+                # A reconfigure may have closed this handle out from under us, in
+                # which case _drop_serial leaves the new one alone; otherwise the
+                # port really went away and gets retried on the next passes.
+                self._drop_serial(ser, str(e))
 
     def _discovery_loop(self) -> None:
         self._log(2, "[bridge] discovery loop started")
@@ -1961,6 +2084,9 @@ class FasBridge:
                     "fas_aux":          fas_aux_snap,
                     "fas_rf":           fas_rf_snap,
                     "fas_sound":        fas_sound_snap,
+                    # Serial link state, so the frontend can show whether the
+                    # bridge actually has a port and which one.
+                    "fas_link":         self._serial_state(),
                 },
             }
             if engine_snap:
@@ -1981,7 +2107,9 @@ class FasBridge:
                 print(msg.encode("ascii", "replace").decode("ascii"), flush=True)
 
     def run(self) -> None:
-        self._log(1, f"[bridge] FAS bridge starting: {self._port} @ {self._baud} baud")
+        where = f"{self._port} @ {self._baud} baud" if self._port else \
+            "no serial port (set one from novaOps)"
+        self._log(1, f"[bridge] FAS bridge starting: {where}")
 
         for target in (self._serial_read_loop, self._discovery_loop, self._publish_loop):
             threading.Thread(target=target, daemon=True).start()
@@ -1996,8 +2124,11 @@ def main() -> None:
         description="FAS RS-422 to MQTT bridge — runs in place of novaGround's FAS integration",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument("--port",       required=True,
-                   help="Serial port connected to the FAS FMC bridge (e.g. /dev/ttyUSB0)")
+    p.add_argument("--port",       default=os.getenv("NOVA_FAS_PORT", ""),
+                   help="Serial port connected to the FAS FMC bridge (e.g. "
+                        "/dev/ttyUSB0). Optional: without it the bridge starts "
+                        "idle and waits for novaOps to set a port. Defaults to "
+                        "$NOVA_FAS_PORT")
     p.add_argument("--baud",       type=int, default=460800)
     p.add_argument("--broker",     default="localhost:1883")
     p.add_argument("--node-id",    default="FAS",

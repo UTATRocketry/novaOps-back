@@ -31,7 +31,8 @@ Listens on nova/command and nova/control:
     relay / servo / gpio   — GCS device commands (novaGround side).
     type "fas"             — FAS device commands, both the high-level
                              port/action shape and the direct op shape.
-    type "console"         — start/stop/list_ports/configure/tx.
+    type "console"         — start/stop/list_ports/configure/disconnect/
+                             status/tx.
     type "data_file"       — data-saving start/stop (on either topic).
     novaLock lockout       — logged from nova/control.
 
@@ -255,6 +256,11 @@ _fsm = FlightFsm()
 _imc_armed = False
 _imc_board_id = 0
 _console_active = False
+# Simulated serial link, mirroring fas_bridge's: the bridge can run with no port
+# and novaOps sets one with a console "configure" command. Starts connected so
+# the mock behaves like a healthy bridge unless the UI disconnects it.
+_serial_link = {"connected": True, "port": "/dev/ttySIM0", "baud": 460800,
+                "error": None}
 # Recent flight events (drained from the FSM and published), kept for the UI.
 _event_log: deque = deque(maxlen=100)
 # Per-EPB actuator state, keyed board_id → {channel_idx → state dict}, updated
@@ -797,6 +803,7 @@ def build_flight_packet() -> dict:
         "fas_aux": _aux_snapshot() if up("FMC:0") else {},
         "fas_rf": _rf_snapshot() if up("FMC:0") else {},
         "fas_sound": _sound_snapshot() if up("FMC:0") else {"status": {}, "clips": []},
+        "fas_link": dict(_serial_link),
     }
     return {"source": "FAS", "data": data}
 
@@ -842,7 +849,8 @@ _FAS_OPS = {"pwm_set", "load_sw_set", "imc_arm", "imc_disarm", "failsafe",
             "discover", "actuator_query", "buzzer", "sd_cmd",
             "rab_arm", "rab_disarm", "aux_power", "rf_cfg", "sound",
             "sound_upload", "pmb_charger"}
-_CONSOLE_ACTIONS = {"start", "stop", "list_ports", "configure", "tx"}
+_CONSOLE_ACTIONS = {"start", "stop", "list_ports", "configure", "disconnect",
+                    "status", "tx"}
 
 
 def validate_command(topic: str, payload) -> tuple[bool, list[str]]:
@@ -960,14 +968,39 @@ def _handle_console(client: mqtt.Client, cmd: dict) -> None:
         _publish_console(client, {"type": "console_ports", "ports": ports})
 
     elif action == "configure":
-        port = str(cmd.get("port", "/dev/ttySIM0"))
+        port = str(cmd.get("port", "")).strip() or "/dev/ttySIM0"
         baud = int(cmd.get("baud", 460800))
         print(f"[novaMock] console configure -> {port} @ {baud}")
+        with _lock:
+            _serial_link.update(connected=True, port=port, baud=baud, error=None)
+            state = dict(_serial_link)
         _publish_console(client, {"type": "console_config", "ok": True,
                                   "port": port, "baud": baud})
+        _publish_console(client, {"type": "console_serial", **state})
+
+    elif action == "disconnect":
+        print("[novaMock] console disconnect")
+        with _lock:
+            _serial_link.update(connected=False, port="", error=None)
+            state = dict(_serial_link)
+        _publish_console(client, {"type": "console_config", "ok": True,
+                                  "port": "", "baud": state["baud"]})
+        _publish_console(client, {"type": "console_serial", **state})
+
+    elif action == "status":
+        with _lock:
+            state = dict(_serial_link)
+        _publish_console(client, {"type": "console_serial", **state})
 
     elif action == "tx":
         op = cmd.get("op")
+        with _lock:
+            connected = _serial_link["connected"]
+        if not connected:
+            print(f"[novaMock] console tx op={op} dropped: no serial port")
+            _publish_console(client, {"type": "console_tx", "ok": False,
+                                      "error": "no serial port connected"})
+            return
         print(f"[novaMock] console tx op={op} board={cmd.get('board_id')} "
               f"ch={cmd.get('channel')}")
         _publish_console(client, {

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from app.models import CommandPayload
+from app.models import CONSOLE_ACTIONS, CommandPayload
 from app.services.role_service import ClientRole
 
 router = APIRouter()
@@ -97,7 +97,7 @@ async def _handle_websocket(websocket: WebSocket, ctx) -> None:
                 command = payload.get("command")
                 command = command if isinstance(command, dict) else payload
                 action = str(command.get("action", "")).lower()
-                if action not in {"start", "stop", "list_ports", "configure", "tx"}:
+                if action not in CONSOLE_ACTIONS:
                     await ctx.ws_manager.send_json(websocket, {
                         "type": "error",
                         "detail": f"Unknown console action '{action}'",

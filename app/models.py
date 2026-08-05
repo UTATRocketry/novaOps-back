@@ -5,6 +5,13 @@ from typing import Any, Literal
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 
+# Console actions the FAS bridge accepts on nova/command (see tools/fas_bridge.py
+# _cmd_console). "configure"/"disconnect" set or drop the bridge's serial port,
+# "status" asks it to republish the link state.
+CONSOLE_ACTIONS = frozenset(
+    {"start", "stop", "list_ports", "configure", "disconnect", "status", "tx"}
+)
+
 
 class SourceTarget(str, Enum):
     GCS = "GCS"
