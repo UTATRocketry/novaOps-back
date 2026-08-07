@@ -1,4 +1,5 @@
 import pytest
+from pydantic import ValidationError
 
 from app.models import (
     ActuatorType,
@@ -118,6 +119,69 @@ def test_gpio_device_type_is_supported() -> None:
     assert actuator.binding.node == "EPB_3"
     assert actuator.binding.gpio_channel == 2
     assert actuator.actions.gpio_commands == ["ARM", "DISARM"]
+
+
+def test_motor_type_defaults_labels_and_neutral_state() -> None:
+    config = SystemConfig.model_validate(
+        {
+            "Actuators": [
+                {
+                    "name": "LINACT",
+                    "type": "motor",
+                    "binding": {"target": "GCS", "relay_channel": 3, "reverse_relay_channel": 4},
+                    "actions": {"reversible": True},
+                },
+                {
+                    "name": "PUMP",
+                    "type": "motor",
+                    "binding": {"target": "GCS", "relay_channel": 7},
+                },
+            ]
+        }
+    )
+
+    linear, pump = config.actuators
+    assert linear.type == ActuatorType.MOTOR
+    assert linear.motor_labels == ["forward", "stop", "reverse"]
+    assert linear.motor_channels == [3, 4]
+    assert linear.motor_neutral_label == "stop"
+    assert linear.resolve_motor_state("reverse") == [0, 1]
+
+    assert pump.motor_labels == ["on", "off"]
+    assert pump.motor_channels == [7]
+    assert pump.motor_neutral_label == "off"
+
+
+def test_reversible_motor_requires_second_relay_channel() -> None:
+    with pytest.raises(ValidationError, match="reverse_relay_channel"):
+        SystemConfig.model_validate(
+            {
+                "Actuators": [
+                    {
+                        "name": "LINACT",
+                        "type": "motor",
+                        "binding": {"target": "GCS", "relay_channel": 3},
+                        "actions": {"reversible": True},
+                    }
+                ]
+            }
+        )
+
+
+def test_motor_state_labels_must_match_pattern_count() -> None:
+    with pytest.raises(ValidationError, match="needs exactly 3 state_labels"):
+        SystemConfig.model_validate(
+            {
+                "Actuators": [
+                    {
+                        "name": "LINACT",
+                        "type": "motor",
+                        "binding": {"target": "GCS", "relay_channel": 3, "reverse_relay_channel": 4},
+                        "actions": {"reversible": True, "state_labels": ["extend", "retract"]},
+                    }
+                ]
+            }
+        )
 
 
 def test_servo_default_position_alias_accepts_camel_case() -> None:

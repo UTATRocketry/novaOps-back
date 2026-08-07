@@ -57,6 +57,12 @@ class RuntimeState:
                 entry["arming"] = "armed"
             if lower in {"disarmed", "disarm"}:
                 entry["arming"] = "disarmed"
+        elif actuator.type == ActuatorType.MOTOR:
+            match = next(
+                (label for label in actuator.motor_labels if label.strip().lower() == lower),
+                None,
+            )
+            entry["motion"] = match if match is not None else state
         else:
             if lower in {"on", "off"}:
                 entry["power"] = lower
@@ -77,6 +83,8 @@ class RuntimeState:
                 init_state["position"] = "closed"
             elif actuator.type == ActuatorType.GPIO_DEVICE:
                 init_state["arming"] = "disarmed"
+            elif actuator.type == ActuatorType.MOTOR:
+                init_state["motion"] = actuator.motor_neutral_label
             else:
                 init_state["power"] = "off"
                 init_state["arming"] = "disarmed"

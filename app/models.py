@@ -32,6 +32,19 @@ class ActuatorType(str, Enum):
     POWERED_DEVICE = "powered_device"
     POWERED_GPIO_DEVICE = "powered_gpio_device"
     GPIO_DEVICE = "gpio_device"
+    MOTOR = "motor"
+
+
+# Relay patterns for `motor` actuators, one bit per driven relay channel, in the
+# same order as the type's state labels.
+#
+# A reversible motor is wired through two relays in a reverse-polarity pair, so
+# the middle (all-off) state is what leaves the motor coasting and is the only
+# safe state to pass through when changing direction.
+MOTOR_PATTERNS_REVERSIBLE = ([1, 0], [0, 0], [0, 1])
+MOTOR_PATTERNS_ONE_WAY = ([1], [0])
+MOTOR_LABELS_REVERSIBLE = ("forward", "stop", "reverse")
+MOTOR_LABELS_ONE_WAY = ("on", "off")
 
 
 class ConvertMethod(str, Enum):
@@ -85,6 +98,9 @@ class ActuatorBinding(BaseModel):
     relay_channel: int | None = None
     servo_channel: int | None = None
     gpio_channel: int | None = None
+    # Second relay of a reversible motor's reverse-polarity pair. `relay_channel`
+    # is the forward leg, this one the reverse leg.
+    reverse_relay_channel: int | None = None
 
 
 class ActuatorActions(BaseModel):
@@ -99,6 +115,24 @@ class ActuatorActions(BaseModel):
     relay_type: str | None = None  # "nominally_off" / "nominally_on"
     solenoid_type: str | None = None  # "nominally_closed" / "nominally_open"
     gpio_commands: list[str] = Field(default_factory=list)  # e.g. [ARM, DISARM]
+    # motor
+    reversible: bool = Field(
+        default=False,
+        description="Motor is driven by two relays wired for reverse polarity",
+    )
+    state_labels: list[str] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("stateLabels", "state_labels"),
+        description=(
+            "Motor state names, one per relay pattern: [forward, stop, reverse] "
+            "when reversible, [on, off] otherwise. Defaults to those names."
+        ),
+    )
+    invert_relays: bool = Field(
+        default=False,
+        description="Motor only — publish the complement of each relay pattern bit "
+        "(for active-low relay boards)",
+    )
 
     @model_validator(mode="after")
     def _servo_arrays_match(self) -> "ActuatorActions":
@@ -122,6 +156,69 @@ class ActuatorEntry(BaseModel):
                     "or binding.board_type"
                 )
         return self
+
+    @model_validator(mode="after")
+    def _motor_is_wired(self) -> "ActuatorEntry":
+        if self.type != ActuatorType.MOTOR:
+            return self
+
+        if self.binding.relay_channel is None:
+            raise ValueError(f"Motor '{self.name}' must define binding.relay_channel")
+        if self.actions.reversible and self.binding.reverse_relay_channel is None:
+            raise ValueError(
+                f"Reversible motor '{self.name}' must define binding.reverse_relay_channel"
+            )
+
+        labels = self.actions.state_labels
+        expected = len(self.motor_patterns)
+        if labels and len(labels) != expected:
+            raise ValueError(
+                f"Motor '{self.name}' needs exactly {expected} state_labels "
+                f"({'reversible' if self.actions.reversible else 'one-way'}), got {len(labels)}"
+            )
+        lowered = [label.strip().lower() for label in labels]
+        if len(set(lowered)) != len(lowered):
+            raise ValueError(f"Motor '{self.name}' has duplicate state_labels")
+        return self
+
+    @property
+    def motor_patterns(self) -> tuple[list[int], ...]:
+        return MOTOR_PATTERNS_REVERSIBLE if self.actions.reversible else MOTOR_PATTERNS_ONE_WAY
+
+    @property
+    def motor_labels(self) -> list[str]:
+        if self.actions.state_labels:
+            return list(self.actions.state_labels)
+        return list(MOTOR_LABELS_REVERSIBLE if self.actions.reversible else MOTOR_LABELS_ONE_WAY)
+
+    @property
+    def motor_channels(self) -> list[int]:
+        """Relay channels this motor drives, in relay-pattern bit order."""
+        channels = [self.binding.relay_channel]
+        if self.actions.reversible:
+            channels.append(self.binding.reverse_relay_channel)
+        return [channel for channel in channels if channel is not None]
+
+    @property
+    def motor_neutral_label(self) -> str:
+        """The label whose pattern de-energizes every relay (stop / off)."""
+        for label, pattern in zip(self.motor_labels, self.motor_patterns):
+            if not any(pattern):
+                return label
+        return self.motor_labels[-1]
+
+    def resolve_motor_state(self, state: str) -> list[int]:
+        """Map a requested state label to its energization pattern. 1 means "this
+        leg is driven"; `actions.invert_relays` is applied later, when the bits are
+        turned into wire-level relay states."""
+        requested = state.strip().lower()
+        for label, pattern in zip(self.motor_labels, self.motor_patterns):
+            if label.strip().lower() == requested:
+                return list(pattern)
+        raise ValueError(
+            f"Unsupported motor state '{state}' for actuator '{self.name}' "
+            f"(expected one of {', '.join(self.motor_labels)})"
+        )
 
 
 class CommandBinding(BaseModel):

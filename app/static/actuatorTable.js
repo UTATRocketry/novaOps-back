@@ -26,7 +26,14 @@ const ACTUATOR_TYPE_MAP = {
   powered_device: "poweredDevice",
   powered_gpio_device: "poweredGpioDevice",
   gpio_device: "gpioDevice",
+  motor: "motor",
 };
+
+// Must match MOTOR_LABELS_* / MOTOR_PATTERNS_* in app/models.py: a reversible
+// motor's two relays are wired for reverse polarity, so its middle state is the
+// all-off one.
+const MOTOR_LABELS_REVERSIBLE = ["forward", "stop", "reverse"];
+const MOTOR_LABELS_ONE_WAY = ["on", "off"];
 
 function normalizeActuator(raw) {
   const binding = raw.binding || {};
@@ -46,11 +53,29 @@ function normalizeActuator(raw) {
     relay_type: actions.relay_type ?? null,
     solenoid_type: actions.solenoid_type ?? null,
     default_position: actions.default_position ?? actions.defaultPosition ?? null,
+    reverseRelayID: binding.reverse_relay_channel ?? null,
+    reversible: actions.reversible === true,
+    state_labels: Array.isArray(actions.state_labels) ? actions.state_labels : [],
   };
 }
 
 function isServoType(type) {
   return type === "servo" || type === "servo3";
+}
+
+function isMotorType(type) {
+  return type === "motor";
+}
+
+function motorLabels(actuator) {
+  if (actuator.state_labels.length > 0) return actuator.state_labels;
+  return actuator.reversible ? MOTOR_LABELS_REVERSIBLE : MOTOR_LABELS_ONE_WAY;
+}
+
+// The all-relays-off state (index 1 of 3 when reversible, else the last of 2).
+function motorNeutralLabel(actuator) {
+  const labels = motorLabels(actuator);
+  return actuator.reversible ? labels[1] : labels[labels.length - 1];
 }
 
 function isGpioType(type) {
@@ -109,7 +134,8 @@ function defaultUiState(actuator) {
     powerState: needsPowerButton(actuator) ? "off" : null,
     armingState: isGpioType(actuator.actuator_type) ? "disarmed" : null,
     positionState: aliases.length > 0 ? aliases[0] : null,
-    enableState: needsEnableButton(actuator) ? "disabled" : null
+    enableState: needsEnableButton(actuator) ? "disabled" : null,
+    motionState: isMotorType(actuator.actuator_type) ? motorNeutralLabel(actuator) : null
   };
 }
 
@@ -138,16 +164,25 @@ function applyStateUpdate(actuator, stateValue) {
   if (!actuator || !stateValue) return;
 
   if (typeof stateValue === "object") {
-    const { power, enable, arming, position } = stateValue;
+    const { power, enable, arming, position, motion } = stateValue;
     if (power) applyStateUpdate(actuator, power);
     if (enable) applyStateUpdate(actuator, enable);
     if (arming) applyStateUpdate(actuator, arming);
     if (position) applyStateUpdate(actuator, position);
+    if (motion) applyStateUpdate(actuator, motion);
     return;
   }
   const state = String(stateValue);
   const lower = state.toLowerCase();
   const ui = ensureUiState(actuator);
+
+  // Checked before on/off so a one-way motor's own "on"/"off" labels aren't
+  // swallowed by the power-button branch below.
+  if (isMotorType(actuator.actuator_type)) {
+    const label = motorLabels(actuator).find((l) => String(l).toLowerCase() === lower);
+    if (label) ui.motionState = label;
+    return;
+  }
 
   if (lower === "on" || lower === "off") {
     if (ui.powerState !== null) {
@@ -305,6 +340,22 @@ function renderActuators(actuators) {
         requiresPower: needsPowerButton(actuator)
       });
       stateCell.appendChild(enableBtn);
+    }
+
+    if (isMotorType(actuator.actuator_type)) {
+      const neutral = motorNeutralLabel(actuator);
+      motorLabels(actuator).forEach((label) => {
+        const btn = document.createElement("button");
+        const active = ui.motionState === label;
+        btn.textContent = label;
+        if (active && label === neutral) {
+          setButtonStyle(btn, true, "red", "darkred", "gray", "black");
+        } else {
+          setButtonStyle(btn, active, "green", "darkgreen", "gray", "black");
+        }
+        btn.onclick = () => onStateAction(actuator, label);
+        stateCell.appendChild(btn);
+      });
     }
 
     if (isGpioType(actuator.actuator_type)) {

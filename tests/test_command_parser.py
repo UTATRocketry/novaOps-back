@@ -126,6 +126,91 @@ def test_gcs_powered_gpio_on_off_uses_relay_channel() -> None:
     ]
 
 
+def test_gcs_reversible_motor_drives_both_relays_break_before_make() -> None:
+    config = _config(
+        [
+            {
+                "name": "LINACT",
+                "type": "motor",
+                "binding": {"target": "GCS", "relay_channel": 3, "reverse_relay_channel": 4},
+                "actions": {"reversible": True, "state_labels": ["extend", "hold", "retract"]},
+            }
+        ]
+    )
+    parser = CommandParser(config)
+
+    # The de-energized leg is always commanded first so the reverse-polarity
+    # pair is never closed on both legs.
+    assert parser.parse(CommandPayload(type="motor", name="LINACT", state="extend")) == [
+        {"type": "relay", "id": 4, "state": 0},
+        {"type": "relay", "id": 3, "state": 1},
+    ]
+    assert parser.parse(CommandPayload(type="motor", name="LINACT", state="hold")) == [
+        {"type": "relay", "id": 3, "state": 0},
+        {"type": "relay", "id": 4, "state": 0},
+    ]
+    assert parser.parse(CommandPayload(type="motor", name="LINACT", state="retract")) == [
+        {"type": "relay", "id": 3, "state": 0},
+        {"type": "relay", "id": 4, "state": 1},
+    ]
+
+
+def test_gcs_one_way_motor_uses_single_relay_with_default_labels() -> None:
+    config = _config(
+        [
+            {
+                "name": "PUMP",
+                "type": "motor",
+                "binding": {"target": "GCS", "relay_channel": 7},
+            }
+        ]
+    )
+    parser = CommandParser(config)
+
+    assert parser.parse(CommandPayload(type="motor", name="PUMP", state="on")) == [
+        {"type": "relay", "id": 7, "state": 1}
+    ]
+    assert parser.parse(CommandPayload(type="motor", name="PUMP", state="off")) == [
+        {"type": "relay", "id": 7, "state": 0}
+    ]
+
+
+def test_motor_invert_relays_flips_wire_states_but_not_ordering() -> None:
+    config = _config(
+        [
+            {
+                "name": "LINACT",
+                "type": "motor",
+                "binding": {"target": "GCS", "relay_channel": 3, "reverse_relay_channel": 4},
+                "actions": {"reversible": True, "invert_relays": True},
+            }
+        ]
+    )
+    parser = CommandParser(config)
+
+    assert parser.parse(CommandPayload(type="motor", name="LINACT", state="reverse")) == [
+        {"type": "relay", "id": 3, "state": 1},
+        {"type": "relay", "id": 4, "state": 0},
+    ]
+
+
+def test_motor_rejects_unknown_state_label() -> None:
+    config = _config(
+        [
+            {
+                "name": "LINACT",
+                "type": "motor",
+                "binding": {"target": "GCS", "relay_channel": 3, "reverse_relay_channel": 4},
+                "actions": {"reversible": True, "state_labels": ["extend", "hold", "retract"]},
+            }
+        ]
+    )
+    parser = CommandParser(config)
+
+    with pytest.raises(ValueError, match="Unsupported motor state"):
+        parser.parse(CommandPayload(type="motor", name="LINACT", state="open"))
+
+
 # --- FAS path: abstract dict output ---
 
 def test_fas_solenoid_emits_abstract_relay_dict() -> None:
@@ -210,6 +295,31 @@ def test_fas_gpio_device_emits_arm_disarm_gpio_action() -> None:
     ]
     assert parser.parse(CommandPayload(type="gpio_device", name="IMC-V", state="disarm")) == [
         {"type": "fas", "node": "EPB_3", "port": "gpio", "channel": 2, "action": "disarm"}
+    ]
+
+
+def test_fas_reversible_motor_emits_relay_actions() -> None:
+    config = _config(
+        [
+            {
+                "name": "LINACT",
+                "type": "motor",
+                "binding": {
+                    "target": "FAS",
+                    "board_type": "EPB",
+                    "board_id": 1,
+                    "relay_channel": 3,
+                    "reverse_relay_channel": 4,
+                },
+                "actions": {"reversible": True, "state_labels": ["extend", "hold", "retract"]},
+            }
+        ]
+    )
+    parser = CommandParser(config)
+
+    assert parser.parse(CommandPayload(type="motor", name="LINACT", state="retract")) == [
+        {"type": "fas", "board_type": "EPB", "board_id": 1, "port": "relay", "channel": 3, "action": "off"},
+        {"type": "fas", "board_type": "EPB", "board_id": 1, "port": "relay", "channel": 4, "action": "on"},
     ]
 
 

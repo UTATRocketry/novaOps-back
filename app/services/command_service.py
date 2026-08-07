@@ -76,6 +76,20 @@ class CommandParser:
         return 1 if CommandParser._is_on_state(state) else 0
 
     @staticmethod
+    def _motor_relay_steps(actuator: ActuatorEntry, state: str) -> list[tuple[int, int]]:
+        """Return (relay_channel, relay_state) pairs for a motor state label.
+
+        De-energized legs are emitted first ("break before make") so a reversible
+        pair driven through reverse polarity is never closed on both legs, even
+        for the instant between the two relay commands.
+        """
+        pattern = actuator.resolve_motor_state(state)
+        steps = sorted(zip(actuator.motor_channels, pattern), key=lambda step: step[1])
+        if actuator.actions.invert_relays:
+            return [(channel, 1 - value) for channel, value in steps]
+        return steps
+
+    @staticmethod
     def _resolve_gpio_channel(binding) -> int | None:
         return binding.gpio_channel if binding.gpio_channel is not None else binding.relay_channel
 
@@ -118,6 +132,12 @@ class CommandParser:
             if gpio_channel is None:
                 raise ValueError(f"GPIO actuator '{actuator.name}' does not define gpio_channel")
             return [{"type": "gpio", "id": gpio_channel, "state": self._resolve_gpio_state(state)}]
+
+        if actuator.type == ActuatorType.MOTOR:
+            return [
+                {"type": "relay", "id": channel, "state": relay_state}
+                for channel, relay_state in self._motor_relay_steps(actuator, state)
+            ]
 
         if actuator.type in self.RELAY_TYPES:
             relay_state = self._resolve_relay_state(state, actions.relay_type, actions.solenoid_type)
@@ -201,6 +221,12 @@ class CommandParser:
                 commands.append(fas(port="relay", channel=binding.relay_channel, action="on"))
             commands.append(fas(port="servo", channel=binding.servo_channel, action=state, value=int(micros)))
             return commands
+
+        if actuator.type == ActuatorType.MOTOR:
+            return [
+                fas(port="relay", channel=channel, action="on" if relay_state else "off")
+                for channel, relay_state in self._motor_relay_steps(actuator, state)
+            ]
 
         if actuator.type in (ActuatorType.SOLENOID, ActuatorType.POWERED_DEVICE):
             power = self._resolve_power(state, actions)
