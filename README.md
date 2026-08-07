@@ -61,6 +61,14 @@ Environment variables:
 ```
 NOVA_MQTT_BROKER   MQTT broker host (default: localhost)
 NOVA_MQTT_PORT     MQTT broker port  (default: 1883)
+
+NOVA_PUBLIC_BASE_URL      Base URL the FAS bridge should use to download staged
+                          soundboard clips (default: the requesting URL, which
+                          may be localhost and unreachable from the bridge host)
+NOVA_CLIP_TTL_S           Seconds a staged clip is kept if nobody fetches it (900)
+NOVA_SOUND_CLIP_MAX_BYTES Sanity cap on a transcoded clip (default 8 MiB; the
+                          real limit is the soundboard's free flash)
+NOVA_SOUND_SOURCE_MAX_BYTES Sanity cap on the uploaded source file (default 64 MiB)
 ```
 
 ### Command envelope
@@ -187,8 +195,26 @@ Publishes `nova/telemetry` in the same format as novaGround. Translates inbound 
 
 ```bash
 pip install paho-mqtt pyserial
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned
+
 python tools/fas_bridge.py --port /dev/ttyUSB0 --broker localhost:1883
 python tools/fas_bridge.py --help
+```
+
+`--port` is optional (it also reads `NOVA_FAS_PORT`). Started without one, the
+bridge runs idle on MQTT until novaOps picks a port — send a console
+`list_ports` then `configure` command (`POST /api/console/command`, or a
+`console_command` WebSocket message). A configured port that is missing or gets
+unplugged is retried in the background instead of taking the bridge down; the
+link state is published on `nova/console` as `console_serial` and mirrored in
+flight telemetry as `data.fas_link`.
+
+Soundboard clip uploads are fetched over HTTP from the backend rather than
+carried over MQTT, so when the bridge runs on a different host than the backend
+give it the backend's address (or set `NOVA_OPS_URL`):
+
+```bash
+python tools/fas_bridge.py --port COM3 --broker 10.0.0.5:1883 --ops-url http://10.0.0.5:8000
 ```
 
 ---
