@@ -23,8 +23,8 @@ Telemetry published
                           fas_pmb:          PMB power/vmon/temp/charger/chg_cfg
                           fas_imc:          IMC arm/disarm state
                           fas_rab:          RAB recovery-arming status (A/B)
-                          fas_aux:          FMC aux (RunCam power + GNSS PPS)
-                          fas_rf:           FMC RF telemetry rate/power mode
+                          fas_aux:          FMC aux (camera + RF amplifier, GNSS PPS)
+                          fas_radio_cfg:    FMC vehicle-radio config read-back
                           fas_sound:        soundboard status + clip directory
   All message types in gs/protocol.py are decoded via decode_payload().
 
@@ -34,7 +34,9 @@ Inbound commands handled (on nova/command)
        discover, actuator_query, buzzer (DEPRECATED FMC buzzer; a "notes" array
        streams a whole melody as BEGIN/NOTE.../PLAY), sd_cmd (FMC SD logger rate /
        clear), rab_arm / rab_disarm (recovery arming board, board_id 0=A/1=B),
-       aux_power (RFD / RunCam load switch), rf_cfg (RF telemetry rate/power mode),
+       aux_power (radio / RunCam / RF-amplifier rail), runcam_record (RunCam
+       record start/stop with an auto-stop timeout), radio_config (the full
+       STM32WL vehicle-radio profile, one 88-byte bulk record, wired link only),
        sound (soundboard: play/stop/volume/tone/list/clear — buzzer replacement),
        sound_upload (download the staged clip from the backend's url/path — see
        --ops-url — then stream it to the FMC as BEGIN/DATA/END, reporting
@@ -89,11 +91,13 @@ import os
 import struct
 import tempfile
 import threading
+import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
 import zlib
 import time
+from collections import namedtuple
 from enum import IntEnum
 
 import paho.mqtt.client as mqtt
@@ -172,15 +176,19 @@ RT_MSG_ACK                = 0x3F
 RT_MSG_RAB_POLL           = 0x05   # FMC -> RAB (addressed): request status
 RT_MSG_RAB_STATUS         = 0x06   # RAB -> FMC -> GS: rt_rab_status_t
 RT_MSG_RAB_DISARM         = 0x07   # FMC -> RAB (addressed): pulse GPIO_DISARM
-RT_MSG_FMC_AUX_POWER      = 0x08   # GS -> FMC: RFD / RunCam load switch on/off
-RT_MSG_FMC_AUX_STATUS     = 0x09   # FMC -> GS: RunCam power + GNSS PPS
-RT_MSG_FMC_RF_CFG         = 0x0A   # GS <-> FMC: RF telemetry rate/power mode
+RT_MSG_FMC_AUX_POWER      = 0x08   # GS -> FMC: modem / RunCam / RF-PA rail + record
+RT_MSG_FMC_AUX_STATUS     = 0x09   # FMC -> GS: camera + amplifier state, GNSS PPS
+# 0x0A carried the retired serial-radio rate/power mode. The FMC now ignores it
+# and the STM32WL profile lives in RT_MSG_FMC_RADIO_CONFIG, so this ID is
+# reserved: sending it is a protocol violation, not a no-op.
+RT_MSG_RESERVED_LEGACY_RF_CFG = 0x0A
 RT_MSG_FMC_SOUND_CMD      = 0x0B   # GS -> FMC: play/stop/clear/volume/list/tone
 RT_MSG_FMC_SOUND_BEGIN    = 0x0C   # GS -> FMC (bulk): start a clip upload
 RT_MSG_FMC_SOUND_DATA     = 0x0D   # GS -> FMC (bulk): raw clip bytes
 RT_MSG_FMC_SOUND_STATUS   = 0x0E   # FMC -> GS: usage / clip count / playing / busy
 RT_MSG_FMC_SOUND_CLIP     = 0x0F   # FMC -> GS (bulk): one per stored clip
 RT_MSG_PMB_CHG_CFG        = 0x3C   # PMB -> GS: configured charge limits (read-back)
+RT_MSG_FMC_RADIO_CONFIG   = 0x3D   # GS <-> FMC (bulk): full vehicle-radio config
 
 # Names for FMC vector sensors, keyed by msg type → snapshot field name
 FMC_VEC3_FIELDS = {
@@ -244,7 +252,11 @@ PMB_FLAG_BATT_SRC = 1 << 6
 PMB_FLAG_PROTECT = 1 << 7   # firmware battery UVLO/OV protect: converters cut
 
 # Charge-config flag bits (mirror RT_CHGCFG_FLAG_*)
-CHGCFG_FLAG_VLIMIT = 1 << 0   # firmware charge-voltage cutoff active
+CHGCFG_FLAG_VLIMIT = 1 << 0          # firmware charge-voltage cutoff active
+CHGCFG_FLAG_ENABLED = 1 << 1         # persisted automatic-charge intent
+CHGCFG_FLAG_PERSIST_ERROR = 1 << 2   # runtime state may differ from flash
+CHGCFG_FLAG_TARGETS_OK = 1 << 3      # direct I/V targets verified by readback
+CHGCFG_FLAG_CONTROL_UNKNOWN = 1 << 4 # LTC gate state cannot be proven
 
 # RAB status flag bits (mirror RT_RAB_FLAG_*)
 RAB_FLAG_DUAL         = 1 << 0   # RAB in dual-debug mode (one board answers A+B)
@@ -253,15 +265,29 @@ RAB_FLAG_FMC_RX       = 1 << 2   # link diag: RAB has RX'd FMC bytes within ~300
 RAB_FLAG_ARM_MISMATCH = 1 << 3   # RAB-local: commanded arm state != readback (>~1 s)
 RAB_FLAG_ARM_EXPECTED = 1 << 4   # RAB-local: current expected/commanded arm state
 
-# FMC aux-power device selector (mirror RT_AUX_DEV_*)
-RT_AUX_DEV_RFD    = 0
-RT_AUX_DEV_RUNCAM = 1
+# FMC aux-power device selector (mirror RT_AUX_DEV_*). Only RADIO is an FMC
+# pin; RUNCAM and RF_PA are EPB load switches the FMC is the single writer for,
+# and RUNCAM_REC is a RunCam Device Protocol record start/stop whose arg16 is
+# the auto-stop timeout in seconds (0 = record until stopped).
+RT_AUX_DEV_RADIO      = 0
+RT_AUX_DEV_RUNCAM     = 1
+RT_AUX_DEV_RF_PA      = 2
+RT_AUX_DEV_RUNCAM_REC = 3
 
-# RF telemetry rate/power mode (mirror RT_RF_RATE_*). Persisted on the FMC.
-RT_RF_RATE_LOW    = 0   # default, power-saving
-RT_RF_RATE_NORMAL = 1
-RT_RF_RATE_HIGH   = 2
-RF_RATE_NAMES = {0: "low", 1: "normal", 2: "high"}
+# Largest RunCam auto-stop the wire field can carry (mirror gs/protocol.py).
+FMC_RF_RUNCAM_AUTOSTOP_MAX_S = 43200
+
+# FMC aux status flag bits (mirror RT_AUX_FLAG_*). The rail states are the EPB's
+# own ACTUATOR_STATE echo as the FMC saw it, never the FMC's intent, so a board
+# that never answered reads "off" rather than a guess.
+AUX_FLAG_RUNCAM_POWERED   = 1 << 0
+AUX_FLAG_RUNCAM_PRESENT   = 1 << 1   # camera answered RCDP GET_DEVICE_INFO
+AUX_FLAG_RUNCAM_RECORDING = 1 << 2
+AUX_FLAG_RUNCAM_AUTOSTOP  = 1 << 3
+AUX_FLAG_RF_PA_REQUESTED  = 1 << 4   # operator master enable is set
+AUX_FLAG_RF_PA_ON         = 1 << 5
+AUX_FLAG_RF_PA_CYCLING    = 1 << 6   # the duty-cycle scheduler is running
+AUX_FLAG_RF_PA_INHIBIT    = 1 << 7   # held off: the modem is not ready/good
 
 # Soundboard command ops (mirror RT_SND_OP_*)
 SND_OP_STOP     = 0
@@ -301,9 +327,15 @@ SD_RATE_DIVS  = [1, 5, 10, 50, 100]
 RT_SD_CMD_SET_RATE = 0    # arg = 1..255 decimation divisor
 RT_SD_CMD_CLEAR    = 1    # reformat / clear the card
 
-# RFD900x status flag bits (mirror RT_RFD_FLAG_*)
-RFD_FLAG_POWERED = 1 << 0
-RFD_FLAG_ENABLED = 1 << 1
+# STM32WL vehicle-radio status flag bits (mirror RT_RADIO_STATUS_FLAG_*)
+RADIO_STATUS_FLAG_POWER_REQUESTED = 1 << 0
+RADIO_STATUS_FLAG_POWERED         = 1 << 1
+RADIO_STATUS_FLAG_READY           = 1 << 2
+RADIO_STATUS_FLAG_CONFIG_VALID    = 1 << 3
+RADIO_STATUS_FLAG_READBACK_MATCH  = 1 << 4
+RADIO_STATUS_FLAG_TX_ACTIVE       = 1 << 5
+RADIO_STATUS_FLAG_CLOCK_CALIBRATED = 1 << 6
+RADIO_STATUS_FLAG_FAULT           = 1 << 7
 
 # Buzzer command ops (mirror RT_BUZZER_OP_*)
 BUZZER_OP_BEGIN = 0
@@ -700,14 +732,22 @@ def decode_payload(msg: int, data: bytes) -> dict:
                 "rate_div": rate_div}
     if msg == RT_MSG_DEBUG_LOG:
         return {"text": data.rstrip(b"\x00").decode("ascii", errors="replace")}
-    if msg == RT_MSG_FMC_RADIO_STATUS and fits("<BBHI"):
-        flags, every_n, tx_frames, tx_bytes = struct.unpack_from("<BBHI", data, 0)
-        return {"powered": bool(flags & RFD_FLAG_POWERED),
-                "enabled": bool(flags & RFD_FLAG_ENABLED),
-                "every_n": every_n,
-                "tx_frames": tx_frames, 
-                "tx_bytes": tx_bytes
-            }
+    if msg == RT_MSG_FMC_RADIO_STATUS and fits("<BBBBHH"):
+        (flags, state, last_fault, queue_depth,
+         tx_accepted, tx_dropped) = struct.unpack_from("<BBBBHH", data, 0)
+        return {
+            "flags": flags, "state": state, "last_fault": last_fault,
+            "queue_depth": queue_depth, "tx_accepted": tx_accepted,
+            "tx_dropped": tx_dropped,
+            "power_requested": bool(flags & RADIO_STATUS_FLAG_POWER_REQUESTED),
+            "powered": bool(flags & RADIO_STATUS_FLAG_POWERED),
+            "ready": bool(flags & RADIO_STATUS_FLAG_READY),
+            "config_valid": bool(flags & RADIO_STATUS_FLAG_CONFIG_VALID),
+            "readback_matches": bool(flags & RADIO_STATUS_FLAG_READBACK_MATCH),
+            "tx_active": bool(flags & RADIO_STATUS_FLAG_TX_ACTIVE),
+            "clock_calibrated": bool(flags & RADIO_STATUS_FLAG_CLOCK_CALIBRATED),
+            "fault": bool(flags & RADIO_STATUS_FLAG_FAULT),
+        }
     if msg == RT_MSG_TIME_SYNC and fits("<II"):
         t_us, _ = struct.unpack_from("<II", data, 0)
         return {"t_us": t_us}
@@ -728,17 +768,39 @@ def decode_payload(msg: int, data: bytes) -> dict:
             "arm_mismatch": bool(flags & RAB_FLAG_ARM_MISMATCH),  # RAB-local expected != observed
             "arm_expected": bool(flags & RAB_FLAG_ARM_EXPECTED),  # RAB last commanded ARMED
         }
-    if msg == RT_MSG_FMC_AUX_STATUS and fits("<BBHI"):
-        runcam, pps_present, pps_count, pps_age = struct.unpack_from("<BBHI", data, 0)
-        return {"runcam_powered": bool(runcam), "pps_present": bool(pps_present),
-                "pps_count": pps_count, "pps_age_ms": pps_age}
-    if msg == RT_MSG_FMC_RF_CFG and fits("<BBHI"):
-        rate_mode, _, _, _ = struct.unpack_from("<BBHI", data, 0)
-        return {"rate_mode": rate_mode, "rate_name": RF_RATE_NAMES.get(rate_mode, "?")}
+    if msg == RT_MSG_FMC_AUX_STATUS and fits("<BBHHH"):
+        (flags, pps_present, pps_count, pps_age,
+         record_s) = struct.unpack_from("<BBHHH", data, 0)
+        return {
+            "aux_flags": flags,
+            # Rail states are the EPB's own ACTUATOR_STATE echo as the FMC saw
+            # it, never the FMC's intent, so an unanswered board reads "off"
+            # rather than a guess.
+            "runcam_powered": bool(flags & AUX_FLAG_RUNCAM_POWERED),
+            "runcam_present": bool(flags & AUX_FLAG_RUNCAM_PRESENT),
+            "runcam_recording": bool(flags & AUX_FLAG_RUNCAM_RECORDING),
+            "runcam_autostop": bool(flags & AUX_FLAG_RUNCAM_AUTOSTOP),
+            "runcam_record_s": (None if record_s == 0xFFFF else record_s),
+            "rf_pa_requested": bool(flags & AUX_FLAG_RF_PA_REQUESTED),
+            "rf_pa_on": bool(flags & AUX_FLAG_RF_PA_ON),
+            "rf_pa_cycling": bool(flags & AUX_FLAG_RF_PA_CYCLING),
+            "rf_pa_inhibited": bool(flags & AUX_FLAG_RF_PA_INHIBIT),
+            "pps_present": bool(pps_present),
+            "pps_count": pps_count, "pps_age_ms": pps_age,
+        }
+    if msg == RT_MSG_FMC_RADIO_CONFIG:
+        try:
+            return unpack_fmc_radio_config(data)
+        except ValueError as exc:
+            return {"config_decode_error": str(exc), "raw_hex": data.hex()}
     if msg == RT_MSG_PMB_CHG_CFG and fits("<BBBB4x"):
         i_set, v_set, cells, flags = struct.unpack_from("<BBBB4x", data, 0)
         return {"i_setting": i_set, "v_setting": v_set, "cells": cells,
-                "flags": flags, "vlimit": bool(flags & CHGCFG_FLAG_VLIMIT)}
+                "flags": flags, "vlimit": bool(flags & CHGCFG_FLAG_VLIMIT),
+                "enabled_intent": bool(flags & CHGCFG_FLAG_ENABLED),
+                "persist_error": bool(flags & CHGCFG_FLAG_PERSIST_ERROR),
+                "targets_ok": bool(flags & CHGCFG_FLAG_TARGETS_OK),
+                "control_unknown": bool(flags & CHGCFG_FLAG_CONTROL_UNKNOWN)}
     if msg == RT_MSG_FMC_SOUND_STATUS and fits("<BBBBHH"):
         flags, count, playing, pct, used_kb, cap_kb = struct.unpack_from("<BBBBHH", data, 0)
         return {
@@ -793,14 +855,297 @@ def _encode_rab_cmd(pulse_ms: int) -> bytes:
     return struct.pack("<HHI", pulse_ms & 0xFFFF, 0, 0)
 
 
-def _encode_aux_power(device: int, enable: bool) -> bytes:
-    # rt_fmc_aux_power_t: u8 device, u8 enable, 6 reserved
-    return struct.pack("<BB6x", device & 0xFF, 1 if enable else 0)
+# ── FMC vehicle-radio configuration (RT_MSG_FMC_RADIO_CONFIG, bulk only) ─────
+# An 88-byte FMC-authoritative record: the LoRa link, the callsign, the three
+# RF pressure channels, and the RF-chain duty cycle plus its EPB peripheral
+# bindings. Ported field-for-field from gs/protocol.py; the two must stay
+# byte-identical. Valid only on the wired bulk path — never sent over RF.
+FMC_RADIO_CONFIG_VERSION = 3
+FMC_RADIO_CONFIG_FMT = "<BBBBIIHHIIIIbBBB3B3BBB16sI4BHHHHHHB7x"
+FMC_RADIO_PRESSURE_SLOTS = 3
+FMC_RADIO_PRESSURE_UNUSED = 0xFF
+FMC_RADIO_PERIPHERAL_UNUSED = 0xFF
+FMC_RF_FLAG_DUTY_CYCLE = 1 << 0
+FMC_RF_FLAG_RUNCAM_AUTOSTOP = 1 << 1
+# Enable, not silence, so a cleared bit is quiet: a blank flash and every record
+# written before the bit existed both come up silent.
+FMC_RF_FLAG_BOOT_SOUND = 1 << 2
+# Powering the camera rail starts a recording; dropping it stops one.
+FMC_RF_FLAG_REC_ON_POWER = 1 << 3
+# Mirrors of the firmware's validation bounds (radio_config_store.h), so a bad
+# value is rejected here instead of becoming a failed transaction.
+FMC_RF_CYCLE_PERIOD_MIN_MS = 1000
+FMC_RF_CYCLE_PERIOD_MAX_MS = 60000
+FMC_RF_WARMUP_MAX_MS = 2000
+FMC_RF_TAIL_MAX_MS = 2000
+FMC_RF_ON_MAX_MS = 30000
+FMC_RADIO_CFG_GET = 0
+FMC_RADIO_CFG_SET_SAVE = 1
+FMC_RADIO_CFG_REQUEST = 0
+FMC_RADIO_CFG_FLAG_PERSISTED = 1 << 0
+FMC_RADIO_CFG_FLAG_LINK_READY = 1 << 1
+FMC_RADIO_CFG_FLAG_READBACK_MATCH = 1 << 2
+FMC_RADIO_CFG_FLAG_PLACEHOLDER_ID = 1 << 3
+FMC_RADIO_CFG_STATUS_NAMES = {
+    0: "request", 1: "accepted", 2: "applied", 3: "invalid",
+    4: "store_error", 5: "link_error", 6: "busy",
+}
+assert struct.calcsize(FMC_RADIO_CONFIG_FMT) == 88
+
+# Wire order of FMC_RADIO_CONFIG_FMT. Naming the fields keeps the decoder off
+# positional indices, which are what silently rot when the record changes shape.
+_FmcRadioConfigWire = namedtuple("_FmcRadioConfigWire", (
+    "op status version reserved0 transaction_id generation "
+    "network_id vehicle_node_id allocation_low_hz allocation_high_hz "
+    "lora_frequency_hz lora_bandwidth_hz lora_power_dbm lora_sf lora_cr "
+    "lora_preamble_symbols "
+    "pressure_board_0 pressure_board_1 pressure_board_2 "
+    "pressure_channel_0 pressure_channel_1 pressure_channel_2 "
+    "reserved1 flags callsign validation_error "
+    "rf_pa_board_id rf_pa_channel runcam_board_id runcam_channel "
+    "rf_cycle_period_ms rf_pa_warmup_ms rf_pa_tail_ms rf_pa_max_on_ms "
+    "rf_pa_min_off_ms runcam_autostop_s rf_flags"))
 
 
-def _encode_rf_cfg(rate_mode: int) -> bytes:
-    # rt_fmc_rf_cfg_t: u8 rate_mode, u8 reserved, u16 reserved, u32 reserved
-    return struct.pack("<BBHI", rate_mode & 0xFF, 0, 0, 0)
+def _rf_chain_defaults() -> dict:
+    """Mirror of fmc_radio_config_defaults()'s RF-chain block, so a patch that
+    omits the RF chain still produces a valid transaction instead of zeroes the
+    firmware would reject."""
+    return {
+        "pa_board_id": 1, "pa_channel": 1,
+        "runcam_board_id": 1, "runcam_channel": 0,
+        "cycle_period_ms": 4000, "warmup_ms": 150, "tail_ms": 50,
+        "max_on_ms": 1300, "min_off_ms": 2700,
+        "duty_cycle": True,
+        "runcam_autostop_s": 1800, "runcam_autostop": True,
+        "boot_sound": False, "rec_on_power": True,
+    }
+
+
+def _peripheral_pair(chain: dict, board_key: str, channel_key: str) -> tuple:
+    """One (board_id, channel) binding, or the unused sentinel pair."""
+    board = chain.get(board_key)
+    channel = chain.get(channel_key)
+    if board is None or channel is None:
+        return (FMC_RADIO_PERIPHERAL_UNUSED, FMC_RADIO_PERIPHERAL_UNUSED)
+    board = int(board)
+    channel = int(channel)
+    if board == FMC_RADIO_PERIPHERAL_UNUSED and channel == FMC_RADIO_PERIPHERAL_UNUSED:
+        return (FMC_RADIO_PERIPHERAL_UNUSED, FMC_RADIO_PERIPHERAL_UNUSED)
+    if not 0 <= board <= 7 or not 0 <= channel <= 1:
+        raise ValueError(f"{board_key}/{channel_key} must be EPB 0..7 channel 0..1")
+    return (board, channel)
+
+
+def _peripheral_binding(value: int):
+    """One decoded board_id/channel, or None where the peripheral is unfitted."""
+    return None if int(value) == FMC_RADIO_PERIPHERAL_UNUSED else int(value)
+
+
+def pack_fmc_radio_config(config: dict, *, op: int = FMC_RADIO_CFG_SET_SAVE,
+                          transaction_id: int = 0,
+                          status: int = FMC_RADIO_CFG_REQUEST,
+                          generation: int = 0, flags: int = 0,
+                          validation_error: int = 0) -> bytes:
+    """Encode the complete FMC vehicle-radio configuration bulk payload."""
+    lora = config["lora"]
+    if "pressure_channels" in config:
+        raw_pressure = config["pressure_channels"]
+    else:
+        raw_pressure = (
+            {"board_id": 0, "channel": 1},
+            {"board_id": 2, "channel": 0},
+            {"board_id": 4, "channel": 1},
+        )
+    if not isinstance(raw_pressure, (list, tuple)) or len(raw_pressure) > FMC_RADIO_PRESSURE_SLOTS:
+        raise ValueError("at most three pressure channel selectors are allowed")
+    pressure = []
+    seen_pressure = set()
+    for item in raw_pressure:
+        if not isinstance(item, dict):
+            raise ValueError("each pressure selector must be an object")
+        try:
+            board_id = int(item["board_id"])
+            channel = int(item["channel"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("each pressure selector requires integer board_id and channel") from exc
+        if not 0 <= board_id <= 7 or not 0 <= channel <= 1:
+            raise ValueError("pressure board_id must be 0..7 and channel must be 0..1")
+        selector = (board_id, channel)
+        if selector in seen_pressure:
+            raise ValueError("pressure channel selectors must be distinct")
+        seen_pressure.add(selector)
+        pressure.append({"board_id": board_id, "channel": channel})
+    pressure.extend(
+        {"board_id": FMC_RADIO_PRESSURE_UNUSED,
+         "channel": FMC_RADIO_PRESSURE_UNUSED}
+        for _ in range(FMC_RADIO_PRESSURE_SLOTS - len(pressure)))
+    callsign = str(config.get("callsign") or "XXXXXX").strip().upper()
+    if callsign == "NONE" or not callsign:
+        callsign = "XXXXXX"
+    encoded_callsign = callsign.encode("ascii")
+    if len(encoded_callsign) > 15 or any(ch in b",*\r\n" for ch in encoded_callsign):
+        raise ValueError("callsign must be 1..15 ASCII characters without delimiters")
+    coding_rate = int(str(lora.get("coding_rate", "4/5")).split("/")[-1]) - 4
+
+    chain = {**_rf_chain_defaults(), **dict(config.get("rf_chain") or {})}
+    pa_board, pa_channel = _peripheral_pair(chain, "pa_board_id", "pa_channel")
+    cam_board, cam_channel = _peripheral_pair(chain, "runcam_board_id",
+                                              "runcam_channel")
+    if (pa_board != FMC_RADIO_PERIPHERAL_UNUSED and
+            (pa_board, pa_channel) == (cam_board, cam_channel)):
+        raise ValueError(
+            "the RF amplifier and the RunCam cannot share one load switch")
+    cycle_period_ms = int(chain["cycle_period_ms"])
+    warmup_ms = int(chain["warmup_ms"])
+    tail_ms = int(chain["tail_ms"])
+    max_on_ms = int(chain["max_on_ms"])
+    min_off_ms = int(chain["min_off_ms"])
+    autostop_s = int(chain["runcam_autostop_s"])
+    for name, value, low, high in (
+        ("rf_chain.cycle_period_ms", cycle_period_ms,
+         FMC_RF_CYCLE_PERIOD_MIN_MS, FMC_RF_CYCLE_PERIOD_MAX_MS),
+        ("rf_chain.warmup_ms", warmup_ms, 0, FMC_RF_WARMUP_MAX_MS),
+        ("rf_chain.tail_ms", tail_ms, 0, FMC_RF_TAIL_MAX_MS),
+        ("rf_chain.max_on_ms", max_on_ms, 1, FMC_RF_ON_MAX_MS),
+        ("rf_chain.min_off_ms", min_off_ms, 0, FMC_RF_CYCLE_PERIOD_MAX_MS),
+        ("rf_chain.runcam_autostop_s", autostop_s, 0,
+         FMC_RF_RUNCAM_AUTOSTOP_MAX_S),
+    ):
+        if not low <= value <= high:
+            raise ValueError(f"{name} must be {low}..{high}")
+    # The same two feasibility rules the firmware enforces: a window has to
+    # leave room to actually transmit, and a period has to contain the window
+    # plus its mandated cool-down. Checking them here turns a rejected
+    # transaction into an immediate, explainable error.
+    if max_on_ms <= warmup_ms + tail_ms:
+        raise ValueError("rf_chain.max_on_ms must exceed warmup_ms + tail_ms")
+    if max_on_ms + min_off_ms > cycle_period_ms:
+        raise ValueError(
+            "rf_chain.max_on_ms + min_off_ms must fit inside cycle_period_ms")
+    rf_flags = 0
+    if chain.get("duty_cycle", True):
+        rf_flags |= FMC_RF_FLAG_DUTY_CYCLE
+    if chain.get("runcam_autostop", True):
+        rf_flags |= FMC_RF_FLAG_RUNCAM_AUTOSTOP
+    # A boot tone is an unattended noise on the pad, so it is opt-in; tying the
+    # recording to the camera rail is what an operator expects, so that is
+    # opt-out.
+    if chain.get("boot_sound", False):
+        rf_flags |= FMC_RF_FLAG_BOOT_SOUND
+    if chain.get("rec_on_power", True):
+        rf_flags |= FMC_RF_FLAG_REC_ON_POWER
+
+    return struct.pack(
+        FMC_RADIO_CONFIG_FMT,
+        int(op) & 0xFF, int(status) & 0xFF, FMC_RADIO_CONFIG_VERSION,
+        0, int(transaction_id) & 0xFFFFFFFF,
+        int(generation) & 0xFFFFFFFF, int(config.get("network_id", 0x5554)) & 0xFFFF,
+        int(config.get("vehicle_node_id", config.get("node_id", 1))) & 0xFFFF,
+        int(config["allocation_low_hz"]), int(config["allocation_high_hz"]),
+        int(lora["frequency_hz"]), int(lora["bandwidth_hz"]),
+        int(lora.get("power_dbm", -10)), int(lora.get("spreading_factor", 10)),
+        coding_rate, int(lora.get("preamble_symbols", 12)),
+        *(int(item["board_id"]) for item in pressure),
+        *(int(item["channel"]) for item in pressure),
+        0, int(flags) & 0xFF,
+        encoded_callsign.ljust(16, b"\x00"), int(validation_error) & 0xFFFFFFFF,
+        pa_board, pa_channel, cam_board, cam_channel,
+        cycle_period_ms, warmup_ms, tail_ms, max_on_ms, min_off_ms,
+        autostop_s, rf_flags,
+    )
+
+
+def unpack_fmc_radio_config(data: bytes) -> dict:
+    """Decode one complete FMC vehicle-radio configuration/read-back payload."""
+    if len(data) != struct.calcsize(FMC_RADIO_CONFIG_FMT):
+        raise ValueError(f"FMC radio config is {len(data)} bytes, expected 88")
+    v = _FmcRadioConfigWire._make(struct.unpack(FMC_RADIO_CONFIG_FMT, data))
+    # These two bytes carried the profile selector and the auto-scan flag in
+    # version 2. A sender that still populates them is describing a two-profile
+    # vehicle, so every field around them means something different from what
+    # this decoder would report. Refuse it instead of reinterpreting it.
+    if v.reserved0 or v.reserved1:
+        raise ValueError("FMC radio config sets a reserved byte; sender predates "
+                         "the single-profile record")
+    callsign = v.callsign.split(b"\x00", 1)[0].decode("ascii", "replace") or "XXXXXX"
+    boards = (v.pressure_board_0, v.pressure_board_1, v.pressure_board_2)
+    channels = (v.pressure_channel_0, v.pressure_channel_1, v.pressure_channel_2)
+    pressure = []
+    unused_seen = False
+    seen_pressure = set()
+    for board_id, channel in zip(boards, channels):
+        board_id = int(board_id)
+        channel = int(channel)
+        board_unused = board_id == FMC_RADIO_PRESSURE_UNUSED
+        channel_unused = channel == FMC_RADIO_PRESSURE_UNUSED
+        if board_unused or channel_unused:
+            if not (board_unused and channel_unused):
+                raise ValueError("FMC pressure selector has a partial unused sentinel")
+            unused_seen = True
+            continue
+        if unused_seen:
+            raise ValueError("FMC pressure selectors must precede unused slots")
+        if not 0 <= board_id <= 7 or not 0 <= channel <= 1:
+            raise ValueError("FMC pressure selector is outside board/channel range")
+        selector = (board_id, channel)
+        if selector in seen_pressure:
+            raise ValueError("FMC pressure selectors are not distinct")
+        seen_pressure.add(selector)
+        pressure.append({"board_id": board_id, "channel": channel})
+    config = {
+        "callsign": callsign,
+        "role": "VEHICLE_TX_ONLY",
+        "network_id": int(v.network_id),
+        "node_id": int(v.vehicle_node_id),
+        "vehicle_node_id": int(v.vehicle_node_id),
+        "allocation_low_hz": int(v.allocation_low_hz),
+        "allocation_high_hz": int(v.allocation_high_hz),
+        "lora": {
+            "frequency_hz": int(v.lora_frequency_hz), "modulation": "LORA",
+            "bandwidth_hz": int(v.lora_bandwidth_hz),
+            "power_dbm": int(v.lora_power_dbm),
+            "spreading_factor": int(v.lora_sf),
+            "coding_rate": f"4/{int(v.lora_cr) + 4}",
+            "preamble_symbols": int(v.lora_preamble_symbols),
+        },
+        "pressure_channels": pressure,
+        "rf_chain": {
+            "pa_board_id": _peripheral_binding(v.rf_pa_board_id),
+            "pa_channel": _peripheral_binding(v.rf_pa_channel),
+            "runcam_board_id": _peripheral_binding(v.runcam_board_id),
+            "runcam_channel": _peripheral_binding(v.runcam_channel),
+            "cycle_period_ms": int(v.rf_cycle_period_ms),
+            "warmup_ms": int(v.rf_pa_warmup_ms),
+            "tail_ms": int(v.rf_pa_tail_ms),
+            "max_on_ms": int(v.rf_pa_max_on_ms),
+            "min_off_ms": int(v.rf_pa_min_off_ms),
+            "runcam_autostop_s": int(v.runcam_autostop_s),
+            "duty_cycle": bool(v.rf_flags & FMC_RF_FLAG_DUTY_CYCLE),
+            "runcam_autostop": bool(v.rf_flags & FMC_RF_FLAG_RUNCAM_AUTOSTOP),
+            "boot_sound": bool(v.rf_flags & FMC_RF_FLAG_BOOT_SOUND),
+            "rec_on_power": bool(v.rf_flags & FMC_RF_FLAG_REC_ON_POWER),
+        },
+    }
+    return {
+        "op": int(v.op), "status": int(v.status),
+        "status_name": FMC_RADIO_CFG_STATUS_NAMES.get(int(v.status), "unknown"),
+        "version": int(v.version), "transaction_id": int(v.transaction_id),
+        "generation": int(v.generation), "flags": int(v.flags),
+        "persisted": bool(v.flags & FMC_RADIO_CFG_FLAG_PERSISTED),
+        "link_ready": bool(v.flags & FMC_RADIO_CFG_FLAG_LINK_READY),
+        "readback_matches": bool(v.flags & FMC_RADIO_CFG_FLAG_READBACK_MATCH),
+        "placeholder_id": bool(v.flags & FMC_RADIO_CFG_FLAG_PLACEHOLDER_ID),
+        "validation_error": int(v.validation_error), "config": config,
+    }
+
+
+def _encode_aux_power(device: int, enable: bool, arg16: int = 0) -> bytes:
+    # rt_fmc_aux_power_t: u8 device, u8 enable, u16 arg16, 4 reserved.
+    # arg16 is only read for RT_AUX_DEV_RUNCAM_REC, where it is the auto-stop
+    # timeout in seconds (0 = record until stopped).
+    return struct.pack("<BBH4x", device & 0xFF, 1 if enable else 0,
+                       int(arg16) & 0xFFFF)
 
 
 def _encode_sound_cmd(op: int, arg: int = 0, arg32: int = 0) -> bytes:
@@ -910,18 +1255,47 @@ def op_to_frame(op: str, cmd: dict, seq: int) -> tuple[int, bytes] | None:
         cid = can_id_pack(rab_msg, RT_BOARD_RAB, board_id, 0, 0, seq)
         return cid, _encode_rab_cmd(pulse_ms)
     if op == "aux_power":
-        # FMC aux load switch: RFD900x or RunCam on/off. Handled FMC-locally.
-        dev = str(cmd.get("device", "rfd")).lower()
-        device = RT_AUX_DEV_RUNCAM if dev in ("runcam", "cam") else RT_AUX_DEV_RFD
+        # FMC aux rail. Only "radio" is an FMC pin; "runcam" and "rf_pa" are EPB
+        # load switches the FMC is the single writer for. "rfd" is accepted as a
+        # deprecated alias for the vehicle modem so an older caller keeps working
+        # rather than silently addressing device 0 by luck.
+        dev = str(cmd.get("device", "radio")).lower()
+        device = {
+            "radio": RT_AUX_DEV_RADIO, "rfd": RT_AUX_DEV_RADIO,
+            "modem": RT_AUX_DEV_RADIO,
+            "runcam": RT_AUX_DEV_RUNCAM, "cam": RT_AUX_DEV_RUNCAM,
+            "rf_pa": RT_AUX_DEV_RF_PA, "pa": RT_AUX_DEV_RF_PA,
+            "amp": RT_AUX_DEV_RF_PA,
+        }.get(dev)
+        if device is None:
+            raise ValueError(f"aux_power device must be radio/runcam/rf_pa, got {dev!r}")
         enable = bool(cmd.get("enable", False))
         cid = can_id_pack(RT_MSG_FMC_AUX_POWER, RT_BOARD_FMC, board_id, 0, 0, seq)
         return cid, _encode_aux_power(device, enable)
-    if op == "rf_cfg":
-        # RF telemetry rate/power mode. The FMC persists this in flash; only send
-        # on an explicit operator change (LOW default is authoritative on the FMC).
-        mode = int(cmd.get("mode", cmd.get("rate_mode", RT_RF_RATE_LOW)))
-        cid = can_id_pack(RT_MSG_FMC_RF_CFG, RT_BOARD_FMC, board_id, 0, 0, seq)
-        return cid, _encode_rf_cfg(mode)
+    if op == "runcam_record":
+        # RunCam Device Protocol record start/stop. Distinct from powering the
+        # camera rail: with rec_on_power set (the firmware default) the rail
+        # coming up already starts a recording.
+        enable = bool(cmd.get("enable", False))
+        # arg16 = 0 means record until stopped, so a request that overflows the
+        # field must clamp to the maximum rather than wrap round to "never".
+        autostop_s = max(0, min(FMC_RF_RUNCAM_AUTOSTOP_MAX_S,
+                                int(cmd.get("autostop_s", 0))))
+        cid = can_id_pack(RT_MSG_FMC_AUX_POWER, RT_BOARD_FMC, board_id, 0, 0, seq)
+        return cid, _encode_aux_power(RT_AUX_DEV_RUNCAM_REC, enable, autostop_s)
+    if op == "radio_config":
+        # The complete FMC vehicle-radio profile, as one 88-byte bulk record.
+        # Wired link only — the firmware never accepts this over RF.
+        cfg = cmd.get("cfg")
+        if not isinstance(cfg, dict):
+            raise ValueError("radio_config requires a cfg object")
+        cfg_op = (FMC_RADIO_CFG_GET
+                  if str(cmd.get("action", "set")).lower() == "get"
+                  else FMC_RADIO_CFG_SET_SAVE)
+        payload = pack_fmc_radio_config(
+            cfg, op=cfg_op, transaction_id=int(cmd.get("transaction_id", 0)))
+        cid = can_id_pack(RT_MSG_FMC_RADIO_CONFIG, RT_BOARD_FMC, board_id, 0, 0, seq)
+        return cid, payload
     if op == "sound":
         # Soundboard control (buzzer replacement). action = play/stop/volume/tone/
         # list/clear. Clip upload (BEGIN/DATA bulk streaming) is not handled here.
@@ -971,7 +1345,10 @@ def console_packet_to_frame(pkt: dict, seq: int) -> tuple[int, bytes] | None:
         return (raw + _pad8())[:8]
 
     if "op" in pkt:
-        return op_to_frame(str(pkt["op"]), pkt, seq)
+        try:
+            return op_to_frame(str(pkt["op"]), pkt, seq)
+        except ValueError:
+            return None
     if "can_id" in pkt:
         return int(pkt["can_id"]) & 0x1FFFFFFF, parse_data()
     if "msg" in pkt:
@@ -1059,7 +1436,7 @@ class FasBridge:
         # FMC aux (RunCam + PPS), FMC RF rate/power mode, and soundboard.
         self._fas_rab: dict[str, dict] = {}
         self._fas_aux: dict = {}
-        self._fas_rf: dict = {}
+        self._fas_radio_cfg: dict = {}
         self._fas_sound: dict = {"status": {}, "clips": {}}  # clips: idx -> clip dict
         # Soundboard clip upload runs on its own thread; only one at a time.
         self._upload_lock = threading.Lock()
@@ -1399,7 +1776,13 @@ class FasBridge:
         if op == "sound_upload":
             self._cmd_sound_upload(cmd)
             return
-        frame = op_to_frame(op, cmd, self._next_seq())
+        try:
+            frame = op_to_frame(op, cmd, self._next_seq())
+        except ValueError as e:
+            # A rejected payload is not an unknown op, and saying so is the
+            # difference between "typo" and "your radio config is invalid".
+            self._log(0, f"[bridge] fas op={op!r} rejected: {e}")
+            return
         if frame is None:
             self._log(2, f"[bridge] fas: unknown op {op!r}")
             return
@@ -1889,12 +2272,19 @@ class FasBridge:
             with self._lock:
                 self._fas_aux = {**d, "last_seen": now}
             self._log(2, f"[bridge] FMC aux runcam={d.get('runcam_powered')} "
-                         f"pps={d.get('pps_present')}")
+                         f"rec={d.get('runcam_recording')} "
+                         f"pa={d.get('rf_pa_on')} pps={d.get('pps_present')}")
 
-        elif msg == RT_MSG_FMC_RF_CFG:
+        elif msg == RT_MSG_FMC_RADIO_CONFIG:
             with self._lock:
-                self._fas_rf = {**d, "last_seen": now}
-            self._log(2, f"[bridge] FMC RF mode={d.get('rate_name')}")
+                self._fas_radio_cfg = {**d, "last_seen": now}
+            if "config_decode_error" in d:
+                self._log(0, "[bridge] FMC radio config undecodable: "
+                             f"{d['config_decode_error']}")
+            else:
+                self._log(2, f"[bridge] FMC radio config {d.get('status_name')} "
+                             f"txn={d.get('transaction_id')} "
+                             f"persisted={d.get('persisted')}")
 
         elif msg == RT_MSG_FMC_SOUND_STATUS:
             with self._lock:
@@ -1933,7 +2323,7 @@ class FasBridge:
             ser.write(frame)
             return True
         except (serial.SerialException, OSError) as e:
-            self._drop_serial(ser, str(e))
+            self._drop_serial(ser, f"write failed: {e}")
             return False
 
     def _send_discovery_req(self) -> None:
@@ -1981,13 +2371,26 @@ class FasBridge:
 
             try:
                 chunk = ser.read(256)
-                if chunk:
-                    self._parser.feed(chunk)
             except (serial.SerialException, OSError) as e:
                 # A reconfigure may have closed this handle out from under us, in
                 # which case _drop_serial leaves the new one alone; otherwise the
                 # port really went away and gets retried on the next passes.
                 self._drop_serial(ser, str(e))
+                continue
+
+            if chunk:
+                # Deliberately outside the read's except: pyserial's
+                # SerialException subclasses OSError, so catching OSError around
+                # the decode too would let an unrelated fault downstream of
+                # feed() -- a malformed payload, or the MQTT publish _on_frame
+                # makes while the console streams -- retire a healthy port and
+                # show up in the UI as a link flap.
+                try:
+                    self._parser.feed(chunk)
+                except Exception:
+                    detail = traceback.format_exc().strip().splitlines()[-1]
+                    self._log(0, f"[bridge] frame handling failed ({detail}) — "
+                                 "port kept, frame dropped")
 
     def _discovery_loop(self) -> None:
         self._log(2, "[bridge] discovery loop started")
@@ -2038,7 +2441,8 @@ class FasBridge:
                     for k, v in self._fas_rab.items()
                 }
                 fas_aux_snap = {kk: vv for kk, vv in self._fas_aux.items() if kk != "last_seen"}
-                fas_rf_snap = {kk: vv for kk, vv in self._fas_rf.items() if kk != "last_seen"}
+                fas_radio_cfg_snap = {kk: vv for kk, vv in self._fas_radio_cfg.items()
+                                      if kk != "last_seen"}
                 fas_sound_snap = {
                     "status": dict(self._fas_sound.get("status", {})),
                     "clips": [self._fas_sound["clips"][i]
@@ -2082,7 +2486,7 @@ class FasBridge:
                     "fas_fsm":          fas_fsm_snap,
                     "fas_rab":          fas_rab_snap,
                     "fas_aux":          fas_aux_snap,
-                    "fas_rf":           fas_rf_snap,
+                    "fas_radio_cfg":    fas_radio_cfg_snap,
                     "fas_sound":        fas_sound_snap,
                     # Serial link state, so the frontend can show whether the
                     # bridge actually has a port and which one.
@@ -2129,7 +2533,7 @@ def main() -> None:
                         "/dev/ttyUSB0). Optional: without it the bridge starts "
                         "idle and waits for novaOps to set a port. Defaults to "
                         "$NOVA_FAS_PORT")
-    p.add_argument("--baud",       type=int, default=460800)
+    p.add_argument("--baud",       type=int, default=115200)
     p.add_argument("--broker",     default="localhost:1883")
     p.add_argument("--node-id",    default="FAS",
                    help="MQTT client ID (engine telemetry source is always 'FAS')")

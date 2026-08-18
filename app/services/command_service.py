@@ -18,7 +18,8 @@ from app.models import (
     FasBuzzerPayload,
     FasChargerPayload,
     FasRabPayload,
-    FasRfPayload,
+    FasRadioConfigPayload,
+    FasRuncamRecordPayload,
     FasSdPayload,
     FasSoundPayload,
     SourceTarget,
@@ -362,9 +363,22 @@ class CommandService:
         self._ctx.mqtt_service.publish_device_commands([command])
         return [command]
 
-    def apply_fas_rf(self, payload: FasRfPayload) -> list[dict]:
+    def apply_fas_runcam_record(self, payload: FasRuncamRecordPayload) -> list[dict]:
         board = self._fas_board(payload.node or "FMC_0")
-        command = {"type": "fas", **board, "op": "rf_cfg", "mode": payload.mode}
+        command = {
+            "type": "fas", **board, "op": "runcam_record",
+            "enable": payload.enable, "autostop_s": payload.autostop_s,
+        }
+        self._ctx.mqtt_service.publish_device_commands([command])
+        return [command]
+
+    def apply_fas_radio_config(self, payload: FasRadioConfigPayload) -> list[dict]:
+        board = self._fas_board(payload.node or "FMC_0")
+        command = {
+            "type": "fas", **board, "op": "radio_config",
+            "action": payload.action, "transaction_id": payload.transaction_id,
+            "cfg": payload.cfg,
+        }
         self._ctx.mqtt_service.publish_device_commands([command])
         return [command]
 

@@ -23,7 +23,7 @@ Publishes:
     nova/telemetry/flight  — source="FAS", a single nested snapshot under
                        "data": fas_boards / fas_actuators / fas_sensors /
                        fas_board_status / fas_fmc / fas_pmb / fas_imc / fas_fsm /
-                       fas_rab / fas_aux / fas_rf / fas_sound.
+                       fas_rab / fas_aux / fas_radio_cfg / fas_sound.
     nova/console           — console responses, and (while console mode is on)
                        a mocked "fas_frame" RX stream.
 
@@ -287,11 +287,65 @@ SND_FLAG_TONE         = 1 << 3
 # frontend alarm). rx = rolling FMC-RX byte counter (link liveness).
 _rab = {0: {"expected": False, "armed": False, "rx": 0},
         1: {"expected": False, "armed": False, "rx": 0}}
-# FMC aux load switches. RFD defaults on (radio mirrors telemetry), RunCam off.
-_aux = {"rfd": True, "runcam": False}
-# RF telemetry rate/power mode, PERSISTED on the FMC. Default LOW, like firmware.
-_rf_mode = 0   # 0 = low (default), 1 = normal, 2 = high
-_RF_RATE_NAMES = {0: "low", 1: "normal", 2: "high"}
+# FMC aux rails. "radio" is the STM32WL modem's own FMC pin; runcam and rf_pa
+# are EPB load switches the FMC is the single writer for. Each rail carries the
+# operator's request separately from the EPB's echo so the UI can reach the
+# "asked for on, reading off" state that a real unanswered board produces.
+_aux = {
+    "radio": True,          # modem rail (requested and echoed together)
+    "runcam": False,        # camera rail echo
+    "runcam_present": True, # camera answered RCDP GET_DEVICE_INFO
+    "runcam_recording": False,
+    "runcam_record_s": None,
+    "rf_pa_requested": False,
+    "rf_pa_on": False,
+    "rf_pa_cycling": False,
+    "rf_pa_inhibit": False,  # firmware holds the PA off until the modem is ready
+}
+# STM32WL modem state, driven from the UI so radio faults are reachable without
+# hardware. Mirrors the RADIO_STATUS_FLAG_* set the bridge decodes.
+_radio = {
+    "ready": True,
+    "config_valid": True,
+    "readback_matches": True,
+    "clock_calibrated": True,
+    "fault": False,
+    "state": 3,
+    "last_fault": 0,
+    "queue_depth": 0,
+    "tx_dropped": 0,
+}
+# The FMC-authoritative vehicle-radio config, as the FMC would read it back.
+_radio_cfg = {
+    "callsign": "VA3UTA",
+    "role": "VEHICLE_TX_ONLY",
+    "network_id": 0x5554,
+    "node_id": 1,
+    "vehicle_node_id": 1,
+    "allocation_low_hz": 908_200_000,
+    "allocation_high_hz": 909_000_000,
+    "lora": {
+        "frequency_hz": 908_600_000, "modulation": "LORA",
+        "bandwidth_hz": 500_000, "power_dbm": 14, "spreading_factor": 12,
+        "coding_rate": "4/5", "preamble_symbols": 8,
+    },
+    "pressure_channels": [
+        {"board_id": 0, "channel": 1},
+        {"board_id": 2, "channel": 0},
+        {"board_id": 4, "channel": 1},
+    ],
+    "rf_chain": {
+        "pa_board_id": 1, "pa_channel": 1,
+        "runcam_board_id": 1, "runcam_channel": 0,
+        "cycle_period_ms": 4000, "warmup_ms": 150, "tail_ms": 50,
+        "max_on_ms": 1300, "min_off_ms": 2700,
+        "runcam_autostop_s": 1800,
+        "duty_cycle": True, "runcam_autostop": True,
+        "boot_sound": False, "rec_on_power": True,
+    },
+}
+_radio_cfg_txn = {"transaction_id": 0, "generation": 1, "status": 2,
+                  "persisted": True}
 # Soundboard: stored clips (seeded so the list is non-empty), current playback,
 # volume, and a tone end-time for the RT_SND_FLAG_TONE indicator.
 _sound = {"clips": [{"name": "test_chime", "length": 8000},
@@ -633,8 +687,7 @@ def _fmc_snapshot(t: float, ov: dict | None = None) -> dict:
         "temp": {"temp_h7": round(31.0 + 4.0 * math.sin(t * 0.1), 2),
                  "temp_pwr": round(36.0 + random.uniform(-0.4, 0.4), 2)},
         "sd": _tick_sd(),
-        "radio": {"powered": bool(_aux["rfd"]), "enabled": bool(_aux["rfd"]), "every_n": 1,
-                  "tx_frames": int(uptime * 10), "tx_bytes": int(uptime * 800)},
+        "radio": _radio_status_snapshot(uptime),
     }
 
 
@@ -703,24 +756,80 @@ def _rab_snapshot(rab_id: int) -> dict:
     }
 
 
-def _aux_snapshot() -> dict:
-    """FMC aux status (mirrors fas_bridge fas_aux): RunCam power + GNSS PPS."""
+def _radio_status_snapshot(uptime: float) -> dict:
+    """STM32WL vehicle-radio state (mirrors fas_bridge fas_fmc[k].radio)."""
     with _lock:
-        runcam = bool(_aux["runcam"])
+        r = dict(_radio)
+        powered = bool(_aux["radio"])
+    # A modem that is not powered cannot be ready, and the firmware reports it
+    # that way; deriving it here keeps the mock from showing an impossible pair.
+    ready = powered and bool(r["ready"]) and not r["fault"]
     return {
-        "runcam_powered": runcam,
+        "flags": ((1 if powered else 0) | (2 if powered else 0) |
+                  (4 if ready else 0) | (8 if r["config_valid"] else 0) |
+                  (16 if r["readback_matches"] else 0) |
+                  (64 if r["clock_calibrated"] else 0) |
+                  (128 if r["fault"] else 0)),
+        "state": int(r["state"]), "last_fault": int(r["last_fault"]),
+        "queue_depth": int(r["queue_depth"]),
+        "tx_accepted": int(uptime * 10) if ready else 0,
+        "tx_dropped": int(r["tx_dropped"]),
+        "power_requested": powered, "powered": powered, "ready": ready,
+        "config_valid": bool(r["config_valid"]),
+        "readback_matches": bool(r["readback_matches"]),
+        "tx_active": ready and (int(uptime) % 4 == 0),
+        "clock_calibrated": bool(r["clock_calibrated"]),
+        "fault": bool(r["fault"]),
+    }
+
+
+def _aux_snapshot() -> dict:
+    """FMC aux status (mirrors fas_bridge fas_aux): camera, RF amplifier, PPS."""
+    with _lock:
+        a = dict(_aux)
+    return {
+        "aux_flags": ((1 if a["runcam"] else 0) |
+                      (2 if a["runcam_present"] else 0) |
+                      (4 if a["runcam_recording"] else 0) |
+                      (8 if a["runcam_record_s"] else 0) |
+                      (16 if a["rf_pa_requested"] else 0) |
+                      (32 if a["rf_pa_on"] else 0) |
+                      (64 if a["rf_pa_cycling"] else 0) |
+                      (128 if a["rf_pa_inhibit"] else 0)),
+        "runcam_powered": bool(a["runcam"]),
+        "runcam_present": bool(a["runcam_present"]),
+        "runcam_recording": bool(a["runcam_recording"]),
+        "runcam_autostop": a["runcam_record_s"] is not None,
+        "runcam_record_s": a["runcam_record_s"],
+        "rf_pa_requested": bool(a["rf_pa_requested"]),
+        "rf_pa_on": bool(a["rf_pa_on"]),
+        "rf_pa_cycling": bool(a["rf_pa_cycling"]),
+        "rf_pa_inhibited": bool(a["rf_pa_inhibit"]),
         "pps_present": True,
         "pps_count": int(time.time() - _boot_time) & 0xFFFF,
         "pps_age_ms": random.randint(0, 999),
     }
 
 
-def _rf_snapshot() -> dict:
-    """FMC RF telemetry rate/power mode (mirrors fas_bridge fas_rf). Echoed ~1 Hz;
-    the value is the FMC's persisted mode."""
+def _radio_cfg_snapshot() -> dict:
+    """FMC vehicle-radio config read-back (mirrors fas_bridge fas_radio_cfg)."""
     with _lock:
-        mode = _rf_mode
-    return {"rate_mode": mode, "rate_name": _RF_RATE_NAMES.get(mode, "?")}
+        cfg = json.loads(json.dumps(_radio_cfg))
+        txn = dict(_radio_cfg_txn)
+    placeholder = cfg["callsign"].upper() == "XXXXXX"
+    return {
+        "op": 1, "status": txn["status"],
+        "status_name": {0: "request", 1: "accepted", 2: "applied", 3: "invalid",
+                        4: "store_error", 5: "link_error",
+                        6: "busy"}.get(txn["status"], "unknown"),
+        "version": 3, "transaction_id": txn["transaction_id"],
+        "generation": txn["generation"],
+        "flags": ((1 if txn["persisted"] else 0) | 2 | 4 |
+                  (8 if placeholder else 0)),
+        "persisted": bool(txn["persisted"]), "link_ready": True,
+        "readback_matches": True, "placeholder_id": placeholder,
+        "validation_error": 0, "config": cfg,
+    }
 
 
 def _sound_snapshot() -> dict:
@@ -801,7 +910,7 @@ def build_flight_packet() -> dict:
         "fas_fsm": fas_fsm,
         "fas_rab": {f"RAB:{i}": _rab_snapshot(i) for i in (0, 1) if up(f"RAB:{i}")},
         "fas_aux": _aux_snapshot() if up("FMC:0") else {},
-        "fas_rf": _rf_snapshot() if up("FMC:0") else {},
+        "fas_radio_cfg": _radio_cfg_snapshot() if up("FMC:0") else {},
         "fas_sound": _sound_snapshot() if up("FMC:0") else {"status": {}, "clips": []},
         "fas_link": dict(_serial_link),
     }
@@ -847,8 +956,8 @@ def _resolve_board_id(cmd: dict) -> int:
 # ---------------------------------------------------------------------------
 _FAS_OPS = {"pwm_set", "load_sw_set", "imc_arm", "imc_disarm", "failsafe",
             "discover", "actuator_query", "buzzer", "sd_cmd",
-            "rab_arm", "rab_disarm", "aux_power", "rf_cfg", "sound",
-            "sound_upload", "pmb_charger"}
+            "rab_arm", "rab_disarm", "aux_power", "runcam_record",
+            "radio_config", "sound", "sound_upload", "pmb_charger"}
 _CONSOLE_ACTIONS = {"start", "stop", "list_ports", "configure", "disconnect",
                     "status", "tx"}
 
@@ -1057,7 +1166,7 @@ def _handle_fas_port(cmd: dict) -> None:
 
 
 def _handle_fas_op(cmd: dict, client: mqtt.Client | None = None) -> None:
-    global _imc_armed, _imc_board_id, _rf_mode
+    global _imc_armed, _imc_board_id
     op = str(cmd.get("op", ""))
     board_id = int(cmd.get("board_id", 0))
     channel = int(cmd.get("channel", 0))
@@ -1114,15 +1223,53 @@ def _handle_fas_op(cmd: dict, client: mqtt.Client | None = None) -> None:
             r["armed"] = arm
         print(f"[novaMock] fas op={op} RAB:{board_id} -> {'ARMED' if arm else 'DISARMED'}")
     elif op == "aux_power":
-        dev = str(cmd.get("device", "rfd")).lower()
+        dev = str(cmd.get("device", "radio")).lower()
         enable = bool(cmd.get("enable"))
         with _lock:
-            _aux["runcam" if dev in ("runcam", "cam") else "rfd"] = enable
+            if dev in ("runcam", "cam"):
+                _aux["runcam"] = enable
+                # rec_on_power: bringing the camera rail up starts a recording,
+                # dropping it stops one. The firmware default, so model it.
+                if _radio_cfg["rf_chain"]["rec_on_power"]:
+                    _aux["runcam_recording"] = enable
+                    _aux["runcam_record_s"] = (
+                        _radio_cfg["rf_chain"]["runcam_autostop_s"]
+                        if enable and _radio_cfg["rf_chain"]["runcam_autostop"]
+                        else None)
+            elif dev in ("rf_pa", "pa", "amp"):
+                _aux["rf_pa_requested"] = enable
+                # The amplifier is held off while the modem is not ready — the
+                # inhibit is the firmware refusing to key a 5 W PA into a dead
+                # link, not a failed command.
+                inhibited = bool(_aux["rf_pa_inhibit"]) or not _radio["ready"]
+                _aux["rf_pa_on"] = enable and not inhibited
+                _aux["rf_pa_cycling"] = (_aux["rf_pa_on"] and
+                                         _radio_cfg["rf_chain"]["duty_cycle"])
+            else:
+                _aux["radio"] = enable
         print(f"[novaMock] fas op=aux_power {dev} {'ON' if enable else 'OFF'}")
-    elif op == "rf_cfg":
+    elif op == "runcam_record":
+        enable = bool(cmd.get("enable"))
+        autostop = max(0, min(43200, int(cmd.get("autostop_s", 0) or 0)))
         with _lock:
-            _rf_mode = int(cmd.get("mode", cmd.get("rate_mode", 0)))
-        print(f"[novaMock] fas op=rf_cfg mode={_RF_RATE_NAMES.get(_rf_mode, _rf_mode)}")
+            _aux["runcam_recording"] = enable
+            _aux["runcam_record_s"] = autostop if (enable and autostop) else None
+        print(f"[novaMock] fas op=runcam_record {'START' if enable else 'STOP'} "
+              f"autostop={autostop or 'none'}")
+    elif op == "radio_config":
+        cfg = cmd.get("cfg")
+        if isinstance(cfg, dict):
+            with _lock:
+                _radio_cfg.update(json.loads(json.dumps(cfg)))
+                _radio_cfg_txn["transaction_id"] = int(
+                    cmd.get("transaction_id", _radio_cfg_txn["transaction_id"] + 1))
+                _radio_cfg_txn["generation"] += 1
+                _radio_cfg_txn["status"] = 2      # applied
+                _radio_cfg_txn["persisted"] = True
+            print(f"[novaMock] fas op=radio_config applied txn="
+                  f"{_radio_cfg_txn['transaction_id']}")
+        else:
+            print("[novaMock] fas op=radio_config ignored (no cfg object)")
     elif op == "sound":
         _handle_sound(cmd)
     elif op == "sound_upload":
@@ -1367,8 +1514,10 @@ def _ui_state() -> dict:
                 "0": {"armed": _rab[0]["armed"], "expected": _rab[0]["expected"]},
                 "1": {"armed": _rab[1]["armed"], "expected": _rab[1]["expected"]},
             },
-            "aux": {"runcam": _aux["runcam"], "rfd": _aux["rfd"], "rf_mode": _rf_mode},
-            "rf_modes": _RF_RATE_NAMES,
+            "aux": {k: _aux[k] for k in _aux},
+            "radio": dict(_radio),
+            "radio_cfg": {"callsign": _radio_cfg["callsign"],
+                          "duty_cycle": _radio_cfg["rf_chain"]["duty_cycle"]},
             "sound": {
                 "clips": [{"name": c["name"], "length": c["length"]} for c in _sound["clips"]],
                 "playing": _sound["playing"], "volume": _sound["volume"],
@@ -1504,17 +1653,35 @@ def _ui_apply_rab(body: dict) -> None:
 
 
 def _ui_apply_aux(body: dict) -> None:
-    global _rf_mode
     with _lock:
-        if "runcam" in body:
-            _aux["runcam"] = bool(body["runcam"])
-        if "rfd" in body:
-            _aux["rfd"] = bool(body["rfd"])
-        if body.get("rf_mode") is not None:
+        for key in ("runcam", "radio", "runcam_present", "runcam_recording",
+                    "rf_pa_requested", "rf_pa_inhibit"):
+            if key in body:
+                _aux[key] = bool(body[key])
+        for key in ("ready", "config_valid", "readback_matches",
+                    "clock_calibrated", "fault"):
+            if key in body:
+                _radio[key] = bool(body[key])
+        if "queue_depth" in body:
             try:
-                _rf_mode = max(0, min(2, int(body["rf_mode"])))
+                _radio["queue_depth"] = max(0, int(body["queue_depth"]))
             except (TypeError, ValueError):
                 pass
+        if "tx_dropped" in body:
+            try:
+                _radio["tx_dropped"] = max(0, int(body["tx_dropped"]))
+            except (TypeError, ValueError):
+                pass
+        if body.get("fault"):
+            _radio["last_fault"] = 7
+        # Re-derived last, once the modem state is settled: the amplifier
+        # inhibit depends on it, so deriving earlier would ignore a ready/fault
+        # change arriving in this same request.
+        inhibited = (bool(_aux["rf_pa_inhibit"]) or not _radio["ready"]
+                     or bool(_radio["fault"]))
+        _aux["rf_pa_on"] = bool(_aux["rf_pa_requested"]) and not inhibited
+        _aux["rf_pa_cycling"] = (_aux["rf_pa_on"] and
+                                 _radio_cfg["rf_chain"]["duty_cycle"])
 
 
 def _ui_apply_sound(body: dict) -> None:
@@ -1724,13 +1891,30 @@ _UI_HTML = """<!doctype html>
     <p class="muted">DAC codes 0..31. Mirrors the /api/fas/charger command effect.</p>
   </section>
   <section style="grid-column:2/3">
-    <h2>FMC aux / RF</h2>
+    <h2>FMC aux / STM32WL radio</h2>
     <div class="row">
+      <label><input type="checkbox" id="auxRadio" onchange="applyAux()"> modem rail</label>
       <label><input type="checkbox" id="auxRuncam" onchange="applyAux()"> RunCam power</label>
-      <label><input type="checkbox" id="auxRfd" onchange="applyAux()"> RFD900 power</label>
+      <label><input type="checkbox" id="auxRec" onchange="applyAux()"> recording</label>
     </div>
-    <div class="row">RF telemetry mode <select id="rfMode" onchange="applyAux()"></select></div>
-    <div class="row muted">PPS is always simulated present.</div>
+    <div class="row">
+      <label><input type="checkbox" id="auxPa" onchange="applyAux()"> RF PA request</label>
+      <label><input type="checkbox" id="auxPaInh" onchange="applyAux()"> PA inhibit</label>
+      <span id="paState" class="pill off">PA off</span>
+    </div>
+    <div class="row">
+      <label><input type="checkbox" id="radReady" onchange="applyAux()"> modem ready</label>
+      <label><input type="checkbox" id="radFault" onchange="applyAux()"> fault</label>
+    </div>
+    <div class="row">
+      <label><input type="checkbox" id="radCfgOk" onchange="applyAux()"> config valid</label>
+      <label><input type="checkbox" id="radMatch" onchange="applyAux()"> readback matches</label>
+    </div>
+    <div class="row">queue <input type="number" id="radQ" value="0" style="width:64px"
+      onchange="applyAux()"> dropped <input type="number" id="radDrop" value="0"
+      style="width:64px" onchange="applyAux()"></div>
+    <div class="row muted">PPS is always simulated present. The PA cannot come on
+      while the modem is not ready — that is the firmware inhibit, not a failure.</div>
   </section>
   <section style="grid-column:1/3">
     <h2>Soundboard</h2>
@@ -1844,14 +2028,19 @@ function renderExtras(){
   $('chgEn').checked=!!c.enabled; $('chgProt').checked=!!c.protect;
   $('chgState').textContent=c.enabled?'CC/CV':'off';
   $('chgState').className='pill '+(c.enabled?'on':'off');
-  // Aux / RF
-  const a=state.aux||{};
-  $('auxRuncam').checked=!!a.runcam; $('auxRfd').checked=!!a.rfd;
-  const rf=$('rfMode');
-  if(rf.options.length!==Object.keys(state.rf_modes||{}).length){
-    rf.innerHTML=Object.entries(state.rf_modes||{}).map(([k,v])=>`<option value="${k}">${v}</option>`).join('');
-  }
-  if(document.activeElement!==rf)rf.value=String(a.rf_mode);
+  // Aux / STM32WL radio
+  const a=state.aux||{}, r=state.radio||{};
+  $('auxRadio').checked=!!a.radio; $('auxRuncam').checked=!!a.runcam;
+  $('auxRec').checked=!!a.runcam_recording;
+  $('auxPa').checked=!!a.rf_pa_requested; $('auxPaInh').checked=!!a.rf_pa_inhibit;
+  $('radReady').checked=!!r.ready; $('radFault').checked=!!r.fault;
+  $('radCfgOk').checked=!!r.config_valid; $('radMatch').checked=!!r.readback_matches;
+  if(document.activeElement!==$('radQ'))$('radQ').value=r.queue_depth||0;
+  if(document.activeElement!==$('radDrop'))$('radDrop').value=r.tx_dropped||0;
+  const pa=$('paState');
+  pa.textContent=a.rf_pa_on?(a.rf_pa_cycling?'PA cycling':'PA on')
+    :(a.rf_pa_requested?'PA inhibited':'PA off');
+  pa.className='pill '+(a.rf_pa_on?'on':'off');
   // Soundboard
   const s=state.sound||{clips:[]};
   $('sndInfo').textContent=`playing: ${s.playing==null?'—':'#'+s.playing} · vol ${s.volume}`+(s.tone?' · TONE':'');
@@ -1867,7 +2056,11 @@ function rabArm(id,a){post('/api/rab',{rab_id:id,armed:a});}
 function rabMismatch(id){post('/api/rab',{rab_id:id,mismatch:true});}
 function rabLink(){post('/api/rab',{link:!(state.rab&&state.rab.link)});}
 function applyCharger(){post('/api/charger',{enable:$('chgEn').checked,i_setting:num($('chgI').value),v_setting:num($('chgV').value),protect:$('chgProt').checked});}
-function applyAux(){post('/api/aux',{runcam:$('auxRuncam').checked,rfd:$('auxRfd').checked,rf_mode:num($('rfMode').value)});}
+function applyAux(){post('/api/aux',{radio:$('auxRadio').checked,runcam:$('auxRuncam').checked,
+  runcam_recording:$('auxRec').checked,rf_pa_requested:$('auxPa').checked,
+  rf_pa_inhibit:$('auxPaInh').checked,ready:$('radReady').checked,fault:$('radFault').checked,
+  config_valid:$('radCfgOk').checked,readback_matches:$('radMatch').checked,
+  queue_depth:num($('radQ').value),tx_dropped:num($('radDrop').value)});}
 function soundAdd(){post('/api/sound',{action:'add',name:$('clipName').value||'clip',length:num($('clipLen').value)||8000});}
 function soundClear(){post('/api/sound',{action:'clear'});}
 function soundTone(){post('/api/sound',{action:'tone',ms:400});}

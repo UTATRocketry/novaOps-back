@@ -17,7 +17,8 @@ from app.models import (
     FasBuzzerPayload,
     FasChargerPayload,
     FasRabPayload,
-    FasRfPayload,
+    FasRadioConfigPayload,
+    FasRuncamRecordPayload,
     FasSdPayload,
     FasSoundPayload,
     SystemCommandPayload,
@@ -213,10 +214,12 @@ async def post_fas_rab(
 
 @router.post(
     "/fas/aux",
-    summary="FMC auxiliary power (RFD / RunCam)",
+    summary="FMC auxiliary rail power (radio / RunCam / RF amplifier)",
     description=(
-        "Switch an FMC auxiliary load switch on or off. device: rfd (RFD900x "
-        "radio) or runcam. Requires operator or admin role."
+        "Switch an FMC auxiliary rail on or off. device: radio (the STM32WL "
+        "vehicle modem, an FMC pin), runcam or rf_pa (EPB load switches the FMC "
+        "is the single writer for). rfd is a deprecated alias for radio. "
+        "Requires operator or admin role."
     ),
 )
 async def post_fas_aux(
@@ -232,23 +235,49 @@ async def post_fas_aux(
 
 
 @router.post(
-    "/fas/rf",
-    summary="Set FMC RF telemetry rate/power mode",
+    "/fas/runcam_record",
+    summary="Start or stop a RunCam recording",
     description=(
-        "Set the FMC RF telemetry rate/power mode: 0 = low (default, power-saving), "
-        "1 = normal, 2 = high. The mode is persisted on the FMC — only send this on "
-        "an explicit operator change. Requires operator or admin role."
+        "Start or stop a RunCam recording over the RunCam Device Protocol. This "
+        "is distinct from powering the camera rail: with the firmware's "
+        "rec_on_power default, bringing the rail up already starts a recording. "
+        "autostop_s is the auto-stop timeout in seconds (0 = record until "
+        "stopped, max 43200). Requires operator or admin role."
     ),
 )
-async def post_fas_rf(
-    payload: FasRfPayload,
+async def post_fas_runcam_record(
+    payload: FasRuncamRecordPayload,
     x_client_id: str | None = Header(default=None),
     ctx: AppContext = Depends(get_context),
 ) -> dict:
     caller_role = ctx.role_service.resolve_caller_role(x_client_id)
     if caller_role < ClientRole.operator:
         raise HTTPException(status_code=403, detail="Insufficient role: operator or admin required")
-    commands = ctx.command_service.apply_fas_rf(payload)
+    commands = ctx.command_service.apply_fas_runcam_record(payload)
+    return {"published_commands": commands}
+
+
+@router.post(
+    "/fas/radio_config",
+    summary="Write the FMC vehicle-radio configuration",
+    description=(
+        "Write (and persist) the complete STM32WL vehicle-radio configuration on "
+        "the FMC, or request a read-back. Carried as one 88-byte bulk record, so "
+        "it is valid only on the wired link — the firmware never accepts it over "
+        "RF. The bridge validates the record against the firmware's own bounds "
+        "and rejects a bad one with a logged reason. Requires admin role: this "
+        "changes the licensed transmit parameters."
+    ),
+)
+async def post_fas_radio_config(
+    payload: FasRadioConfigPayload,
+    x_client_id: str | None = Header(default=None),
+    ctx: AppContext = Depends(get_context),
+) -> dict:
+    caller_role = ctx.role_service.resolve_caller_role(x_client_id)
+    if caller_role < ClientRole.admin:
+        raise HTTPException(status_code=403, detail="Insufficient role: admin required")
+    commands = ctx.command_service.apply_fas_radio_config(payload)
     return {"published_commands": commands}
 
 

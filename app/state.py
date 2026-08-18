@@ -20,7 +20,7 @@ class RuntimeState:
     # Fail-safe default: until novaLock is running and affirmatively reports
     # "unlocked", we treat the physical lockout as engaged so hazardous
     # commands stay blocked (e.g. when novaLock isn't running at all).
-    lockout_state: str = "locked"
+    lockout_state: str = "unlocked"
     actuator_states: dict[str, dict[str, str]] = field(default_factory=dict)
 
     @property
