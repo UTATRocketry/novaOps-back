@@ -512,12 +512,24 @@ class FasAuxPayload(BaseModel):
         ),
     )
     enable: bool = Field(description="True = power on, False = power off")
+    autostop_s: int | None = Field(
+        default=None, ge=0, le=43200,
+        description=(
+            "runcam only: bound the recording this power-up starts. Omitted = "
+            "use the FMC's persisted runcam_autostop_s; 0 = no timer, the rail "
+            "stays up until something drops it; 1..43200 = auto-stop that many "
+            "seconds after the EPB echoes the rail up. Ignored for radio/rf_pa."
+        ),
+    )
 
 
 class FasRuncamRecordPayload(BaseModel):
-    """RunCam Device Protocol record start/stop. Distinct from powering the
-    camera rail: with the firmware's rec_on_power default, bringing the rail up
-    already starts a recording, so this is for explicit control."""
+    """Compatibility alias for the camera rail.
+
+    There is no record command in this system: the FMC has no data link to the
+    camera, so raising the 8V4 rail is what starts a recording and dropping it
+    is what stops one. This posts the same rail command as
+    /fas/aux with device="runcam"."""
 
     model_config = ConfigDict(
         json_schema_extra={"example": {"node": "FMC_0", "enable": True, "autostop_s": 1800}}
@@ -527,12 +539,13 @@ class FasRuncamRecordPayload(BaseModel):
         default=None,
         description='FAS board node string, e.g. "FMC_0". Parsed to board_type/board_id.',
     )
-    enable: bool = Field(description="True = start recording, False = stop")
-    autostop_s: int = Field(
-        default=0, ge=0, le=43200,
+    enable: bool = Field(description="True = raise the camera rail, False = drop it")
+    autostop_s: int | None = Field(
+        default=None, ge=0, le=43200,
         description=(
-            "Auto-stop timeout in seconds; 0 = record until stopped. The wire "
-            "field is 16-bit and the firmware caps it at 43200 (12 h)."
+            "Omitted = use the FMC's persisted runcam_autostop_s; 0 = no timer; "
+            "1..43200 = auto-stop that many seconds after the EPB echoes the "
+            "rail up. The timer arms off the rail echo, not off this command."
         ),
     )
 

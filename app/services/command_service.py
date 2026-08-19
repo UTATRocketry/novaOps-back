@@ -359,6 +359,9 @@ class CommandService:
         command = {
             "type": "fas", **board, "op": "aux_power",
             "device": payload.device, "enable": payload.enable,
+            # None means "defer to the FMC's persisted default"; the bridge
+            # turns that into the 0xFFFF wire sentinel. Only read for runcam.
+            "autostop_s": payload.autostop_s,
         }
         self._ctx.mqtt_service.publish_device_commands([command])
         return [command]

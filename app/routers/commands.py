@@ -219,6 +219,7 @@ async def post_fas_rab(
         "Switch an FMC auxiliary rail on or off. device: radio (the STM32WL "
         "vehicle modem, an FMC pin), runcam or rf_pa (EPB load switches the FMC "
         "is the single writer for). rfd is a deprecated alias for radio. "
+        "For runcam, autostop_s bounds the recording this power-up starts. "
         "Requires operator or admin role."
     ),
 )
@@ -236,13 +237,14 @@ async def post_fas_aux(
 
 @router.post(
     "/fas/runcam_record",
-    summary="Start or stop a RunCam recording",
+    summary="Raise or drop the RunCam power rail (compatibility alias)",
     description=(
-        "Start or stop a RunCam recording over the RunCam Device Protocol. This "
-        "is distinct from powering the camera rail: with the firmware's "
-        "rec_on_power default, bringing the rail up already starts a recording. "
-        "autostop_s is the auto-stop timeout in seconds (0 = record until "
-        "stopped, max 43200). Requires operator or admin role."
+        "Compatibility alias for /fas/aux with device=runcam. There is no "
+        "record command in this system: the FMC has no data link to the camera, "
+        "so the 8V4 rail is the record control. autostop_s: omitted = use the "
+        "FMC's persisted runcam_autostop_s, 0 = no timer, 1..43200 = auto-stop "
+        "that many seconds after the EPB echoes the rail up. "
+        "Requires operator or admin role."
     ),
 )
 async def post_fas_runcam_record(

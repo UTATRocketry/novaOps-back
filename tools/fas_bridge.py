@@ -266,13 +266,21 @@ RAB_FLAG_ARM_MISMATCH = 1 << 3   # RAB-local: commanded arm state != readback (>
 RAB_FLAG_ARM_EXPECTED = 1 << 4   # RAB-local: current expected/commanded arm state
 
 # FMC aux-power device selector (mirror RT_AUX_DEV_*). Only RADIO is an FMC
-# pin; RUNCAM and RF_PA are EPB load switches the FMC is the single writer for,
-# and RUNCAM_REC is a RunCam Device Protocol record start/stop whose arg16 is
-# the auto-stop timeout in seconds (0 = record until stopped).
+# pin; RUNCAM and RF_PA are EPB load switches the FMC is the single writer for.
+# arg16 is read for RUNCAM only, where it bounds the recording this power-up
+# starts (see _encode_aux_power).
 RT_AUX_DEV_RADIO      = 0
 RT_AUX_DEV_RUNCAM     = 1
 RT_AUX_DEV_RF_PA      = 2
-RT_AUX_DEV_RUNCAM_REC = 3
+# Device 3 was a RunCam Device Protocol record start/stop. The FMC has no data
+# link to the camera, so the current firmware's handle_aux_power_cmd() has no
+# case for it and silently discards the frame. Permanently reserved by
+# FMC-Interface-Contract.md section 6.6 - never send it, never reuse the number.
+RT_AUX_DEV_RESERVED_LEGACY_RUNCAM_REC = 3
+
+# arg16 sentinel: defer to the FMC's persisted runcam_autostop_s. Zero cannot
+# carry this meaning because zero is a real setting ("no timer").
+RT_AUX_RUNCAM_AUTOSTOP_DEFAULT = 0xFFFF
 
 # Largest RunCam auto-stop the wire field can carry (mirror gs/protocol.py).
 FMC_RF_RUNCAM_AUTOSTOP_MAX_S = 43200
@@ -281,8 +289,10 @@ FMC_RF_RUNCAM_AUTOSTOP_MAX_S = 43200
 # own ACTUATOR_STATE echo as the FMC saw it, never the FMC's intent, so a board
 # that never answered reads "off" rather than a guess.
 AUX_FLAG_RUNCAM_POWERED   = 1 << 0
-AUX_FLAG_RUNCAM_PRESENT   = 1 << 1   # camera answered RCDP GET_DEVICE_INFO
-AUX_FLAG_RUNCAM_RECORDING = 1 << 2
+# Bits 1 and 2 described the camera itself and are permanently reserved; the
+# firmware masks them out of every frame it sends. Never read, never reuse.
+AUX_FLAG_RESERVED_LEGACY_PRESENT   = 1 << 1
+AUX_FLAG_RESERVED_LEGACY_RECORDING = 1 << 2
 AUX_FLAG_RUNCAM_AUTOSTOP  = 1 << 3
 AUX_FLAG_RF_PA_REQUESTED  = 1 << 4   # operator master enable is set
 AUX_FLAG_RF_PA_ON         = 1 << 5
@@ -777,8 +787,11 @@ def decode_payload(msg: int, data: bytes) -> dict:
             # it, never the FMC's intent, so an unanswered board reads "off"
             # rather than a guess.
             "runcam_powered": bool(flags & AUX_FLAG_RUNCAM_POWERED),
-            "runcam_present": bool(flags & AUX_FLAG_RUNCAM_PRESENT),
-            "runcam_recording": bool(flags & AUX_FLAG_RUNCAM_RECORDING),
+            # runcam_present / runcam_recording deliberately absent: nothing in
+            # this system can observe the camera, so bits 1 and 2 are reserved
+            # and never emitted (contract 6.6). Publishing them would put a
+            # permanently-false "not recording" indicator in front of an
+            # operator, which is worse than showing nothing.
             "runcam_autostop": bool(flags & AUX_FLAG_RUNCAM_AUTOSTOP),
             "runcam_record_s": (None if record_s == 0xFFFF else record_s),
             "rf_pa_requested": bool(flags & AUX_FLAG_RF_PA_REQUESTED),
@@ -1056,6 +1069,25 @@ def pack_fmc_radio_config(config: dict, *, op: int = FMC_RADIO_CFG_SET_SAVE,
     )
 
 
+def pack_fmc_radio_config_get(transaction_id: int = 0) -> bytes:
+    """Encode a GET of the FMC's vehicle-radio record.
+
+    A GET changes nothing on the FMC: it reads back its own authoritative
+    record, and the body of the request is never looked at. Only op, status,
+    version and transaction_id have to be right, and the frame has to be exactly
+    88 bytes (FMC-Interface-Contract.md section 4.3).
+
+    This exists because routing a GET through pack_fmc_radio_config() forced the
+    caller to supply a complete, valid candidate config just to ask what the
+    current one is - and supplying anything less raised KeyError: 'lora'. That
+    made the read direction unusable without already knowing the answer.
+    """
+    blank = bytes(struct.calcsize(FMC_RADIO_CONFIG_FMT) - 8)
+    return struct.pack("<BBBBI", FMC_RADIO_CFG_GET, FMC_RADIO_CFG_REQUEST,
+                       FMC_RADIO_CONFIG_VERSION, 0,
+                       int(transaction_id) & 0xFFFFFFFF) + blank
+
+
 def unpack_fmc_radio_config(data: bytes) -> dict:
     """Decode one complete FMC vehicle-radio configuration/read-back payload."""
     if len(data) != struct.calcsize(FMC_RADIO_CONFIG_FMT):
@@ -1140,10 +1172,28 @@ def unpack_fmc_radio_config(data: bytes) -> dict:
     }
 
 
+def _runcam_autostop_arg16(autostop_s) -> int:
+    """Map an API autostop_s onto the wire arg16 for the camera rail.
+
+    None/absent -> 0xFFFF, defer to the FMC's persisted runcam_autostop_s.
+    0           -> no timer; the rail stays up until something drops it.
+    1..max      -> auto-stop that many seconds after the EPB echoes the rail up.
+
+    A request that overflows the field clamps to the maximum instead of wrapping
+    round into 0xFFFF, which would silently turn "as long as possible" into
+    "whatever is persisted".
+    """
+    if autostop_s is None:
+        return RT_AUX_RUNCAM_AUTOSTOP_DEFAULT
+    return max(0, min(FMC_RF_RUNCAM_AUTOSTOP_MAX_S, int(autostop_s)))
+
+
 def _encode_aux_power(device: int, enable: bool, arg16: int = 0) -> bytes:
     # rt_fmc_aux_power_t: u8 device, u8 enable, u16 arg16, 4 reserved.
-    # arg16 is only read for RT_AUX_DEV_RUNCAM_REC, where it is the auto-stop
-    # timeout in seconds (0 = record until stopped).
+    # arg16 is read for RT_AUX_DEV_RUNCAM only, where it bounds the recording
+    # this power-up starts: 0 = no timer (rail stays up), 1..65534 = auto-stop
+    # that many seconds after the EPB echoes the rail up, 0xFFFF = use the FMC's
+    # persisted runcam_autostop_s. RADIO and RF_PA must send 0.
     return struct.pack("<BBH4x", device & 0xFF, 1 if enable else 0,
                        int(arg16) & 0xFFFF)
 
@@ -1270,30 +1320,39 @@ def op_to_frame(op: str, cmd: dict, seq: int) -> tuple[int, bytes] | None:
         if device is None:
             raise ValueError(f"aux_power device must be radio/runcam/rf_pa, got {dev!r}")
         enable = bool(cmd.get("enable", False))
+        # The camera rail IS the record control, so the auto-stop rides on this
+        # command. An omitted autostop_s defers to the FMC's persisted default
+        # rather than meaning "no timer" - 0 is a deliberate operator choice.
+        arg16 = 0
+        if device == RT_AUX_DEV_RUNCAM:
+            arg16 = _runcam_autostop_arg16(cmd.get("autostop_s"))
         cid = can_id_pack(RT_MSG_FMC_AUX_POWER, RT_BOARD_FMC, board_id, 0, 0, seq)
-        return cid, _encode_aux_power(device, enable)
+        return cid, _encode_aux_power(device, enable, arg16)
     if op == "runcam_record":
-        # RunCam Device Protocol record start/stop. Distinct from powering the
-        # camera rail: with rec_on_power set (the firmware default) the rail
-        # coming up already starts a recording.
+        # Kept as a compatibility alias for callers that still say "record".
+        # There is no record command in this system: the FMC has no data link to
+        # the camera, and raising the 8V4 rail is what starts a recording. This
+        # used to address device 3, which the firmware discards, so the timer
+        # never armed. It now drives the real rail, identically to
+        # aux_power(device="runcam").
         enable = bool(cmd.get("enable", False))
-        # arg16 = 0 means record until stopped, so a request that overflows the
-        # field must clamp to the maximum rather than wrap round to "never".
-        autostop_s = max(0, min(FMC_RF_RUNCAM_AUTOSTOP_MAX_S,
-                                int(cmd.get("autostop_s", 0))))
+        arg16 = _runcam_autostop_arg16(cmd.get("autostop_s"))
         cid = can_id_pack(RT_MSG_FMC_AUX_POWER, RT_BOARD_FMC, board_id, 0, 0, seq)
-        return cid, _encode_aux_power(RT_AUX_DEV_RUNCAM_REC, enable, autostop_s)
+        return cid, _encode_aux_power(RT_AUX_DEV_RUNCAM, enable, arg16)
     if op == "radio_config":
         # The complete FMC vehicle-radio profile, as one 88-byte bulk record.
         # Wired link only — the firmware never accepts this over RF.
-        cfg = cmd.get("cfg")
-        if not isinstance(cfg, dict):
-            raise ValueError("radio_config requires a cfg object")
-        cfg_op = (FMC_RADIO_CFG_GET
-                  if str(cmd.get("action", "set")).lower() == "get"
-                  else FMC_RADIO_CFG_SET_SAVE)
-        payload = pack_fmc_radio_config(
-            cfg, op=cfg_op, transaction_id=int(cmd.get("transaction_id", 0)))
+        # A GET carries no candidate config, so it must not demand one.
+        if str(cmd.get("action", "set")).lower() == "get":
+            payload = pack_fmc_radio_config_get(
+                transaction_id=int(cmd.get("transaction_id", 0)))
+        else:
+            cfg = cmd.get("cfg")
+            if not isinstance(cfg, dict):
+                raise ValueError("radio_config set requires a cfg object")
+            payload = pack_fmc_radio_config(
+                cfg, op=FMC_RADIO_CFG_SET_SAVE,
+                transaction_id=int(cmd.get("transaction_id", 0)))
         cid = can_id_pack(RT_MSG_FMC_RADIO_CONFIG, RT_BOARD_FMC, board_id, 0, 0, seq)
         return cid, payload
     if op == "sound":
@@ -1456,7 +1515,24 @@ class FasBridge:
         self._parser  = FrameParser(self._on_frame)
 
         # MQTT
-        self._client = mqtt.Client(client_id=node_id, clean_session=True)
+        # The client ID must be unique per broker connection. prod and dev each
+        # run a bridge against the same broker, and two clients sharing an ID
+        # make the broker evict whichever connected first - an endless
+        # connect/disconnect loop that shows up as "MQTT disconnected rc=7" and
+        # silently drops commands and telemetry in both environments.
+        # The published `source` deliberately stays node_id ("FAS"), because the
+        # backend routes FAS sensors on that exact string (_SOURCE_ALIASES);
+        # only the client ID is disambiguated, by the ops-URL port that already
+        # distinguishes prod (8000) from dev (8001).
+        _ops_port = None
+        try:
+            _ops_port = urllib.parse.urlparse(self._ops_url).port
+        except (ValueError, AttributeError):
+            _ops_port = None
+        self._mqtt_client_id = (f"{node_id}-{_ops_port}" if _ops_port
+                                else f"{node_id}-{os.getpid()}")
+        self._client = mqtt.Client(client_id=self._mqtt_client_id,
+                                   clean_session=True)
         self._client.on_connect    = self._on_connect
         self._client.on_message    = self._on_message
         self._client.on_disconnect = self._on_disconnect
@@ -1472,7 +1548,8 @@ class FasBridge:
 
     def _on_connect(self, client, userdata, flags, rc: int) -> None:
         if rc == 0:
-            self._log(1, f"[bridge] MQTT connected as '{self._node_id}'")
+            self._log(1, f"[bridge] MQTT connected as '{self._mqtt_client_id}' "
+                     f"(source={self._node_id})")
             client.subscribe(COMMAND_TOPIC, qos=1)
         else:
             self._log(0, f"[bridge] MQTT connect failed rc={rc}")
@@ -2272,7 +2349,8 @@ class FasBridge:
             with self._lock:
                 self._fas_aux = {**d, "last_seen": now}
             self._log(2, f"[bridge] FMC aux runcam={d.get('runcam_powered')} "
-                         f"rec={d.get('runcam_recording')} "
+                         f"autostop={d.get('runcam_autostop')} "
+                         f"rec_s={d.get('runcam_record_s')} "
                          f"pa={d.get('rf_pa_on')} pps={d.get('pps_present')}")
 
         elif msg == RT_MSG_FMC_RADIO_CONFIG:
@@ -2536,7 +2614,11 @@ def main() -> None:
     p.add_argument("--baud",       type=int, default=115200)
     p.add_argument("--broker",     default="localhost:1883")
     p.add_argument("--node-id",    default="FAS",
-                   help="MQTT client ID (engine telemetry source is always 'FAS')")
+                   help="Telemetry 'source' string published with every FAS "
+                        "message. The backend routes FAS sensors on this exact "
+                        "value, so leave it as 'FAS'. The MQTT client ID is "
+                        "derived from it plus the ops-URL port, so prod and dev "
+                        "never collide on the broker.")
     p.add_argument("--publish-ms", type=int, default=50,
                    help="Telemetry publish interval ms")
     p.add_argument("--verbosity",  type=int, default=1, choices=[0, 1, 2])
