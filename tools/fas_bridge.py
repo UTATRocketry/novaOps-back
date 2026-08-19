@@ -177,6 +177,8 @@ RT_MSG_RAB_POLL           = 0x05   # FMC -> RAB (addressed): request status
 RT_MSG_RAB_STATUS         = 0x06   # RAB -> FMC -> GS: rt_rab_status_t
 RT_MSG_RAB_DISARM         = 0x07   # FMC -> RAB (addressed): pulse GPIO_DISARM
 RT_MSG_FMC_AUX_POWER      = 0x08   # GS -> FMC: modem / RunCam / RF-PA rail + record
+RT_MSG_FMC_EGSE_CMD       = 0x15   # GS -> FMC: RS-422 wired-link ADC decimation
+RT_EGSE_CMD_SET_ADC_DECIM = 0
 RT_MSG_FMC_AUX_STATUS     = 0x09   # FMC -> GS: camera + amplifier state, GNSS PPS
 # 0x0A carried the retired serial-radio rate/power mode. The FMC now ignores it
 # and the STM32WL profile lives in RT_MSG_FMC_RADIO_CONFIG, so this ID is
@@ -1339,6 +1341,15 @@ def op_to_frame(op: str, cmd: dict, seq: int) -> tuple[int, bytes] | None:
         arg16 = _runcam_autostop_arg16(cmd.get("autostop_s"))
         cid = can_id_pack(RT_MSG_FMC_AUX_POWER, RT_BOARD_FMC, board_id, 0, 0, seq)
         return cid, _encode_aux_power(RT_AUX_DEV_RUNCAM, enable, arg16)
+    if op == "egse_decim":
+        # RS-422 wired-link ADC decimation, handled FMC-locally. The 115200
+        # wire cannot carry even one EPB's 1 kSPS ADC stream, so the FMC
+        # forwards 1 of every N samples per board on this link only. The FMC
+        # boots at divisor 8 and never persists this; send 1 to get everything
+        # (sane when the bridge is on the 921600 USB-C link instead).
+        divisor = max(1, min(255, int(cmd.get("divisor", 8))))
+        cid = can_id_pack(RT_MSG_FMC_EGSE_CMD, RT_BOARD_FMC, board_id, 0, 0, seq)
+        return cid, struct.pack("<BBHI", RT_EGSE_CMD_SET_ADC_DECIM, divisor, 0, 0)
     if op == "radio_config":
         # The complete FMC vehicle-radio profile, as one 88-byte bulk record.
         # Wired link only — the firmware never accepts this over RF.
@@ -2253,16 +2264,25 @@ class FasBridge:
             ch = d.get("ch", [])
             now_ms = int(now * 1000)
             node = f"{kind_name}_{board_id}"
+            # The frame's CAN-ID channel field is the BASE INDEX of its
+            # samples: 0 = the ADS131 pair (channels 0/1, all old firmware),
+            # 2 = auxiliary internal-ADC inputs (the ARM screw terminal on
+            # non-IMC-host boards -> channels 2/3). Old boards only ever send
+            # base 0, so this is a pure superset of the previous keying.
+            base = int(cid.get("channel", 0))
             with self._lock:
                 for idx, code in enumerate(ch):
-                    self._engine_values[f"{node}:{idx}"] = {
+                    self._engine_values[f"{node}:{base + idx}"] = {
                         "node":      node,
-                        "channel":   idx,
+                        "channel":   base + idx,
                         "value":     code * ADC_INT16_TO_V,
                         "timestamp": now_ms,
                     }
-            self._record_samples(node, ch, now_ms)
-            self._log(2, f"[bridge] adc {key} ch={ch}")
+            if base == 0:
+                # Raw-sample CSV recording keeps its legacy two-column shape;
+                # aux channels live in the parsed-sensor pipeline instead.
+                self._record_samples(node, ch, now_ms)
+            self._log(2, f"[bridge] adc {key} base={base} ch={ch}")
 
         elif msg == RT_MSG_ACTUATOR_STATE:
             ch = d.get("channel_idx", 0)
