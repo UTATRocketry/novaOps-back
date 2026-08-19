@@ -176,13 +176,25 @@ class CommandParser:
 
     @staticmethod
     def _board_fields(binding: ActuatorBinding) -> dict:
-        """Return board_type / board_id fields for a FAS command envelope."""
-        if binding.board_type is not None:
-            return {"board_type": binding.board_type, "board_id": binding.board_id}
+        """Return board_type / board_id fields for a FAS command envelope.
+
+        The node string ("EPB_4") is the binding's canonical address: it is
+        what the config editor writes and what sensors already resolve through
+        FasSensorBinding.resolved_node. The loose board_type/board_id pair is
+        only trusted when no parseable node exists. Preferring the pair broke
+        BVFTP: its config carried node="EPB_4" plus a stale board_type="EPB"/
+        board_id=0, so every command went on the wire addressed to EPB:0 - a
+        board that does not exist - and was silently dropped by every EPB's
+        board-id filter, while the same command from the legacy GS (which
+        sends an explicit board_id) worked. The bridge then prefers an
+        explicit board_id over the node, so the 0 always won downstream too.
+        """
         if binding.node:
             parts = binding.node.rsplit("_", 1)
             if len(parts) == 2 and parts[1].isdigit():
                 return {"board_type": parts[0], "board_id": int(parts[1])}
+        if binding.board_type is not None:
+            return {"board_type": binding.board_type, "board_id": binding.board_id}
         return {"board_type": None, "board_id": binding.board_id}
 
     def _parse_fas(self, actuator: ActuatorEntry, state: str) -> list[dict]:
