@@ -16,13 +16,13 @@
 .EXAMPLE
     .\scripts\dev_windows.ps1
 .EXAMPLE
-    .\scripts\dev_windows.ps1 -Broker hivemq -WithDummy -InstallDeps
+    .\scripts\dev_windows.ps1 -Broker hivemq -WithMock -InstallDeps
 #>
 [CmdletBinding()]
 param(
     [string]$Broker,
     [int]$Port = 0,
-    [switch]$WithDummy,
+    [switch]$WithMock,
     [switch]$WithFas,
     [switch]$InstallDeps
 )
@@ -85,11 +85,12 @@ try {
 
     $children = @()
 
-    if ($WithDummy) {
-        $proc = Start-Process -FilePath $python -ArgumentList 'tools\novaSystem_dummy.py' `
+    if ($WithMock) {
+        $mockArgs = "tools\novaMock.py --broker ${Broker} --port ${brokerPort} --ui"
+        $proc = Start-Process -FilePath $python -ArgumentList $mockArgs `
                               -WorkingDirectory $repoRoot -PassThru
         $children += $proc
-        Write-Host "Started novaSystem_dummy.py (PID $($proc.Id))" -ForegroundColor Cyan
+        Write-Host "Started novaMock.py (PID $($proc.Id))" -ForegroundColor Cyan
     }
 
     if ($WithFas) {
