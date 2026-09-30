@@ -1,0 +1,16 @@
+# Code owners must approve PRs that touch these paths (branch protection:
+# "require review from code owners"). Everything else needs any one approval.
+# Listed paths are the ones that can move hardware or run the station - see
+# CONTRIBUTING.md in UTATRocketry/Nova-Collected.
+#
+# Replace the owner with a team once one exists, e.g. @UTATRocketry/nova-leads
+
+# Actuator commands, safety lockout and the flight-computer bridge
+/app/services/command_service.py  @Awesome-Ace22
+/app/routers/commands.py          @Awesome-Ace22
+/app/routers/lock.py              @Awesome-Ace22
+/app/models.py                    @Awesome-Ace22
+/tools/fas_bridge.py              @Awesome-Ace22
+# Published default sensor/actuator config
+/config/                          @Awesome-Ace22
+/.github/                         @Awesome-Ace22

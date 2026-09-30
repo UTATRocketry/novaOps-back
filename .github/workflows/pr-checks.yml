@@ -1,0 +1,86 @@
+name: PR checks
+
+on:
+  pull_request:
+    # `edited` so fixing the PR title re-runs the checks.
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-checks-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  # Branch names, PR direction and PR title. See CONTRIBUTING.md in
+  # UTATRocketry/Nova-Collected: work goes into dev; main takes releases and
+  # hotfixes (anything else into main is allowed but flagged).
+  rules:
+    name: rules
+    runs-on: ubuntu-latest
+    steps:
+      - name: Branch name and target
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          words='[a-z0-9]+(-[a-z0-9]+)*'
+          work="^(feature|bugfix|chore)/${words}$"
+          hotfix="^hotfix/${words}$"
+          release='^release/v[0-9]{4}\.[0-9]{2}\.[0-9]{2}(\.[0-9]+)?$'
+          github_made='^(revert-[0-9]+-|dependabot/)'
+          fail() { echo "::error::$1"; exit 1; }
+
+          if [[ ! ( "$HEAD_REF" =~ $work || "$HEAD_REF" =~ $hotfix || "$HEAD_REF" =~ $release \
+                    || "$HEAD_REF" == "main" || "$HEAD_REF" =~ $github_made ) ]]; then
+            fail "Branch '$HEAD_REF' must be named feature/..., bugfix/..., chore/... (lower case, words joined by single hyphens), e.g. bugfix/fas-port-reconnect. Rename it on GitHub (Branches page, pencil icon) - that keeps this PR."
+          fi
+
+          case "$BASE_REF" in
+            dev)
+              if [[ "$HEAD_REF" =~ $release ]]; then
+                fail "Release branches go into main, not dev."
+              fi ;;
+            main)
+              if [[ ! ( "$HEAD_REF" =~ $release || "$HEAD_REF" =~ $hotfix ) ]]; then
+                echo "::warning::'$HEAD_REF' -> main is not the normal path (main takes release/* and hotfix/* branches; work goes into dev). If this is deliberate, say why in the PR description."
+              fi ;;
+            hotfix/*) ;;
+            *)
+              fail "PRs go into dev (or main for releases and hotfixes), not '$BASE_REF'. Change the base branch at the top of the PR." ;;
+          esac
+          echo "Branch '$HEAD_REF' -> '$BASE_REF' is fine."
+
+      - name: PR title
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          conventional='^(feat|fix|refactor|docs|test|chore)(\([a-z0-9._/-]+\))?!?: .{3,}$'
+          github_revert='^Revert "'
+          if [[ ! "$TITLE" =~ $conventional && ! "$TITLE" =~ $github_revert ]]; then
+            echo "::error::PR title '$TITLE' must look like 'fix(fas): reopen the COM port after unplug' - type(optional scope): what changed. Edit the title; the checks re-run by themselves."
+            exit 1
+          fi
+          if (( ${#TITLE} > 72 )); then
+            echo "::error::PR title is ${#TITLE} characters; keep it to 72 or fewer."
+            exit 1
+          fi
+          echo "Title is fine."
+
+  tests:
+    name: tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: pip install -r requirements.txt pytest httpx
+
+      - name: Tests
+        run: python -m pytest -q
