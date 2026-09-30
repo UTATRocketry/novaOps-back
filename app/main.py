@@ -1,6 +1,9 @@
 ﻿from __future__ import annotations
 
 import logging
+import os
+import shutil
+import subprocess
 from contextlib import asynccontextmanager
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -35,13 +38,57 @@ def configure_logging(base_dir: Path) -> None:
     root.addHandler(file_handler)
 
 
+def seed_config_dir(config_dir: Path, defaults_dir: Path) -> None:
+    """Give a fresh station config directory the repo's published defaults.
+
+    Only ever fills an EMPTY directory: once a station has its own config, a
+    code update must never overwrite its calibrations.
+    """
+    if config_dir.resolve() == defaults_dir.resolve():
+        return
+    config_dir.mkdir(parents=True, exist_ok=True)
+    if any(config_dir.glob("*.yaml")):
+        return
+    for src in defaults_dir.glob("*.yaml"):
+        shutil.copy2(src, config_dir / src.name)
+        logging.getLogger(__name__).info("Seeded %s from repo defaults", config_dir / src.name)
+
+
+def software_info(base_dir: Path) -> dict[str, str | None]:
+    """What produced a recording: the release (set by ops/Nova.ps1) and commit."""
+    commit = None
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(base_dir), "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+        if out.returncode == 0:
+            commit = out.stdout.strip() or None
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return {"release": os.getenv("NOVA_RELEASE") or None, "backend_commit": commit}
+
+
 def create_app() -> FastAPI:
     base_dir = Path(__file__).resolve().parent.parent
     configure_logging(base_dir)
 
+    # Station state lives OUTSIDE the code checkout when ops/Nova.ps1 runs us
+    # (C:\Nova\config\<env>, C:\Nova\data\<env>), so checking out a different
+    # version never touches live calibrations or recordings. Unset, everything
+    # falls back to the repo's own folders, as before.
+    defaults_dir = base_dir / "config"
+    config_dir = Path(os.getenv("NOVA_CONFIG_DIR") or defaults_dir)
+    data_dir = Path(os.getenv("NOVA_DATA_DIR") or base_dir / "data")
+    history_dir = Path(os.getenv("NOVA_CONFIG_HISTORY_DIR") or config_dir / "history")
+    seed_config_dir(config_dir, defaults_dir)
+
     ctx = AppContext(
-        config_path=base_dir / "config" / "system.yaml",
-        data_dir=base_dir / "data",
+        config_path=config_dir / "system.yaml",
+        data_dir=data_dir,
+        history_dir=history_dir,
+        env=os.getenv("NOVA_ENV", ""),
+        software=software_info(base_dir),
     )
 
     @asynccontextmanager

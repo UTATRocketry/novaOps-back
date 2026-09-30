@@ -29,3 +29,6 @@ logs/*
 # Data files
 data/*
 !data/.gitkeep
+
+# Config history written when running without NOVA_CONFIG_HISTORY_DIR
+config/history/

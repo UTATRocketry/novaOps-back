@@ -512,9 +512,8 @@ class CommandService:
 
         if payload.name in {"START_DATA_SAVING", "STOP_DATA_SAVING"}:
             enabled = payload.name == "START_DATA_SAVING"
-            ctx.runtime.data_saving_enabled = enabled
-            ctx.mqtt_service.publish_data_saving(enabled)
-            return {"data_saving_enabled": enabled}
+            name = ctx.set_data_saving(enabled)
+            return {"data_saving_enabled": enabled, "recording": name}
 
         if payload.name == "GET_DATA_FILES":
             return {"data_files": sorted(path.name for path in ctx.data_dir.glob("*.csv"))}
