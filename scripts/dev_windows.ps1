@@ -10,7 +10,7 @@
       * dependencies are no longer reinstalled on every launch (it hung on
         machines without internet and added ~20 s to every restart). Pass
         -InstallDeps when you actually want them refreshed.
-      * ports and paths come from ops/nova.config.ps1, so dev cannot silently
+      * ports and paths come from ops/nova.settings.ps1, so dev cannot silently
         collide with the prod stack on the same PC.
 
 .EXAMPLE
@@ -31,21 +31,29 @@ $ErrorActionPreference = 'Stop'
 
 $repoRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 
-# Look for the ops config wherever it lives: $env:NOVA_OPS_DIR, this repo, or
-# the installed location. Falls back to built-in defaults if none is found.
-$configPath = $null
+# Look for the Nova settings wherever they live: $env:NOVA_OPS_DIR, the Nova
+# repo this checkout sits in (dev\backend -> ..\..\ops), this repo's own ops\,
+# or C:\Nova\ops. In each, prefer the machine's nova.settings.ps1, then the
+# older nova.config.ps1, then the tracked nova.settings.example.ps1. Falls
+# back to built-in defaults if none is found.
+$settingsPath = $null
 $candidates = @()
 if (-not [string]::IsNullOrWhiteSpace($env:NOVA_OPS_DIR)) { $candidates += $env:NOVA_OPS_DIR }
+$candidates += (Join-Path $repoRoot '..\..\ops')
 $candidates += (Join-Path $repoRoot 'ops')
 $candidates += 'C:\Nova\ops'
 foreach ($dir in $candidates) {
-    $probe = Join-Path $dir 'nova.config.ps1'
-    if (Test-Path $probe) { $configPath = $probe; break }
+    foreach ($name in @('nova.settings.ps1', 'nova.config.ps1', 'nova.settings.example.ps1')) {
+        $probe = Join-Path $dir $name
+        if (Test-Path $probe) { $settingsPath = $probe; break }
+    }
+    if ($null -ne $settingsPath) { break }
 }
 
-if ($null -ne $configPath) {
-    . $configPath
-    $cfg = $NovaConfig
+if ($null -ne $settingsPath) {
+    . $settingsPath
+    # The settings file defines $NovaSettings (older copies: $NovaConfig).
+    $cfg = if (Get-Variable -Name NovaSettings -ErrorAction SilentlyContinue) { $NovaSettings } else { $NovaConfig }
     $envCfg = $cfg.Environments['dev']
     if ($Port -eq 0) { $Port = $envCfg.BackendPort }
     if ([string]::IsNullOrWhiteSpace($Broker)) { $Broker = $cfg.Broker.Host }

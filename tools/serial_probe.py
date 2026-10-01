@@ -113,7 +113,7 @@ def main() -> int:
         print("  wrong port, wrong baud, or the FMC is not transmitting.")
     elif magic == 0:
         print(f"  {total} bytes but no 0xAA frame markers -> almost certainly a")
-        print("  BAUD MISMATCH (bridge default is 115200; nova.config.ps1 says 460800).")
+        print("  BAUD MISMATCH (bridge default is 115200; check FasBaud in nova.settings.ps1).")
     else:
         print("  port opens, writes, and carries framed data. Link looks healthy.")
     return 0
