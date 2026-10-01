@@ -5,7 +5,7 @@
 .DESCRIPTION
     The normal way to run prod is as services (see ops/Nova.ps1). This script is
     the manual fallback: it starts the same programs, with the same settings
-    read from ops/nova.config.ps1, in visible windows you can watch and Ctrl+C.
+    read from ops/nova.settings.ps1, in visible windows you can watch and Ctrl+C.
 
     Use it when:
       * you are debugging why a service will not stay up,
@@ -40,29 +40,42 @@ $ErrorActionPreference = 'Stop'
 
 $repoRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 
-# Find nova.config.ps1 wherever the ops directory currently lives: alongside
-# this repo, at the installed location, or wherever $env:NOVA_OPS_DIR points.
-# This is what lets ops/ move to C:\Nova\ops (or its own repo) without edits.
-function Resolve-NovaOpsDir {
+# Find the Nova settings wherever the ops directory lives: $env:NOVA_OPS_DIR,
+# the Nova repo this checkout sits in (C:\Nova\prod\backend or
+# C:\Nova\dev\backend -> C:\Nova\ops), this repo's own ops\, or C:\Nova\ops.
+# In each, prefer the machine's nova.settings.ps1, then the older
+# nova.config.ps1 (ground stations not converted yet), then the tracked
+# nova.settings.example.ps1.
+function Find-NovaSettings {
     param([string]$RepoRoot)
-    $candidates = @()
-    if (-not [string]::IsNullOrWhiteSpace($env:NOVA_OPS_DIR)) { $candidates += $env:NOVA_OPS_DIR }
-    $candidates += (Join-Path $RepoRoot 'ops')
-    $candidates += 'C:\Nova\ops'
-    foreach ($dir in $candidates) {
-        if (Test-Path (Join-Path $dir 'nova.config.ps1')) { return $dir }
+    $dirs = @()
+    if (-not [string]::IsNullOrWhiteSpace($env:NOVA_OPS_DIR)) { $dirs += $env:NOVA_OPS_DIR }
+    $dirs += (Join-Path $RepoRoot '..\..\ops')
+    $dirs += (Join-Path $RepoRoot 'ops')
+    $dirs += 'C:\Nova\ops'
+    foreach ($dir in $dirs) {
+        foreach ($name in @('nova.settings.ps1', 'nova.config.ps1', 'nova.settings.example.ps1')) {
+            $path = Join-Path $dir $name
+            if (Test-Path $path) { return (Resolve-Path $path).Path }
+        }
     }
     return $null
 }
 
-$opsDir = Resolve-NovaOpsDir $repoRoot
-if ($null -eq $opsDir) {
-    throw "Could not find nova.config.ps1. Looked in `$env:NOVA_OPS_DIR, $repoRoot\ops, and C:\Nova\ops."
+function Import-NovaSettings {
+    # The settings file defines $NovaSettings (older copies: $NovaConfig).
+    param([string]$Path)
+    . $Path
+    if (Get-Variable -Name NovaSettings -Scope 0 -ErrorAction SilentlyContinue) { return $NovaSettings }
+    return $NovaConfig
 }
-$configPath = Join-Path $opsDir 'nova.config.ps1'
-. $configPath
 
-$cfg = $NovaConfig
+$settingsPath = Find-NovaSettings $repoRoot
+if ($null -eq $settingsPath) {
+    throw "Could not find nova.settings.ps1. Looked in `$env:NOVA_OPS_DIR, the Nova repo around $repoRoot, $repoRoot\ops, and C:\Nova\ops."
+}
+$opsDir = Split-Path -Parent $settingsPath
+$cfg = Import-NovaSettings $settingsPath
 $envCfg = $cfg.Environments['prod']
 if ($null -eq $Only -or $Only.Count -eq 0) { $Only = @('backend', 'frontend', 'fas', 'console') }
 
