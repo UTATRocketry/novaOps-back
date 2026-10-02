@@ -1,16 +1,16 @@
-﻿# NovaOps Backend
+# NovaOps Backend
 
-NovaOps Backend is a FastAPI service that bridges frontend clients, MQTT device traffic, and config-driven parsing/translation logic.
+NovaOps Backend is a FastAPI service that bridges frontend clients, MQTT device
+traffic, and config-driven parsing and translation logic.
 
-## Documentation Map
+## Documentation map
 
-- **Backend Architecture**: service responsibilities, parsing flow, managers, runtime state.
-- **OpenAPI Docs**:
-  - Swagger UI: `/docs`
-  - ReDoc: `/redoc`
+| Document | Covers |
+|---|---|
+| [Backend services](backend-services.md) | Service responsibilities, parsing flow, runtime state |
+| [Environment variables](environment.md) | Every variable the backend and FAS bridge read |
+| [Tools](tools.md) | The FAS bridge and the simulators |
+| `/docs`, `/redoc` on a running backend | The live, generated API reference |
 
-## Quick Start
-
-1. Run locally with scripts in `scripts/`.
-2. Or run in Docker with `docker compose up --build`.
-3. Open `http://localhost:8000/docs` for live API schema and examples.
+System-wide docs (config schema, MQTT topics, releases) live in
+[Nova-Collected](https://github.com/UTATRocketry/Nova-Collected/blob/main/docs/README.md).
