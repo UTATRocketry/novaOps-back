@@ -116,6 +116,28 @@ FAS EPB ADC channels appear in `sensors` at `hat_id = 100 + board_id`.
 
 ## Config — system.yaml
 
+### Where config and data live
+
+`config/` in this repo holds the **published defaults**. On the ground station,
+`ops/Nova.ps1` points the backend at station folders outside the checkout, so
+changing code versions never touches live calibrations or recordings:
+
+| Variable | Default (unset) | On the station | What |
+|---|---|---|---|
+| `NOVA_CONFIG_DIR` | `config/` | `C:\Nova\config\<env>` | Live config the web interface edits. An empty folder is seeded from `config/` on first start. |
+| `NOVA_CONFIG_HISTORY_DIR` | `<config dir>/history` | `C:\Nova\config\history` | Every config ever used, stored once by content hash, plus `history.jsonl` (who changed what, when). |
+| `NOVA_DATA_DIR` | `data/` | `C:\Nova\data\<env>` | Raw recordings and their metadata. |
+| `NOVA_ENV`, `NOVA_RELEASE` | empty | `prod` / `v2026.10.04` | Stamped into each recording's metadata. |
+
+Every save, load, upload or reload is snapshotted automatically, including
+half-finished edits. Nobody needs to commit anything.
+
+When a recording starts, the backend picks its name and writes
+`<name>.meta.json` into the data folder. It records the environment, release,
+backend commit, start and stop times, and the hash of the active config,
+including any config change made *during* the recording. Loggers write raw
+values, so this file is what makes a CSV interpretable later.
+
 ### Actuator binding fields (FAS targets)
 
 ```yaml

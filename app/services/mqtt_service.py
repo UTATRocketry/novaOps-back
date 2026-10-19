@@ -100,7 +100,7 @@ class MqttService:
         payload = {"source": "novaOps", "command": {"type": "console", **command}}
         self._publish_json(self._command_topic, payload, label="console-command")
 
-    def publish_data_saving(self, enabled: bool) -> None:
+    def publish_data_saving(self, enabled: bool, filename: str | None = None) -> None:
         if not self._can_publish():
             LOGGER.warning("MQTT unavailable, skipping data-saving publish enabled=%s", enabled)
             return
@@ -111,7 +111,7 @@ class MqttService:
         }
 
         if enabled:
-            command["filename"] = self._new_data_file()
+            command["filename"] = filename or self._new_data_file()
 
         payload = {"source": "novaOps", "command": command}
 

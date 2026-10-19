@@ -27,9 +27,8 @@ async def get_data_saving_flag(ctx: AppContext = Depends(get_context)) -> dict:
 
 @router.post("/data-saving", summary="Set data saving flag", description="Start/stop logger commands over MQTT.")
 async def set_data_saving_flag(payload: FlagPayload, ctx: AppContext = Depends(get_context)) -> dict:
-    ctx.runtime.data_saving_enabled = payload.enabled
-    ctx.mqtt_service.publish_data_saving(payload.enabled)
-    return {"enabled": ctx.runtime.data_saving_enabled}
+    name = ctx.set_data_saving(payload.enabled)
+    return {"enabled": ctx.runtime.data_saving_enabled, "recording": name}
 
 
 @router.get(

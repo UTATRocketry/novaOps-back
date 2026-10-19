@@ -491,7 +491,10 @@ class FasRabPayload(BaseModel):
 
 
 class FasAuxPayload(BaseModel):
-    """FMC auxiliary load-switch power: RFD900x radio or RunCam, on/off."""
+    """FMC auxiliary rail power. Only "radio" (the STM32WL modem) is an FMC pin;
+    "runcam" and "rf_pa" are EPB load switches the FMC is the single writer for.
+    "rfd" is a deprecated alias for "radio", kept so an older client keeps
+    addressing the vehicle modem rather than device 0 by coincidence."""
 
     model_config = ConfigDict(
         json_schema_extra={"example": {"node": "FMC_0", "device": "runcam", "enable": True}}
@@ -501,24 +504,97 @@ class FasAuxPayload(BaseModel):
         default=None,
         description='FAS board node string, e.g. "FMC_0". Parsed to board_type/board_id.',
     )
-    device: Literal["rfd", "runcam"] = Field(description="Load switch to control")
+    device: Literal["radio", "runcam", "rf_pa", "rfd"] = Field(
+        description=(
+            "Rail to control: radio (STM32WL modem, FMC pin), runcam (EPB load "
+            "switch), rf_pa (EPB load switch for the RF amplifier). rfd is a "
+            "deprecated alias for radio."
+        ),
+    )
     enable: bool = Field(description="True = power on, False = power off")
+    autostop_s: int | None = Field(
+        default=None, ge=0, le=43200,
+        description=(
+            "runcam only: bound the recording this power-up starts. Omitted = "
+            "use the FMC's persisted runcam_autostop_s; 0 = no timer, the rail "
+            "stays up until something drops it; 1..43200 = auto-stop that many "
+            "seconds after the EPB echoes the rail up. Ignored for radio/rf_pa."
+        ),
+    )
 
 
-class FasRfPayload(BaseModel):
-    """FMC RF telemetry rate/power mode. The mode is PERSISTED ON THE FMC; only send
-    this on an explicit operator change (the FMC's LOW default is authoritative)."""
+class FasRuncamRecordPayload(BaseModel):
+    """Compatibility alias for the camera rail.
+
+    There is no record command in this system: the FMC has no data link to the
+    camera, so raising the 8V4 rail is what starts a recording and dropping it
+    is what stops one. This posts the same rail command as
+    /fas/aux with device="runcam"."""
 
     model_config = ConfigDict(
-        json_schema_extra={"example": {"node": "FMC_0", "mode": 0}}
+        json_schema_extra={"example": {"node": "FMC_0", "enable": True, "autostop_s": 1800}}
     )
 
     node: str | None = Field(
         default=None,
         description='FAS board node string, e.g. "FMC_0". Parsed to board_type/board_id.',
     )
-    mode: Literal[0, 1, 2] = Field(
-        description="RF telemetry rate/power mode: 0 = low (default, power-saving), 1 = normal, 2 = high",
+    enable: bool = Field(description="True = raise the camera rail, False = drop it")
+    autostop_s: int | None = Field(
+        default=None, ge=0, le=43200,
+        description=(
+            "Omitted = use the FMC's persisted runcam_autostop_s; 0 = no timer; "
+            "1..43200 = auto-stop that many seconds after the EPB echoes the "
+            "rail up. The timer arms off the rail echo, not off this command."
+        ),
+    )
+
+
+class FasRadioConfigPayload(BaseModel):
+    """The complete FMC-authoritative vehicle-radio configuration, carried as one
+    88-byte bulk record. Wired link only — the firmware never accepts it over RF.
+
+    `cfg` is passed through to the bridge unvalidated here on purpose: the bridge
+    owns the byte-level bounds (they mirror radio_config_store.h) and rejects a
+    bad record with a logged reason, so duplicating them here would mean two
+    copies to keep in step with the firmware."""
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "node": "FMC_0",
+                "action": "set",
+                "cfg": {
+                    "callsign": "VA3UTA",
+                    "allocation_low_hz": 908200000,
+                    "allocation_high_hz": 909000000,
+                    "lora": {
+                        "frequency_hz": 908600000, "bandwidth_hz": 500000,
+                        "power_dbm": 14, "spreading_factor": 12,
+                        "coding_rate": "4/5", "preamble_symbols": 8,
+                    },
+                },
+            }
+        }
+    )
+
+    node: str | None = Field(
+        default=None,
+        description='FAS board node string, e.g. "FMC_0". Parsed to board_type/board_id.',
+    )
+    action: Literal["set", "get"] = Field(
+        default="set",
+        description="set = write and persist on the FMC, get = request a read-back",
+    )
+    transaction_id: int = Field(
+        default=0, ge=0, le=0xFFFFFFFF,
+        description="Echoed in the FMC's read-back so a reply can be matched to its request",
+    )
+    cfg: dict = Field(
+        description=(
+            "Complete radio configuration object: callsign, allocation_low_hz, "
+            "allocation_high_hz, lora{...}, pressure_channels[], rf_chain{...}"
+        ),
     )
 
 

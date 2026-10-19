@@ -23,8 +23,12 @@ venv
 
 # log files
 *.log
+logs/*
+!logs/.gitkeep
 
-# Ignore all files in the logs directory
-# but keep the .gitkeep file
-backend/app/logs/*
-!backend/app/logs/.gitkeep
+# Data files
+data/*
+!data/.gitkeep
+
+# Config history written when running without NOVA_CONFIG_HISTORY_DIR
+config/history/

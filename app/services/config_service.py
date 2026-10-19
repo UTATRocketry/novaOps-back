@@ -1,17 +1,34 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import yaml
 
 from app.models import FasSensorBinding, SourceTarget, SystemConfig
+from app.services.config_history import ConfigHistory
+
+# (file name, content hash, source) - source is one of
+# "startup", "load", "upload", "edit".
+ConfigListener = Callable[[str, "str | None", str], None]
 
 
 class ConfigService:
-    def __init__(self, config_path: Path) -> None:
+    def __init__(self, config_path: Path, history: ConfigHistory | None = None) -> None:
         self._config_path = config_path
         self._config: SystemConfig | None = None
+        self._history = history or ConfigHistory(None)
+        self._listeners: list[ConfigListener] = []
+
+    def add_listener(self, listener: ConfigListener) -> None:
+        self._listeners.append(listener)
+
+    def record_active(self, source: str, client: str | None = None) -> str | None:
+        """Snapshot the active config file into history and notify listeners."""
+        digest = self._history.snapshot(self._config_path, source, client)
+        for listener in self._listeners:
+            listener(self._config_path.name, digest, source)
+        return digest
 
     @property
     def config(self) -> SystemConfig:
@@ -30,11 +47,13 @@ class ConfigService:
         self._config = config
         return self._config
 
-    def set_config_path(self, config_path: Path) -> SystemConfig:
+    def set_config_path(self, config_path: Path, source: str = "load", client: str | None = None) -> SystemConfig:
         self._config_path = config_path
-        return self.reload()
+        config = self.reload()
+        self.record_active(source, client)
+        return config
 
-    def update_config(self, config_data: dict[str, Any]) -> SystemConfig:
+    def update_config(self, config_data: dict[str, Any], client: str | None = None) -> SystemConfig:
         config = self._parse_config(config_data)
         self._check_duplicates(config)
         # Persist the parsed model (not the raw payload) so the written file stays
@@ -47,6 +66,7 @@ class ConfigService:
         )
         self._write_yaml(self._config_path, clean_data)
         self._config = config
+        self.record_active("edit", client)
         return config
 
     def upload_config_bytes(self, payload: bytes) -> SystemConfig:

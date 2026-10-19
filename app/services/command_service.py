@@ -18,7 +18,8 @@ from app.models import (
     FasBuzzerPayload,
     FasChargerPayload,
     FasRabPayload,
-    FasRfPayload,
+    FasRadioConfigPayload,
+    FasRuncamRecordPayload,
     FasSdPayload,
     FasSoundPayload,
     SourceTarget,
@@ -175,13 +176,25 @@ class CommandParser:
 
     @staticmethod
     def _board_fields(binding: ActuatorBinding) -> dict:
-        """Return board_type / board_id fields for a FAS command envelope."""
-        if binding.board_type is not None:
-            return {"board_type": binding.board_type, "board_id": binding.board_id}
+        """Return board_type / board_id fields for a FAS command envelope.
+
+        The node string ("EPB_4") is the binding's canonical address: it is
+        what the config editor writes and what sensors already resolve through
+        FasSensorBinding.resolved_node. The loose board_type/board_id pair is
+        only trusted when no parseable node exists. Preferring the pair broke
+        BVFTP: its config carried node="EPB_4" plus a stale board_type="EPB"/
+        board_id=0, so every command went on the wire addressed to EPB:0 - a
+        board that does not exist - and was silently dropped by every EPB's
+        board-id filter, while the same command from the legacy GS (which
+        sends an explicit board_id) worked. The bridge then prefers an
+        explicit board_id over the node, so the 0 always won downstream too.
+        """
         if binding.node:
             parts = binding.node.rsplit("_", 1)
             if len(parts) == 2 and parts[1].isdigit():
                 return {"board_type": parts[0], "board_id": int(parts[1])}
+        if binding.board_type is not None:
+            return {"board_type": binding.board_type, "board_id": binding.board_id}
         return {"board_type": None, "board_id": binding.board_id}
 
     def _parse_fas(self, actuator: ActuatorEntry, state: str) -> list[dict]:
@@ -358,13 +371,29 @@ class CommandService:
         command = {
             "type": "fas", **board, "op": "aux_power",
             "device": payload.device, "enable": payload.enable,
+            # None means "defer to the FMC's persisted default"; the bridge
+            # turns that into the 0xFFFF wire sentinel. Only read for runcam.
+            "autostop_s": payload.autostop_s,
         }
         self._ctx.mqtt_service.publish_device_commands([command])
         return [command]
 
-    def apply_fas_rf(self, payload: FasRfPayload) -> list[dict]:
+    def apply_fas_runcam_record(self, payload: FasRuncamRecordPayload) -> list[dict]:
         board = self._fas_board(payload.node or "FMC_0")
-        command = {"type": "fas", **board, "op": "rf_cfg", "mode": payload.mode}
+        command = {
+            "type": "fas", **board, "op": "runcam_record",
+            "enable": payload.enable, "autostop_s": payload.autostop_s,
+        }
+        self._ctx.mqtt_service.publish_device_commands([command])
+        return [command]
+
+    def apply_fas_radio_config(self, payload: FasRadioConfigPayload) -> list[dict]:
+        board = self._fas_board(payload.node or "FMC_0")
+        command = {
+            "type": "fas", **board, "op": "radio_config",
+            "action": payload.action, "transaction_id": payload.transaction_id,
+            "cfg": payload.cfg,
+        }
         self._ctx.mqtt_service.publish_device_commands([command])
         return [command]
 
@@ -483,9 +512,8 @@ class CommandService:
 
         if payload.name in {"START_DATA_SAVING", "STOP_DATA_SAVING"}:
             enabled = payload.name == "START_DATA_SAVING"
-            ctx.runtime.data_saving_enabled = enabled
-            ctx.mqtt_service.publish_data_saving(enabled)
-            return {"data_saving_enabled": enabled}
+            name = ctx.set_data_saving(enabled)
+            return {"data_saving_enabled": enabled, "recording": name}
 
         if payload.name == "GET_DATA_FILES":
             return {"data_files": sorted(path.name for path in ctx.data_dir.glob("*.csv"))}

@@ -9,9 +9,11 @@ from typing import Any
 
 from app.services.clip_store import ClipStore
 from app.services.command_service import CommandService
+from app.services.config_history import ConfigHistory
 from app.services.config_service import ConfigService
 from app.services.data_service import RollingAverageStore, SensorParser
 from app.services.mqtt_service import MqttService
+from app.services.recording_service import RecordingService
 from app.services.role_service import RoleService
 from app.state import RuntimeState
 from app.websocket_manager import WebSocketManager
@@ -26,13 +28,24 @@ STALE_CHECK_INTERVAL_S = float(os.getenv("NOVA_STALE_CHECK_INTERVAL_S", "2"))
 
 
 class AppContext:
-    def __init__(self, config_path: Path, data_dir: Path) -> None:
+    def __init__(
+        self,
+        config_path: Path,
+        data_dir: Path,
+        history_dir: Path | None = None,
+        env: str = "",
+        software: dict[str, Any] | None = None,
+    ) -> None:
         self.runtime = RuntimeState()
-        self.config_service = ConfigService(config_path=config_path)
+        self.config_history = ConfigHistory(history_dir, env)
+        self.config_service = ConfigService(config_path=config_path, history=self.config_history)
         self.ws_manager = WebSocketManager()
         self.role_service = RoleService(self.ws_manager)
         self.data_dir = data_dir
         self.data_dir.mkdir(parents=True, exist_ok=True)
+
+        self.recordings = RecordingService(data_dir, env=env, software=software)
+        self.config_service.add_listener(self.recordings.config_changed)
 
         # Soundboard clips are staged in a temp dir and pulled by the bridge over
         # HTTP instead of riding an MQTT message (see services/clip_store.py).
@@ -76,6 +89,9 @@ class AppContext:
     async def startup(self) -> None:
         self._event_loop = asyncio.get_running_loop()
         self.config_service.reload()
+        # Record what we booted with: a config edited by hand on disk would
+        # otherwise have no snapshot for a recording to point at.
+        self.config_service.record_active("startup")
         self.mqtt_service.start()
         self.runtime.initialize_all(self.config_service.config)
         self._staleness_task = asyncio.create_task(self._staleness_loop())
@@ -88,6 +104,21 @@ class AppContext:
         self.mqtt_service.stop()
         self._event_loop = None
         LOGGER.info("Application stopped")
+
+    def set_data_saving(self, enabled: bool) -> str | None:
+        """Start or stop a recording. Returns the new recording's name on start.
+
+        The metadata file is written before the loggers are told to start, so
+        there is never a data file without a record of its config.
+        """
+        name = None
+        if enabled:
+            name = self.recordings.start()
+        else:
+            self.recordings.stop()
+        self.runtime.data_saving_enabled = enabled
+        self.mqtt_service.publish_data_saving(enabled, filename=name)
+        return name
 
     async def broadcast(self, payload: dict[str, Any]) -> None:
         """Broadcast a payload to all connected clients.
