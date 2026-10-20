@@ -26,7 +26,7 @@ jobs:
           BASE_REF: ${{ github.base_ref }}
         run: |
           words='[a-z0-9]+(-[a-z0-9]+)*'
-          work="^(feature|bugfix|chore)/${words}$"
+          work="^(feature|bugfix|chore|tests)/${words}$"
           hotfix="^hotfix/${words}$"
           release='^release/v[0-9]{4}\.[0-9]{2}\.[0-9]{2}(\.[0-9]+)?$'
           github_made='^(revert-[0-9]+-|dependabot/)'
@@ -34,7 +34,7 @@ jobs:
 
           if [[ ! ( "$HEAD_REF" =~ $work || "$HEAD_REF" =~ $hotfix || "$HEAD_REF" =~ $release \
                     || "$HEAD_REF" == "main" || "$HEAD_REF" =~ $github_made ) ]]; then
-            fail "Branch '$HEAD_REF' must be named feature/..., bugfix/..., chore/... (lower case, words joined by single hyphens), e.g. bugfix/fas-port-reconnect. Rename it on GitHub (Branches page, pencil icon) - that keeps this PR."
+            fail "Branch '$HEAD_REF' must be named feature/..., bugfix/..., chore/..., tests/... (lower case, words joined by single hyphens), e.g. bugfix/fas-port-reconnect. Rename it on GitHub (Branches page, pencil icon) - that keeps this PR."
           fi
 
           case "$BASE_REF" in
