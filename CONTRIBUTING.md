@@ -21,11 +21,11 @@ This file only covers what is specific to this repo.
 ## Before you open a PR
 
 ```bash
-pip install -r requirements.txt pytest httpx
-python -m pytest -q
+pip install -r requirements.txt pytest httpx pytest-cov
+python -m pytest -q --cov=app
 ```
 
-CI runs the same tests on every PR.
+CI runs the same tests on every PR and prints coverage.
 
 ## Simulator Test (level 2)
 

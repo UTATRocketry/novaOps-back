@@ -80,7 +80,7 @@ jobs:
           cache: pip
 
       - name: Install
-        run: pip install -r requirements.txt pytest httpx
+        run: pip install -r requirements.txt pytest httpx pytest-cov
 
       - name: Tests
-        run: python -m pytest -q
+        run: python -m pytest -q --cov=app --cov-report=term-missing:skip-covered
