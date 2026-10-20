@@ -27,6 +27,11 @@ python -m pytest -q --cov=app
 
 CI runs the same tests on every PR and prints coverage.
 
+`tests/integration/` starts a real Mosquitto broker and `tools/novaMock.py`
+and checks that telemetry reaches a websocket client. It needs Mosquitto
+installed (on PATH, or in `C:\Program Files\mosquitto`) and is skipped
+without it. CI sets `NOVA_REQUIRE_INTEGRATION=1` so it fails instead.
+
 ## Simulator Test (level 2)
 
 - `tools/novaMock.py`, `tools/nova_dummy.py`, `tools/novaSystem_dummy.py`:

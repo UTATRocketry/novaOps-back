@@ -31,6 +31,9 @@ include = ["app*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+markers = [
+  "integration: starts Mosquitto and novaMock; skipped if Mosquitto isn't installed",
+]
 
 [tool.pylint.MASTER]
 ignore-paths = [".venv", ".pytest_cache"]
