@@ -10,6 +10,12 @@ Read that first.** In short:
 - CI green + 1 approval (a lead's if it can move hardware), then **Squash and merge**.
 - Leads bring tested releases into `main`; you never merge into `main` yourself.
 
+**Where to work:** clone this repo into the `dev/` folder of a Nova-Collected
+clone, e.g. `Nova/dev/backend` (see "Getting started as a developer" in the
+Nova-Collected README), or anywhere else you like. Branch from `dev` there.
+Never work in the `prod/` or `pi/` submodules of Nova-Collected: they show the
+released version and are overwritten when it changes.
+
 This file only covers what is specific to this repo.
 
 ## Before you open a PR
@@ -27,8 +33,9 @@ CI runs the same tests on every PR.
   simulated novaGround and FAS traffic over MQTT
 - `tools/sim_control.html`: drive the simulators from a browser
 
-Then go through the testing procedure (`docs/testing-procedure.md` in
-Nova-Collected) against them.
+Then go through the
+[testing procedure](https://github.com/UTATRocketry/Nova-Collected/blob/main/docs/development/testing-procedure.md)
+against them.
 
 ## Scopes for PR titles
 
