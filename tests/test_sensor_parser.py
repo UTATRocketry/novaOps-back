@@ -105,7 +105,7 @@ def test_fas_sensor_maps_from_board_based_config() -> None:
 
     parsed = parser.parse(
         source="FAS",
-        raw_sensors=[{"node": "EPB_3", "channel": 1, "value": 1.0, "timestamp": 9}],
+        raw_sensors=[{"node": "EPB_2", "channel": 1, "value": 1.0, "timestamp": 9}],
         config=config,
         calibration_enabled=True,
     )

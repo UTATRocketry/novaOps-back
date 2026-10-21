@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 from fastapi import APIRouter, Depends, File, Header, HTTPException, UploadFile
 from fastapi.responses import FileResponse
@@ -17,8 +17,12 @@ def _config_file(ctx: AppContext, name: str) -> Path:
 
     Only bare *.yaml names are accepted, so a request can never read or activate
     a file elsewhere on disk (e.g. "../../somewhere.yaml").
+
+    PureWindowsPath treats both / and \\ as separators (and C: as a drive) on
+    every OS, so a name is rejected the same way on Linux as on Windows.
     """
-    if not name or Path(name).name != name or Path(name).suffix.lower() != ".yaml":
+    as_path = PureWindowsPath(name)
+    if not name or as_path.name != name or as_path.suffix.lower() != ".yaml":
         raise HTTPException(status_code=400, detail="Expected a bare .yaml file name")
     return ctx.config_service.config_path.parent / name
 

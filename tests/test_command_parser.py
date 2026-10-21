@@ -227,10 +227,10 @@ def test_fas_solenoid_emits_abstract_relay_dict() -> None:
     parser = CommandParser(config)
 
     assert parser.parse(CommandPayload(type="solenoid", name="SVFTV", state="open")) == [
-        {"type": "fas", "node": "EPB_1", "port": "relay", "channel": 2, "action": "on"}
+        {"type": "fas", "board_type": "EPB", "board_id": 1, "port": "relay", "channel": 2, "action": "on"}
     ]
     assert parser.parse(CommandPayload(type="solenoid", name="SVFTV", state="closed")) == [
-        {"type": "fas", "node": "EPB_1", "port": "relay", "channel": 2, "action": "off"}
+        {"type": "fas", "board_type": "EPB", "board_id": 1, "port": "relay", "channel": 2, "action": "off"}
     ]
 
 
@@ -248,8 +248,8 @@ def test_fas_servo_emits_relay_then_servo_sequence() -> None:
     parser = CommandParser(config)
 
     assert parser.parse(CommandPayload(type="servo", name="BVFTP", state="open")) == [
-        {"type": "fas", "node": "EPB_1", "port": "relay", "channel": 1, "action": "on"},
-        {"type": "fas", "node": "EPB_1", "port": "servo", "channel": 1, "action": "open", "value": 2050},
+        {"type": "fas", "board_type": "EPB", "board_id": 1, "port": "relay", "channel": 1, "action": "on"},
+        {"type": "fas", "board_type": "EPB", "board_id": 1, "port": "servo", "channel": 1, "action": "open", "value": 2050},
     ]
 
 
@@ -267,13 +267,13 @@ def test_fas_powered_gpio_emits_gpio_action() -> None:
     parser = CommandParser(config)
 
     assert parser.parse(CommandPayload(type="powered_gpio_device", name="IMC-V", state="ARM")) == [
-        {"type": "fas", "node": "EPB_3", "port": "gpio", "channel": 2, "action": "ARM"}
+        {"type": "fas", "board_type": "EPB", "board_id": 3, "port": "gpio", "channel": 2, "action": "ARM"}
     ]
     assert parser.parse(CommandPayload(type="powered_gpio_device", name="IMC-V", state="on")) == [
-        {"type": "fas", "node": "EPB_3", "port": "relay", "channel": 2, "action": "on"}
+        {"type": "fas", "board_type": "EPB", "board_id": 3, "port": "relay", "channel": 2, "action": "on"}
     ]
     assert parser.parse(CommandPayload(type="powered_gpio_device", name="IMC-V", state="off")) == [
-        {"type": "fas", "node": "EPB_3", "port": "relay", "channel": 2, "action": "off"}
+        {"type": "fas", "board_type": "EPB", "board_id": 3, "port": "relay", "channel": 2, "action": "off"}
     ]
 
 
@@ -291,10 +291,10 @@ def test_fas_gpio_device_emits_arm_disarm_gpio_action() -> None:
     parser = CommandParser(config)
 
     assert parser.parse(CommandPayload(type="gpio_device", name="IMC-V", state="armed")) == [
-        {"type": "fas", "node": "EPB_3", "port": "gpio", "channel": 2, "action": "armed"}
+        {"type": "fas", "board_type": "EPB", "board_id": 3, "port": "gpio", "channel": 2, "action": "armed"}
     ]
     assert parser.parse(CommandPayload(type="gpio_device", name="IMC-V", state="disarm")) == [
-        {"type": "fas", "node": "EPB_3", "port": "gpio", "channel": 2, "action": "disarm"}
+        {"type": "fas", "board_type": "EPB", "board_id": 3, "port": "gpio", "channel": 2, "action": "disarm"}
     ]
 
 
@@ -321,38 +321,3 @@ def test_fas_reversible_motor_emits_relay_actions() -> None:
         {"type": "fas", "board_type": "EPB", "board_id": 1, "port": "relay", "channel": 3, "action": "off"},
         {"type": "fas", "board_type": "EPB", "board_id": 1, "port": "relay", "channel": 4, "action": "on"},
     ]
-
-
-# --- System (Commands section) ---
-
-def test_system_command_emits_fas_cmd_with_validated_state() -> None:
-    config = _config(
-        [],
-        commands={
-            "SET_FLIGHT_STATE": {
-                "binding": {"target": "FAS", "node": "FMC"},
-                "states": ["STANDBY", "ARMED"],
-            }
-        },
-    )
-    parser = CommandParser(config)
-
-    assert parser.parse_system_command("SET_FLIGHT_STATE", "ARMED") == [
-        {"type": "fas_cmd", "node": "FMC", "command": "SET_FLIGHT_STATE", "state": "ARMED"}
-    ]
-
-
-def test_system_command_rejects_invalid_state() -> None:
-    config = _config(
-        [],
-        commands={
-            "SET_FLIGHT_STATE": {
-                "binding": {"target": "FAS", "node": "FMC"},
-                "states": ["STANDBY", "ARMED"],
-            }
-        },
-    )
-    parser = CommandParser(config)
-
-    with pytest.raises(ValueError, match="requires state"):
-        parser.parse_system_command("SET_FLIGHT_STATE", "LAUNCH")

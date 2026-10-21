@@ -79,8 +79,16 @@ jobs:
           python-version: "3.12"
           cache: pip
 
+      # Mosquitto is the MQTT broker for tests/integration (novaMock -> backend).
       - name: Install
-        run: pip install -r requirements.txt pytest httpx
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q mosquitto
+          pip install -r requirements.txt pytest httpx pytest-cov
 
+      # NOVA_REQUIRE_INTEGRATION makes the integration tests fail rather than
+      # skip if Mosquitto is missing, so they can't silently stop running.
       - name: Tests
-        run: python -m pytest -q
+        env:
+          NOVA_REQUIRE_INTEGRATION: "1"
+        run: python -m pytest -q -rs --cov=app --cov-report=term-missing:skip-covered
