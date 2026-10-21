@@ -5,7 +5,7 @@
 Read that first.** In short:
 
 - `dev` collects finished work for hardware testing; `main` is what prod runs.
-- Branch from `dev` as `feature/...`, `bugfix/...` or `chore/...`, e.g. `bugfix/fas-port-reconnect`.
+- Branch from `dev` as `feature/...`, `bugfix/...`, `chore/...` or `tests/...`, e.g. `bugfix/fas-port-reconnect`.
 - Open a PR **into `dev`**, titled `type(scope): what changed`, and fill in the template.
 - CI green + 1 approval (a lead's if it can move hardware), then **Squash and merge**.
 - Leads bring tested releases into `main`; you never merge into `main` yourself.
