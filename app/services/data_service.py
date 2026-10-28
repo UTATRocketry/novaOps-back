@@ -87,8 +87,13 @@ class SensorParser:
 
         parsed: list[ParsedSensor] = []
         for item in items:
-            timestamp = int(item.get("timestamp", 0))
-            raw_value = float(item.get("value", 0.0))
+            try:
+                timestamp = int(item.get("timestamp", 0))
+                raw_value = float(item.get("value", 0.0))
+            except (TypeError, ValueError):
+                # One malformed reading (e.g. a null value) must not drop the
+                # rest of the packet.
+                continue
 
             if is_fas:
                 key = (str(item.get("node", "")), int(item.get("channel", -1)))
