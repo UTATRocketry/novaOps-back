@@ -45,12 +45,12 @@ Optional control UI:
     sensor's waveform (flat / sine / square / triangle / sawtooth / s-curve /
     ramp / noise), change the flight state, start/stop a fake SD-card fill, and
     watch every received command with a live format validation. Without
-    ``--ui`` novaMock runs exactly as before, fully headless.
+    ``--ui`` novaSim runs exactly as before, fully headless.
 
 Usage:
-    python tools/novaMock.py                 # headless
-    python tools/novaMock.py --ui            # with control panel on :8765
-    python tools/novaMock.py --ui --ui-port 9000
+    python tools/novaSim.py                 # headless
+    python tools/novaSim.py --ui            # with control panel on :8765
+    python tools/novaSim.py --ui --ui-port 9000
 
 Environment variables (CLI flags override these):
     NOVA_MQTT_BROKER   MQTT broker host (default: localhost)
@@ -83,7 +83,7 @@ FLIGHT_TOPIC = "nova/telemetry/flight"
 CONSOLE_TOPIC = "nova/console"
 COMMAND_TOPIC = "nova/command"
 CONTROL_TOPIC = "nova/control"
-CLIENT_ID = "novaMock"
+CLIENT_ID = "novaSim"
 
 # Coarse lock guarding every piece of mutable sim state below, since the UI
 # thread, the MQTT callback thread and the publish loop all touch it.
@@ -1058,7 +1058,7 @@ def _publish_flight_event(client: mqtt.Client, event: dict) -> None:
                          "severity": event["severity"]},
                "source": "FAS"}
     client.publish(CONSOLE_TOPIC, _dumps(payload), qos=0)
-    print(f"[novaMock] flight_event #{event['id']} {event['name']} ({event['severity']})")
+    print(f"[novaSim] flight_event #{event['id']} {event['name']} ({event['severity']})")
 
 
 def _handle_console(client: mqtt.Client, cmd: dict) -> None:
@@ -1068,7 +1068,7 @@ def _handle_console(client: mqtt.Client, cmd: dict) -> None:
     if action in {"start", "stop"}:
         with _lock:
             _console_active = action == "start"
-        print(f"[novaMock] console {action}")
+        print(f"[novaSim] console {action}")
         _publish_console(client, {"type": "console_status", "active": action == "start"})
 
     elif action == "list_ports":
@@ -1079,7 +1079,7 @@ def _handle_console(client: mqtt.Client, cmd: dict) -> None:
     elif action == "configure":
         port = str(cmd.get("port", "")).strip() or "/dev/ttySIM0"
         baud = int(cmd.get("baud", 460800))
-        print(f"[novaMock] console configure -> {port} @ {baud}")
+        print(f"[novaSim] console configure -> {port} @ {baud}")
         with _lock:
             _serial_link.update(connected=True, port=port, baud=baud, error=None)
             state = dict(_serial_link)
@@ -1088,7 +1088,7 @@ def _handle_console(client: mqtt.Client, cmd: dict) -> None:
         _publish_console(client, {"type": "console_serial", **state})
 
     elif action == "disconnect":
-        print("[novaMock] console disconnect")
+        print("[novaSim] console disconnect")
         with _lock:
             _serial_link.update(connected=False, port="", error=None)
             state = dict(_serial_link)
@@ -1106,11 +1106,11 @@ def _handle_console(client: mqtt.Client, cmd: dict) -> None:
         with _lock:
             connected = _serial_link["connected"]
         if not connected:
-            print(f"[novaMock] console tx op={op} dropped: no serial port")
+            print(f"[novaSim] console tx op={op} dropped: no serial port")
             _publish_console(client, {"type": "console_tx", "ok": False,
                                       "error": "no serial port connected"})
             return
-        print(f"[novaMock] console tx op={op} board={cmd.get('board_id')} "
+        print(f"[novaSim] console tx op={op} board={cmd.get('board_id')} "
               f"ch={cmd.get('channel')}")
         _publish_console(client, {
             "type": "console_tx", "ok": True,
@@ -1120,7 +1120,7 @@ def _handle_console(client: mqtt.Client, cmd: dict) -> None:
         })
 
     else:
-        print(f"[novaMock] console: unknown action {action!r}")
+        print(f"[novaSim] console: unknown action {action!r}")
 
 
 # ---------------------------------------------------------------------------
@@ -1137,32 +1137,32 @@ def _handle_fas_port(cmd: dict) -> None:
     if port == "relay":
         enable = action == "on"
         _set_actuator(board_id, channel, load_sw_on=int(enable))
-        print(f"[novaMock] fas load_sw EPB:{board_id} ch={channel} "
+        print(f"[novaSim] fas load_sw EPB:{board_id} ch={channel} "
               f"{'ON' if enable else 'OFF'}")
 
     elif port == "servo":
         if action == "enable":
-            print(f"[novaMock] fas servo enable (no-op) EPB:{board_id} ch={channel}")
+            print(f"[novaSim] fas servo enable (no-op) EPB:{board_id} ch={channel}")
             return
         pulse_us = 0 if action == "disable" else int(cmd.get("value", 0))
         _set_actuator(board_id, channel, pulse_us=pulse_us)
-        print(f"[novaMock] fas pwm_set EPB:{board_id} ch={channel} pulse={pulse_us}us")
+        print(f"[novaSim] fas pwm_set EPB:{board_id} ch={channel} pulse={pulse_us}us")
 
     elif port == "gpio":
         act = action.upper()
         if act == "ARM":
             with _lock:
                 _imc_armed, _imc_board_id = True, board_id
-            print(f"[novaMock] fas imc_arm EPB:{board_id}")
+            print(f"[novaSim] fas imc_arm EPB:{board_id}")
         elif act == "DISARM":
             with _lock:
                 _imc_armed, _imc_board_id = False, board_id
-            print(f"[novaMock] fas imc_disarm EPB:{board_id}")
+            print(f"[novaSim] fas imc_disarm EPB:{board_id}")
         else:
-            print(f"[novaMock] fas gpio: unknown action {action!r}")
+            print(f"[novaSim] fas gpio: unknown action {action!r}")
 
     else:
-        print(f"[novaMock] fas: unknown port {port!r}")
+        print(f"[novaSim] fas: unknown port {port!r}")
 
 
 def _handle_fas_op(cmd: dict, client: mqtt.Client | None = None) -> None:
@@ -1174,34 +1174,34 @@ def _handle_fas_op(cmd: dict, client: mqtt.Client | None = None) -> None:
     if op == "pwm_set":
         _set_actuator(board_id, channel, pulse_us=int(cmd.get("pulse_us", 0)),
                       period_us=int(cmd.get("period_us", 20000)))
-        print(f"[novaMock] fas op=pwm_set EPB:{board_id} ch={channel} "
+        print(f"[novaSim] fas op=pwm_set EPB:{board_id} ch={channel} "
               f"pulse={cmd.get('pulse_us')}us")
     elif op == "load_sw_set":
         _set_actuator(board_id, channel, load_sw_on=int(bool(cmd.get("enable"))))
-        print(f"[novaMock] fas op=load_sw_set EPB:{board_id} ch={channel} "
+        print(f"[novaSim] fas op=load_sw_set EPB:{board_id} ch={channel} "
               f"enable={cmd.get('enable')}")
     elif op == "imc_arm":
         with _lock:
             _imc_armed, _imc_board_id = True, board_id
-        print(f"[novaMock] fas op=imc_arm board={board_id}")
+        print(f"[novaSim] fas op=imc_arm board={board_id}")
     elif op == "imc_disarm":
         with _lock:
             _imc_armed, _imc_board_id = False, board_id
-        print(f"[novaMock] fas op=imc_disarm board={board_id}")
+        print(f"[novaSim] fas op=imc_disarm board={board_id}")
     elif op == "failsafe":
         with _lock:
             _epb_actuators.pop(board_id, None)
-        print(f"[novaMock] fas op=failsafe board={board_id}")
+        print(f"[novaSim] fas op=failsafe board={board_id}")
     elif op == "discover":
-        print("[novaMock] fas op=discover")
+        print("[novaSim] fas op=discover")
     elif op == "actuator_query":
-        print(f"[novaMock] fas op=actuator_query board={board_id} ch={channel}")
+        print(f"[novaSim] fas op=actuator_query board={board_id} ch={channel}")
     elif op == "buzzer":
         notes = cmd.get("notes")
         if notes is not None:
-            print(f"[novaMock] fas op=buzzer melody FMC:{board_id} notes={len(notes)}")
+            print(f"[novaSim] fas op=buzzer melody FMC:{board_id} notes={len(notes)}")
         else:
-            print(f"[novaMock] fas op=buzzer FMC:{board_id} action={cmd.get('action')}")
+            print(f"[novaSim] fas op=buzzer FMC:{board_id} action={cmd.get('action')}")
     elif op == "sd_cmd":
         # Reflect SD logger control in the fake fill, like real firmware would.
         sub = str(cmd.get("action", "")).lower()
@@ -1212,7 +1212,7 @@ def _handle_fas_op(cmd: dict, client: mqtt.Client | None = None) -> None:
                 # Decimation divisor (1..255, 1 = full rate) — echoed back as
                 # rate_div in the SD status, NOT the UI fill speed (_sd["rate"]).
                 _sd["rate_div"] = max(1, int(cmd.get("divisor", cmd.get("arg", 1))))
-        print(f"[novaMock] fas op=sd_cmd FMC:{board_id} action={sub}")
+        print(f"[novaSim] fas op=sd_cmd FMC:{board_id} action={sub}")
     elif op in ("rab_arm", "rab_disarm"):
         # RAB recovery arming, addressed by board_id (0 = A, 1 = B). The readback
         # follows the command so no mismatch fires (inject one from the UI to test).
@@ -1221,7 +1221,7 @@ def _handle_fas_op(cmd: dict, client: mqtt.Client | None = None) -> None:
             r = _rab.setdefault(board_id, {"expected": False, "armed": False, "rx": 0})
             r["expected"] = arm
             r["armed"] = arm
-        print(f"[novaMock] fas op={op} RAB:{board_id} -> {'ARMED' if arm else 'DISARMED'}")
+        print(f"[novaSim] fas op={op} RAB:{board_id} -> {'ARMED' if arm else 'DISARMED'}")
     elif op == "aux_power":
         dev = str(cmd.get("device", "radio")).lower()
         enable = bool(cmd.get("enable"))
@@ -1247,14 +1247,14 @@ def _handle_fas_op(cmd: dict, client: mqtt.Client | None = None) -> None:
                                          _radio_cfg["rf_chain"]["duty_cycle"])
             else:
                 _aux["radio"] = enable
-        print(f"[novaMock] fas op=aux_power {dev} {'ON' if enable else 'OFF'}")
+        print(f"[novaSim] fas op=aux_power {dev} {'ON' if enable else 'OFF'}")
     elif op == "runcam_record":
         enable = bool(cmd.get("enable"))
         autostop = max(0, min(43200, int(cmd.get("autostop_s", 0) or 0)))
         with _lock:
             _aux["runcam_recording"] = enable
             _aux["runcam_record_s"] = autostop if (enable and autostop) else None
-        print(f"[novaMock] fas op=runcam_record {'START' if enable else 'STOP'} "
+        print(f"[novaSim] fas op=runcam_record {'START' if enable else 'STOP'} "
               f"autostop={autostop or 'none'}")
     elif op == "radio_config":
         cfg = cmd.get("cfg")
@@ -1266,10 +1266,10 @@ def _handle_fas_op(cmd: dict, client: mqtt.Client | None = None) -> None:
                 _radio_cfg_txn["generation"] += 1
                 _radio_cfg_txn["status"] = 2      # applied
                 _radio_cfg_txn["persisted"] = True
-            print(f"[novaMock] fas op=radio_config applied txn="
+            print(f"[novaSim] fas op=radio_config applied txn="
                   f"{_radio_cfg_txn['transaction_id']}")
         else:
-            print("[novaMock] fas op=radio_config ignored (no cfg object)")
+            print("[novaSim] fas op=radio_config ignored (no cfg object)")
     elif op == "sound":
         _handle_sound(cmd)
     elif op == "sound_upload":
@@ -1285,9 +1285,9 @@ def _handle_fas_op(cmd: dict, client: mqtt.Client | None = None) -> None:
             if v != 0xFF:
                 _charger["v_setting"] = max(0, min(31, v))
             en, iset, vset = _charger["enabled"], _charger["i_setting"], _charger["v_setting"]
-        print(f"[novaMock] fas op=pmb_charger enable={en} i={iset} v={vset}")
+        print(f"[novaSim] fas op=pmb_charger enable={en} i={iset} v={vset}")
     else:
-        print(f"[novaMock] fas: unknown op {op!r}")
+        print(f"[novaSim] fas: unknown op {op!r}")
 
 
 def _handle_sound_upload(cmd: dict, client: mqtt.Client | None = None) -> None:
@@ -1314,12 +1314,12 @@ def _handle_sound_upload(cmd: dict, client: mqtt.Client | None = None) -> None:
             with _lock:
                 _sound["clips"].append({"name": name, "length": length, "format": fmt})
                 n = len(_sound["clips"])
-            print(f"[novaMock] fas op=sound_upload {name!r} ({length} B, fmt={fmt}) "
+            print(f"[novaSim] fas op=sound_upload {name!r} ({length} B, fmt={fmt}) "
                   f"-> {n} clips")
         else:
             with _lock:
                 n = len(_sound["clips"])
-            print(f"[novaMock] fas op=sound_upload {name!r} FAILED at {stage}: {error}")
+            print(f"[novaSim] fas op=sound_upload {name!r} FAILED at {stage}: {error}")
         if client is not None:
             _publish_console(client, {
                 "type": "sound_upload_result", "upload_id": upload_id,
@@ -1372,17 +1372,17 @@ def _handle_sound(cmd: dict) -> None:
         elif action == "clear":
             _sound["clips"] = []
             _sound["playing"] = None
-    print(f"[novaMock] fas op=sound action={action}")
+    print(f"[novaSim] fas op=sound action={action}")
 
 
 def _handle_data_file(cmd: dict) -> None:
     action = cmd.get("action", "")
     if action == "start_data_saving":
-        print(f"[novaMock] Data saving STARTED — file: {cmd.get('filename', 'unknown')}.csv")
+        print(f"[novaSim] Data saving STARTED — file: {cmd.get('filename', 'unknown')}.csv")
     elif action == "stop_data_saving":
-        print("[novaMock] Data saving STOPPED")
+        print("[novaSim] Data saving STOPPED")
     else:
-        print(f"[novaMock] Unknown data_file action: {action}")
+        print(f"[novaSim] Unknown data_file action: {action}")
 
 
 # ---------------------------------------------------------------------------
@@ -1393,14 +1393,14 @@ def on_connect(client: mqtt.Client, _userdata, _flags, reason_code, _properties)
     if ok:
         client.subscribe(COMMAND_TOPIC)
         client.subscribe(CONTROL_TOPIC)
-        print(f"[novaMock] Connected to {BROKER}:{PORT}")
-        print(f"[novaMock] Subscribed to {COMMAND_TOPIC} and {CONTROL_TOPIC}")
+        print(f"[novaSim] Connected to {BROKER}:{PORT}")
+        print(f"[novaSim] Subscribed to {COMMAND_TOPIC} and {CONTROL_TOPIC}")
     else:
-        print(f"[novaMock] Connect failed: {reason_code}")
+        print(f"[novaSim] Connect failed: {reason_code}")
 
 
 def on_disconnect(_client, _userdata, _flags, reason_code, _properties) -> None:
-    print(f"[novaMock] Disconnected: {reason_code}")
+    print(f"[novaSim] Disconnected: {reason_code}")
 
 
 def on_message(client, _userdata, message) -> None:
@@ -1408,7 +1408,7 @@ def on_message(client, _userdata, message) -> None:
         payload = json.loads(message.payload.decode("utf-8"))
     except Exception as exc:
         _record_command(message.topic, {"_decode_error": str(exc)})
-        print(f"[novaMock] Error decoding message: {exc}")
+        print(f"[novaSim] Error decoding message: {exc}")
         return
 
     # Capture every inbound message for the UI's validation log.
@@ -1422,11 +1422,11 @@ def on_message(client, _userdata, message) -> None:
         if topic == CONTROL_TOPIC:
             source = payload.get("source", "")
             if source.lower() == "novalock":
-                print(f"[novaMock] Physical lockout: {payload.get('state', '?')}")
+                print(f"[novaSim] Physical lockout: {payload.get('state', '?')}")
             elif cmd_type == "data_file":
                 _handle_data_file(cmd)
             else:
-                print(f"[novaMock] Control message: {payload}")
+                print(f"[novaSim] Control message: {payload}")
             return
 
         # nova/command — only act on the backend's own envelopes.
@@ -1435,11 +1435,11 @@ def on_message(client, _userdata, message) -> None:
 
         # --- GCS device commands (novaGround side) ---
         if cmd_type == "relay":
-            print(f"[novaMock] Relay command — id={cmd.get('id')} state={cmd.get('state')}")
+            print(f"[novaSim] Relay command — id={cmd.get('id')} state={cmd.get('state')}")
         elif cmd_type == "servo":
-            print(f"[novaMock] Servo command — id={cmd.get('id')} angle={cmd.get('angle')}")
+            print(f"[novaSim] Servo command — id={cmd.get('id')} angle={cmd.get('angle')}")
         elif cmd_type == "gpio":
-            print(f"[novaMock] GPIO command — id={cmd.get('id')} state={cmd.get('state')}")
+            print(f"[novaSim] GPIO command — id={cmd.get('id')} state={cmd.get('state')}")
 
         # --- FAS device commands (fas_bridge side) ---
         elif cmd_type == "fas":
@@ -1448,7 +1448,7 @@ def on_message(client, _userdata, message) -> None:
             elif "op" in cmd:
                 _handle_fas_op(cmd, client)
             else:
-                print(f"[novaMock] fas: unrecognised shape {cmd}")
+                print(f"[novaSim] fas: unrecognised shape {cmd}")
 
         elif cmd_type == "console":
             _handle_console(client, cmd)
@@ -1457,10 +1457,10 @@ def on_message(client, _userdata, message) -> None:
             _handle_data_file(cmd)
 
         else:
-            print(f"[novaMock] Unhandled command type '{cmd_type}': {cmd}")
+            print(f"[novaSim] Unhandled command type '{cmd_type}': {cmd}")
 
     except Exception as exc:
-        print(f"[novaMock] Error processing message: {exc}")
+        print(f"[novaSim] Error processing message: {exc}")
 
 
 def _maybe_publish_console_frame(client: mqtt.Client) -> None:
@@ -1608,7 +1608,7 @@ def _ui_apply_launch(body: dict) -> str:
             "samples": rows, "times": idx["times"],
             "apogee_t": idx["apogee_t"], "end_t": idx["end_t"],
         })
-    print(f"[novaMock] LAUNCH — {src} x{speed} (apogee t={idx['apogee_t']:.1f}s, "
+    print(f"[novaSim] LAUNCH — {src} x{speed} (apogee t={idx['apogee_t']:.1f}s, "
           f"duration {idx['end_t']:.1f}s)")
     return src
 
@@ -1732,7 +1732,7 @@ def _make_ui_handler():
         def do_GET(self):
             parsed = urlparse(self.path)
             if parsed.path in ("/", "/index.html"):
-                self._send(200, _UI_HTML, "text/html; charset=utf-8")
+                self._send(200, _ui_html(), "text/html; charset=utf-8")
             elif parsed.path == "/api/state":
                 self._send(200, json.dumps(_ui_state()))
             elif parsed.path == "/api/commands":
@@ -1779,331 +1779,21 @@ def _make_ui_handler():
 def start_ui(port: int) -> None:
     server = ThreadingHTTPServer(("0.0.0.0", port), _make_ui_handler())
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    print(f"[novaMock] Control UI on http://localhost:{port}")
+    print(f"[novaSim] Control UI on http://localhost:{port}")
 
 
-_UI_HTML = """<!doctype html>
-<html><head><meta charset="utf-8"><title>novaMock control</title>
-<style>
-  body{font:14px/1.4 system-ui,sans-serif;margin:0;background:#0e1116;color:#e6edf3}
-  header{padding:10px 16px;background:#161b22;border-bottom:1px solid #30363d;
-    display:flex;gap:16px;align-items:center;flex-wrap:wrap}
-  h1{font-size:16px;margin:0}
-  main{display:grid;grid-template-columns:1fr 1fr;gap:14px;padding:14px}
-  section{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:12px}
-  h2{font-size:13px;text-transform:uppercase;letter-spacing:.05em;color:#9da7b3;margin:0 0 10px}
-  table{width:100%;border-collapse:collapse}
-  th,td{padding:4px 6px;text-align:left;border-bottom:1px solid #21262d;font-size:13px}
-  th{color:#9da7b3;font-weight:600}
-  input,select,button{background:#0d1117;color:#e6edf3;border:1px solid #30363d;
-    border-radius:5px;padding:3px 6px;font:inherit}
-  input[type=number]{width:64px}
-  button{cursor:pointer}
-  button:hover{border-color:#58a6ff}
-  .pill{padding:1px 8px;border-radius:10px;font-size:12px}
-  .on{background:#1f6feb33;color:#79c0ff}.off{background:#6e768166;color:#9da7b3}
-  .warn2{background:#f8514933;color:#ff7b72}
-  .grp{font-size:11px;color:#8b949e}
-  #cmds{max-height:420px;overflow:auto;font-family:ui-monospace,Consolas,monospace;font-size:12px}
-  .cmd{border-bottom:1px solid #21262d;padding:5px 4px}
-  .ok{border-left:3px solid #3fb950}.bad{border-left:3px solid #f85149}
-  .cmd .meta{color:#8b949e}
-  .issues{color:#f85149;margin:2px 0 0}
-  .bar{height:10px;background:#21262d;border-radius:5px;overflow:hidden;margin-top:6px}
-  .bar>div{height:100%;background:#3fb950;width:0}
-  .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:6px 0}
-  .muted{color:#8b949e}
-</style></head><body>
-<header>
-  <h1>novaMock control</h1>
-  <span id="conn" class="muted">connecting…</span>
-  <label><input type="checkbox" id="auto" checked> auto-refresh</label>
-</header>
-<main>
-  <section style="grid-column:1/2">
-    <h2>Sensors</h2>
-    <table id="sensors"><thead><tr>
-      <th>name</th><th>src</th><th>wave</th><th>min</th><th>max</th>
-      <th>period</th><th>noise</th><th>value</th><th></th>
-    </tr></thead><tbody></tbody></table>
-    <p class="muted">value is used by the <b>flat</b> wave. period in seconds.</p>
-  </section>
-  <section style="grid-column:2/3">
-    <h2>Flight FSM</h2>
-    <div class="row">
-      <select id="fstate"></select>
-      <button onclick="setFlight()">Set phase</button>
-      <span id="imc" class="pill off">IMC ?</span>
-    </div>
-    <div class="row">
-      <span class="muted">fas_state:</span> <span id="fasstate" class="pill on">?</span>
-      <span class="muted">phase:</span> <span id="livestate" class="pill on">?</span>
-    </div>
-    <div id="events" style="max-height:120px;overflow:auto;font-family:ui-monospace,Consolas,monospace;font-size:12px;margin-top:6px"></div>
-    <h2 style="margin-top:16px">Launch (trajectory replay)</h2>
-    <div class="row">
-      <button id="launchbtn" onclick="toggleLaunch()">🚀 Launch</button>
-      speed <input type="number" id="lspeed" step="0.5" value="1" style="width:54px"> ×
-    </div>
-    <div class="row">
-      CSV <input type="text" id="lpath" placeholder="(default / leave blank)" style="flex:1;min-width:180px">
-    </div>
-    <p class="muted">blank uses the default sim CSV, or a generic profile if none.
-      <span id="lstatus"></span></p>
-    <h2 style="margin-top:16px">SD card fill</h2>
-    <div class="row">
-      <button id="sdtoggle" onclick="toggleSd()">start fill</button>
-      rate <input type="number" id="sdrate" step="0.1" value="1"> %/s
-      <button onclick="sdReset()">reset</button>
-    </div>
-    <div>used <span id="sdpct">?</span>%</div>
-    <div class="bar"><div id="sdbar"></div></div>
-    <p class="muted">console mode: <span id="console">?</span></p>
-  </section>
-  <section style="grid-column:1/2">
-    <h2>FAS boards — connect / disconnect</h2>
-    <div id="boards" class="row"></div>
-    <p class="muted">unchecking a board drops it from the fleet and stops its telemetry.</p>
-  </section>
-  <section style="grid-column:2/3">
-    <h2>RAB recovery arming</h2>
-    <div class="row"><b style="width:14px">A</b> <span id="rabA" class="pill off">?</span>
-      <button onclick="rabArm(0,true)">arm</button>
-      <button onclick="rabArm(0,false)">disarm</button>
-      <button onclick="rabMismatch(0)">force mismatch</button></div>
-    <div class="row"><b style="width:14px">B</b> <span id="rabB" class="pill off">?</span>
-      <button onclick="rabArm(1,true)">arm</button>
-      <button onclick="rabArm(1,false)">disarm</button>
-      <button onclick="rabMismatch(1)">force mismatch</button></div>
-    <div class="row">FMC→RAB link: <button id="rablink" onclick="rabLink()">?</button></div>
-  </section>
-  <section style="grid-column:1/2">
-    <h2>Battery charger (PMB)</h2>
-    <div class="row">
-      <label><input type="checkbox" id="chgEn" onchange="applyCharger()"> charging enabled</label>
-      <span id="chgState" class="pill off">?</span>
-    </div>
-    <div class="row">i <input type="number" id="chgI" min="0" max="31" style="width:54px">
-      v <input type="number" id="chgV" min="0" max="31" style="width:54px">
-      <button onclick="applyCharger()">apply limits</button></div>
-    <div class="row"><label><input type="checkbox" id="chgProt" onchange="applyCharger()">
-      battery protect (fault — converters cut)</label></div>
-    <p class="muted">DAC codes 0..31. Mirrors the /api/fas/charger command effect.</p>
-  </section>
-  <section style="grid-column:2/3">
-    <h2>FMC aux / STM32WL radio</h2>
-    <div class="row">
-      <label><input type="checkbox" id="auxRadio" onchange="applyAux()"> modem rail</label>
-      <label><input type="checkbox" id="auxRuncam" onchange="applyAux()"> RunCam power</label>
-      <label><input type="checkbox" id="auxRec" onchange="applyAux()"> recording</label>
-    </div>
-    <div class="row">
-      <label><input type="checkbox" id="auxPa" onchange="applyAux()"> RF PA request</label>
-      <label><input type="checkbox" id="auxPaInh" onchange="applyAux()"> PA inhibit</label>
-      <span id="paState" class="pill off">PA off</span>
-    </div>
-    <div class="row">
-      <label><input type="checkbox" id="radReady" onchange="applyAux()"> modem ready</label>
-      <label><input type="checkbox" id="radFault" onchange="applyAux()"> fault</label>
-    </div>
-    <div class="row">
-      <label><input type="checkbox" id="radCfgOk" onchange="applyAux()"> config valid</label>
-      <label><input type="checkbox" id="radMatch" onchange="applyAux()"> readback matches</label>
-    </div>
-    <div class="row">queue <input type="number" id="radQ" value="0" style="width:64px"
-      onchange="applyAux()"> dropped <input type="number" id="radDrop" value="0"
-      style="width:64px" onchange="applyAux()"></div>
-    <div class="row muted">PPS is always simulated present. The PA cannot come on
-      while the modem is not ready — that is the firmware inhibit, not a failure.</div>
-  </section>
-  <section style="grid-column:1/3">
-    <h2>Soundboard</h2>
-    <div class="row">
-      add clip <input type="text" id="clipName" placeholder="name" style="width:120px">
-      len <input type="number" id="clipLen" value="8000" style="width:74px"> B
-      <button onclick="soundAdd()">add</button>
-      <button onclick="soundClear()">clear all</button>
-      <button onclick="soundTone()">tone</button>
-      <span id="sndInfo" class="muted"></span>
-    </div>
-    <table id="clips"><thead><tr><th>#</th><th>name</th><th>bytes</th><th></th></tr></thead><tbody></tbody></table>
-    <p class="muted">real uploads arrive via the /api/fas/sound/upload backend command and append here too.</p>
-  </section>
-  <section style="grid-column:1/3">
-    <h2>Received commands (live validation)</h2>
-    <div id="cmds"></div>
-  </section>
-</main>
-<script>
-let lastSeq=0, state=null;
-const $=id=>document.getElementById(id);
-async function post(path,body){await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});}
-function num(v){const n=parseFloat(v);return isNaN(n)?null:n;}
+_UI_HTML_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sim_control.html")
 
-function renderSensors(){
-  const tb=$('sensors').querySelector('tbody');
-  tb.innerHTML='';
-  for(const[name,c]of Object.entries(state.sensors)){
-    const tr=document.createElement('tr');tr.dataset.name=name;
-    const opts=state.waves.map(w=>`<option ${w===c.wave?'selected':''}>${w}</option>`).join('');
-    tr.innerHTML=`<td><b>${name}</b></td><td class="grp">${c.group}</td>
-      <td><select class="w">${opts}</select></td>
-      <td><input class="mn" type="number" step="0.01" value="${c.min}"></td>
-      <td><input class="mx" type="number" step="0.01" value="${c.max}"></td>
-      <td><input class="pd" type="number" step="0.5" value="${c.period}"></td>
-      <td><input class="ns" type="number" step="0.001" value="${c.noise}"></td>
-      <td><input class="vl" type="number" step="0.01" value="${c.value}"></td>
-      <td><button>apply</button></td>`;
-    tr.querySelector('button').onclick=()=>{
-      post('/api/sensor',{name,wave:tr.querySelector('.w').value,
-        min:num(tr.querySelector('.mn').value),max:num(tr.querySelector('.mx').value),
-        period:num(tr.querySelector('.pd').value),noise:num(tr.querySelector('.ns').value),
-        value:num(tr.querySelector('.vl').value)});
-    };
-    tb.appendChild(tr);
-  }
-}
-const SEV_COLOR={DEBUG:'#8b949e',INFO:'#79c0ff',WARNING:'#d29922',ERROR:'#f85149',FATAL:'#ff7b72'};
-function renderFlight(){
-  const sel=$('fstate');
-  if(sel.options.length!==state.flight_phases.length){
-    sel.innerHTML=state.flight_phases.map(s=>`<option>${s}</option>`).join('');
-    sel.value=state.flight_phase;
-  }
-  // Don't clobber the dropdown while the user is choosing or a launch is live.
-  if(document.activeElement!==sel && !state.launch.active){
-    sel.value=state.flight_phase;
-  }
-  $('livestate').textContent=state.flight_phase;
-  $('fasstate').textContent=state.fas_state;
-  const imc=$('imc');
-  imc.textContent='IMC '+(state.imc.armed?'ARMED':'safe')+' (b'+state.imc.board_id+')';
-  imc.className='pill '+(state.imc.armed?'on':'off');
-  $('console').textContent=state.console_active?'active':'off';
-  $('sdpct').textContent=state.sd.pct;
-  $('sdbar').style.width=state.sd.pct+'%';
-  $('sdbar').style.background=state.sd.pct>=80?'#f85149':'#3fb950';
-  $('sdtoggle').textContent=state.sd.filling?'stop fill':'start fill';
-  // Flight events (most recent first)
-  $('events').innerHTML=(state.events||[]).slice().reverse().map(e=>{
-    const ts=new Date(e.t).toLocaleTimeString();
-    const col=SEV_COLOR[e.severity]||'#e6edf3';
-    return `<div>${ts} <span style="color:${col}">#${e.id} ${e.name}</span> <span class="muted">${e.severity}</span></div>`;
-  }).join('')||'<span class="muted">no events yet</span>';
-  // Launch
-  const L=state.launch;
-  $('launchbtn').textContent=L.active?'■ Abort':'🚀 Launch';
-  if($('lpath').placeholder.indexOf('default')>=0 && L.default_csv){
-    $('lpath').placeholder=L.default_csv;
-  }
-  $('lstatus').textContent=L.active
-    ? `— ${L.src}, T+${L.elapsed}s / ${L.duration}s ×${L.speed}`
-    : (L.src&&L.src!=='none'?`— last: ${L.src}`:'');
-}
-function renderExtras(){
-  // FAS boards online toggles
-  const bd=$('boards');
-  if(bd.children.length!==Object.keys(state.boards||{}).length){
-    bd.innerHTML='';
-    for(const k of Object.keys(state.boards||{})){
-      const lbl=document.createElement('label');
-      lbl.innerHTML=`<input type="checkbox"> ${k}`;
-      lbl.querySelector('input').onchange=e=>post('/api/boards',{key:k,online:e.target.checked});
-      lbl.dataset.key=k; bd.appendChild(lbl);
-    }
-  }
-  for(const lbl of bd.children){lbl.querySelector('input').checked=!!(state.boards||{})[lbl.dataset.key];}
-  // RAB A/B
-  const rab=state.rab||{};
-  for(const [id,elid] of [['0','rabA'],['1','rabB']]){
-    const r=rab[id]||{}, el=$(elid), mm=r.armed!==r.expected;
-    el.textContent=(r.armed?'ARMED':'safe')+(mm?' ⚠MISMATCH':'');
-    el.className='pill '+(mm?'warn2':(r.armed?'on':'off'));
-  }
-  $('rablink').textContent=rab.link?'up':'DOWN';
-  // Charger
-  const c=state.charger||{};
-  if(document.activeElement!==$('chgI'))$('chgI').value=c.i_setting;
-  if(document.activeElement!==$('chgV'))$('chgV').value=c.v_setting;
-  $('chgEn').checked=!!c.enabled; $('chgProt').checked=!!c.protect;
-  $('chgState').textContent=c.enabled?'CC/CV':'off';
-  $('chgState').className='pill '+(c.enabled?'on':'off');
-  // Aux / STM32WL radio
-  const a=state.aux||{}, r=state.radio||{};
-  $('auxRadio').checked=!!a.radio; $('auxRuncam').checked=!!a.runcam;
-  $('auxRec').checked=!!a.runcam_recording;
-  $('auxPa').checked=!!a.rf_pa_requested; $('auxPaInh').checked=!!a.rf_pa_inhibit;
-  $('radReady').checked=!!r.ready; $('radFault').checked=!!r.fault;
-  $('radCfgOk').checked=!!r.config_valid; $('radMatch').checked=!!r.readback_matches;
-  if(document.activeElement!==$('radQ'))$('radQ').value=r.queue_depth||0;
-  if(document.activeElement!==$('radDrop'))$('radDrop').value=r.tx_dropped||0;
-  const pa=$('paState');
-  pa.textContent=a.rf_pa_on?(a.rf_pa_cycling?'PA cycling':'PA on')
-    :(a.rf_pa_requested?'PA inhibited':'PA off');
-  pa.className='pill '+(a.rf_pa_on?'on':'off');
-  // Soundboard
-  const s=state.sound||{clips:[]};
-  $('sndInfo').textContent=`playing: ${s.playing==null?'—':'#'+s.playing} · vol ${s.volume}`+(s.tone?' · TONE':'');
-  const tb=$('clips').querySelector('tbody'); tb.innerHTML='';
-  (s.clips||[]).forEach((cl,i)=>{
-    const tr=document.createElement('tr');
-    tr.innerHTML=`<td>${i}</td><td>${escapeHtml(cl.name)}</td><td>${cl.length}</td>`+
-      `<td><button onclick="soundPlay(${i})">play</button> <button onclick="soundRemove(${i})">✕</button></td>`;
-    tb.appendChild(tr);
-  });
-}
-function rabArm(id,a){post('/api/rab',{rab_id:id,armed:a});}
-function rabMismatch(id){post('/api/rab',{rab_id:id,mismatch:true});}
-function rabLink(){post('/api/rab',{link:!(state.rab&&state.rab.link)});}
-function applyCharger(){post('/api/charger',{enable:$('chgEn').checked,i_setting:num($('chgI').value),v_setting:num($('chgV').value),protect:$('chgProt').checked});}
-function applyAux(){post('/api/aux',{radio:$('auxRadio').checked,runcam:$('auxRuncam').checked,
-  runcam_recording:$('auxRec').checked,rf_pa_requested:$('auxPa').checked,
-  rf_pa_inhibit:$('auxPaInh').checked,ready:$('radReady').checked,fault:$('radFault').checked,
-  config_valid:$('radCfgOk').checked,readback_matches:$('radMatch').checked,
-  queue_depth:num($('radQ').value),tx_dropped:num($('radDrop').value)});}
-function soundAdd(){post('/api/sound',{action:'add',name:$('clipName').value||'clip',length:num($('clipLen').value)||8000});}
-function soundClear(){post('/api/sound',{action:'clear'});}
-function soundTone(){post('/api/sound',{action:'tone',ms:400});}
-function soundPlay(i){post('/api/sound',{action:'play',idx:i});}
-function soundRemove(i){post('/api/sound',{action:'remove',idx:i});}
-function setFlight(){post('/api/flight',{phase:$('fstate').value});}
-function toggleLaunch(){
-  if(state.launch.active){post('/api/launch',{action:'abort'});}
-  else{post('/api/launch',{action:'launch',speed:num($('lspeed').value)||1,path:$('lpath').value});}
-}
-function toggleSd(){post('/api/sd',{filling:!state.sd.filling,rate:num($('sdrate').value)});}
-function sdReset(){post('/api/sd',{reset:true});}
 
-async function refresh(){
-  try{
-    state=await(await fetch('/api/state')).json();
-    $('conn').textContent='connected';$('conn').className='muted';
-    if(!$('sensors').querySelector('tbody').children.length)renderSensors();
-    renderFlight();
-    renderExtras();
-  }catch(e){$('conn').textContent='disconnected';}
-}
-async function pollCmds(){
-  try{
-    const r=await(await fetch('/api/commands?since='+lastSeq)).json();
-    const box=$('cmds');
-    for(const c of r.commands){
-      lastSeq=Math.max(lastSeq,c.seq);
-      const d=document.createElement('div');
-      d.className='cmd '+(c.ok?'ok':'bad');
-      const ts=new Date(c.t).toLocaleTimeString();
-      d.innerHTML=`<div class="meta">#${c.seq} ${ts} ${c.topic} ${c.ok?'✓':'✗'}</div>`+
-        `<div>${escapeHtml(JSON.stringify(c.payload))}</div>`+
-        (c.issues.length?`<div class="issues">${c.issues.map(escapeHtml).join('<br>')}</div>`:'');
-      box.insertBefore(d,box.firstChild);
-    }
-    while(box.children.length>200)box.removeChild(box.lastChild);
-  }catch(e){}
-}
-function escapeHtml(s){return String(s).replace(/[&<>]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[m]));}
-setInterval(()=>{if($('auto').checked){refresh();pollCmds();}},1000);
-refresh();pollCmds();
-</script></body></html>"""
+def _ui_html() -> str:
+    """Read the control page from disk, so edits to it show on a refresh."""
+    try:
+        with open(_UI_HTML_PATH, "r", encoding="utf-8") as fh:
+            return fh.read()
+    except OSError as exc:
+        print(f"[novaSim] Cannot read {_UI_HTML_PATH}: {exc}")
+        return ("<!doctype html><meta charset=\"utf-8\"><title>novaSim control</title>"
+                f"<p>Cannot read <code>{os.path.basename(_UI_HTML_PATH)}</code>: {exc}")
 
 
 _DEFAULT_SIM_CSV = os.path.join(
@@ -2130,7 +1820,7 @@ def main() -> None:
     BROKER, PORT, HZ, FLIGHT_HZ = args.broker, args.port, args.hz, args.flight_hz
     _sim_csv_default = args.sim_csv if os.path.isfile(args.sim_csv) else ""
 
-    print(f"[novaMock] Starting (broker {BROKER}:{PORT}, engine {HZ} Hz, flight {FLIGHT_HZ} Hz)")
+    print(f"[novaSim] Starting (broker {BROKER}:{PORT}, engine {HZ} Hz, flight {FLIGHT_HZ} Hz)")
     if args.ui:
         start_ui(args.ui_port)
 
@@ -2149,18 +1839,18 @@ def main() -> None:
     try:
         client.connect_async(BROKER, PORT, keepalive=60)
     except Exception as exc:  # bad host/port etc. — keep running so the UI lives
-        print(f"[novaMock] connect_async error (will keep retrying): {exc}")
+        print(f"[novaSim] connect_async error (will keep retrying): {exc}")
     client.loop_start()
-    print(f"[novaMock] Connecting to MQTT in the background. If nothing connects, "
+    print(f"[novaSim] Connecting to MQTT in the background. If nothing connects, "
           f"start a broker (e.g. mosquitto) on {BROKER}:{PORT}.")
 
     sensor_interval = 1.0 / HZ
     flight_interval = 1.0 / FLIGHT_HZ
     next_flight = time.time()
-    print(f"[novaMock] Publishing GCS + FAS engine sensors to {TELEMETRY_TOPIC} at {HZ} Hz")
-    print(f"[novaMock] Publishing flight snapshot to {FLIGHT_TOPIC} at {FLIGHT_HZ} Hz")
+    print(f"[novaSim] Publishing GCS + FAS engine sensors to {TELEMETRY_TOPIC} at {HZ} Hz")
+    print(f"[novaSim] Publishing flight snapshot to {FLIGHT_TOPIC} at {FLIGHT_HZ} Hz")
     if not args.ui:
-        print("[novaMock] (no UI; pass --ui for the control panel)")
+        print("[novaSim] (no UI; pass --ui for the control panel)")
 
     try:
         while True:
@@ -2176,7 +1866,7 @@ def main() -> None:
                 next_flight = now + flight_interval
             time.sleep(sensor_interval)
     except KeyboardInterrupt:
-        print("\n[novaMock] Stopping")
+        print("\n[novaSim] Stopping")
     finally:
         client.loop_stop()
         client.disconnect()
