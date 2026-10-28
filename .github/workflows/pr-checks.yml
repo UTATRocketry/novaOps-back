@@ -115,7 +115,7 @@ jobs:
         run: >
           python -m pytest -q -rs --junitxml=junit.xml
           --cov=app --cov-branch --cov-report=term-missing:skip-covered
-          --cov-report=xml --cov-fail-under=67
+          --cov-report=xml --cov-fail-under=68
 
       - uses: actions/upload-artifact@v4
         if: always()
