@@ -1796,12 +1796,6 @@ def _ui_html() -> str:
                 f"<p>Cannot read <code>{os.path.basename(_UI_HTML_PATH)}</code>: {exc}")
 
 
-_DEFAULT_SIM_CSV = os.path.join(
-    os.path.expanduser("~"),
-    "OneDrive", "Documents", "UTAT", "Discovery", "OpenRocket", "Sim_Data.csv",
-)
-
-
 def main() -> None:
     global BROKER, PORT, HZ, FLIGHT_HZ, _sim_csv_default
     p = argparse.ArgumentParser(description="novaGround + FAS-bridge MQTT simulator")
@@ -1812,13 +1806,16 @@ def main() -> None:
     p.add_argument("--port", type=int, default=PORT, help="MQTT broker port")
     p.add_argument("--hz", type=float, default=HZ, help="engine-sensor publish rate")
     p.add_argument("--flight-hz", type=float, default=FLIGHT_HZ, help="flight publish rate")
-    p.add_argument("--sim-csv", default=_DEFAULT_SIM_CSV,
-                   help="default trajectory CSV used by the UI 'Launch' button "
-                        "(falls back to a synthetic profile if missing)")
+    p.add_argument("--sim-csv", default=os.environ.get("NOVA_SIM_CSV", ""),
+                   help="trajectory CSV used by the UI 'Launch' button, or set "
+                        "NOVA_SIM_CSV instead (falls back to a synthetic "
+                        "profile when unset or missing)")
     args = p.parse_args()
 
     BROKER, PORT, HZ, FLIGHT_HZ = args.broker, args.port, args.hz, args.flight_hz
     _sim_csv_default = args.sim_csv if os.path.isfile(args.sim_csv) else ""
+    if args.sim_csv and not _sim_csv_default:
+        print(f"[novaSim] --sim-csv not found, ignoring: {args.sim_csv}")
 
     print(f"[novaSim] Starting (broker {BROKER}:{PORT}, engine {HZ} Hz, flight {FLIGHT_HZ} Hz)")
     if args.ui:

@@ -56,6 +56,11 @@ frontend can be exercised end to end with no hardware.
 `tools/sim_control.html`, read from disk on each request, so edits to it show
 on a browser refresh without restarting the simulator.
 
+The UI's "Launch" button replays a trajectory. Point it at an OpenRocket CSV
+export (11 numeric columns) with `--sim-csv`, or set `NOVA_SIM_CSV` so you
+don't have to pass it every time; with neither, it synthesizes a generic
+flight profile.
+
 ## nova_dummy.py
 
 ```bash
