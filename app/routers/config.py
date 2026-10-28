@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path, PureWindowsPath
 
+import yaml
 from fastapi import APIRouter, Depends, File, Header, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 
@@ -32,6 +33,13 @@ def _client(ctx: AppContext, client_id: str | None) -> str | None:
     if not client_id:
         return None
     return f"{client_id} ({ctx.role_service.get_role(client_id).name})"
+
+def _update(ctx: AppContext, data: dict, client_id: str | None) -> SystemConfig:
+    try:
+        return ctx.config_service.update_config(data, _client(ctx, client_id))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid config: {exc}") from exc
+
 
 async def _publish_config(ctx: AppContext, config: SystemConfig) -> dict:
     """Sync actuator state to the new config, then tell every client."""
@@ -74,7 +82,10 @@ async def load_config(
     config_path = _config_file(ctx, path)
     if not config_path.exists():
         raise HTTPException(status_code=404, detail="Config file not found")
-    config = ctx.config_service.set_config_path(config_path, "load", _client(ctx, x_client_id))
+    try:
+        config = ctx.config_service.set_config_path(config_path, "load", _client(ctx, x_client_id))
+    except (ValueError, yaml.YAMLError) as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid config: {exc}") from exc
     return await _publish_config(ctx, config)
 
 @router.get("/download/{file_name}", summary="Download config file", description="Download a YAML config file by file name from the config directory.")
@@ -95,7 +106,11 @@ async def upload_config(
         raise HTTPException(status_code=400, detail="File name is required")
     
     payload = await file.read()
-    #config = ctx.config_service.upload_config_bytes(payload)
+    # Validate before touching the disk: the upload may reuse the live file's name.
+    try:
+        ctx.config_service.validate_config_bytes(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid config: {exc}") from exc
     config_dir = ctx.config_service.config_path.parent
     config_path = config_dir / file_name
     config_path.write_bytes(payload)
@@ -109,7 +124,7 @@ async def replace_config(
     ctx: AppContext = Depends(get_context),
     x_client_id: str | None = Header(default=None),
 ) -> dict:
-    config = ctx.config_service.update_config(config_payload, _client(ctx, x_client_id))
+    config = _update(ctx, config_payload, x_client_id)
     return await _publish_config(ctx, config)
 
 
@@ -121,7 +136,7 @@ async def patch_config(
 ) -> dict:
     current = ctx.config_service.config.model_dump(by_alias=True)
     current.update(config_payload)
-    config = ctx.config_service.update_config(current, _client(ctx, x_client_id))
+    config = _update(ctx, current, x_client_id)
     return await _publish_config(ctx, config)
 
 

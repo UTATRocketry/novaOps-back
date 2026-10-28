@@ -48,10 +48,27 @@ class ConfigService:
         return self._config
 
     def set_config_path(self, config_path: Path, source: str = "load", client: str | None = None) -> SystemConfig:
+        previous = self._config_path
         self._config_path = config_path
-        config = self.reload()
+        try:
+            config = self.reload()
+        except Exception:
+            # A file that fails to parse must not stay "active" while the old
+            # config is still the one running.
+            self._config_path = previous
+            raise
         self.record_active(source, client)
         return config
+
+    def validate_config_bytes(self, payload: bytes) -> None:
+        """Raise ValueError if payload is not a loadable config. Changes nothing."""
+        try:
+            data = yaml.safe_load(payload.decode("utf-8")) or {}
+        except (UnicodeDecodeError, yaml.YAMLError) as exc:
+            raise ValueError(f"Not valid YAML: {exc}") from exc
+        if not isinstance(data, dict):
+            raise ValueError("Config must be a YAML mapping")
+        self._check_duplicates(self._parse_config(data))
 
     def update_config(self, config_data: dict[str, Any], client: str | None = None) -> SystemConfig:
         config = self._parse_config(config_data)

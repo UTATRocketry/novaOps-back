@@ -1,0 +1,35 @@
+{
+  "scheme": "first 16 hex chars of SHA-256 of the raw file bytes",
+  "vectors": [
+    {
+      "name": "empty",
+      "hex": "",
+      "hash": "e3b0c44298fc1c14"
+    },
+    {
+      "name": "ascii",
+      "hex": "53656e736f72733a205b5d0a4163747561746f72733a205b5d0a",
+      "hash": "c3a0f0fc1e7bc26b"
+    },
+    {
+      "name": "crlf",
+      "hex": "53656e736f72733a205b5d0d0a4163747561746f72733a205b5d0d0a",
+      "hash": "5ee42ec34bfc4af5"
+    },
+    {
+      "name": "utf8-bom",
+      "hex": "efbbbf53656e736f72733a205b5d0a",
+      "hash": "d925115f63930f87"
+    },
+    {
+      "name": "non-ascii",
+      "hex": "6e616d653a2044c3bc736520c2b0430a",
+      "hash": "a6068a8d8b26ce9d"
+    },
+    {
+      "name": "binary",
+      "hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff",
+      "hash": "40aff2e9d2d8922e"
+    }
+  ]
+}
