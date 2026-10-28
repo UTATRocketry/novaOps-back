@@ -1,237 +1,168 @@
 <!doctype html>
-<html>
+<html><head><meta charset="utf-8"><title>novaSim control</title>
+<style>
+  body{font:14px/1.4 system-ui,sans-serif;margin:0;background:#0e1116;color:#e6edf3}
+  header{padding:10px 16px;background:#161b22;border-bottom:1px solid #30363d;
+    display:flex;gap:16px;align-items:center;flex-wrap:wrap}
+  h1{font-size:16px;margin:0}
+  main{display:grid;grid-template-columns:1fr 1fr;gap:14px;padding:14px}
+  section{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:12px}
+  h2{font-size:13px;text-transform:uppercase;letter-spacing:.05em;color:#9da7b3;margin:0 0 10px}
+  table{width:100%;border-collapse:collapse}
+  th,td{padding:4px 6px;text-align:left;border-bottom:1px solid #21262d;font-size:13px}
+  th{color:#9da7b3;font-weight:600}
+  input,select,button{background:#0d1117;color:#e6edf3;border:1px solid #30363d;
+    border-radius:5px;padding:3px 6px;font:inherit}
+  input[type=number]{width:64px}
+  button{cursor:pointer}
+  button:hover{border-color:#58a6ff}
+  .pill{padding:1px 8px;border-radius:10px;font-size:12px}
+  .on{background:#1f6feb33;color:#79c0ff}.off{background:#6e768166;color:#9da7b3}
+  .warn2{background:#f8514933;color:#ff7b72}
+  .grp{font-size:11px;color:#8b949e}
+  #cmds{max-height:420px;overflow:auto;font-family:ui-monospace,Consolas,monospace;font-size:12px}
+  .cmd{border-bottom:1px solid #21262d;padding:5px 4px}
+  .ok{border-left:3px solid #3fb950}.bad{border-left:3px solid #f85149}
+  .cmd .meta{color:#8b949e}
+  .issues{color:#f85149;margin:2px 0 0}
+  .bar{height:10px;background:#21262d;border-radius:5px;overflow:hidden;margin-top:6px}
+  .bar>div{height:100%;background:#3fb950;width:0}
+  .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:6px 0}
+  .muted{color:#8b949e}
+</style></head><body>
+<header>
+  <h1>novaSim control</h1>
+  <span id="conn" class="muted">connecting…</span>
+  <label><input type="checkbox" id="auto" checked> auto-refresh</label>
+</header>
+<main>
+  <section style="grid-column:1/2">
+    <h2>Sensors</h2>
+    <table id="sensors"><thead><tr>
+      <th>name</th><th>src</th><th>wave</th><th>min</th><th>max</th>
+      <th>period</th><th>noise</th><th>value</th><th></th>
+    </tr></thead><tbody></tbody></table>
+    <p class="muted">value is used by the <b>flat</b> wave. period in seconds.</p>
+  </section>
+  <section style="grid-column:2/3">
+    <h2>Flight FSM</h2>
+    <div class="row">
+      <select id="fstate"></select>
+      <button onclick="setFlight()">Set phase</button>
+      <span id="imc" class="pill off">IMC ?</span>
+    </div>
+    <div class="row">
+      <span class="muted">fas_state:</span> <span id="fasstate" class="pill on">?</span>
+      <span class="muted">phase:</span> <span id="livestate" class="pill on">?</span>
+    </div>
+    <div id="events" style="max-height:120px;overflow:auto;font-family:ui-monospace,Consolas,monospace;font-size:12px;margin-top:6px"></div>
+    <h2 style="margin-top:16px">Launch (trajectory replay)</h2>
+    <div class="row">
+      <button id="launchbtn" onclick="toggleLaunch()">🚀 Launch</button>
+      speed <input type="number" id="lspeed" step="0.5" value="1" style="width:54px"> ×
+    </div>
+    <div class="row">
+      CSV <input type="text" id="lpath" placeholder="(default / leave blank)" style="flex:1;min-width:180px">
+    </div>
+    <p class="muted">blank uses the default sim CSV, or a generic profile if none.
+      <span id="lstatus"></span></p>
+    <h2 style="margin-top:16px">SD card fill</h2>
+    <div class="row">
+      <button id="sdtoggle" onclick="toggleSd()">start fill</button>
+      rate <input type="number" id="sdrate" step="0.1" value="1"> %/s
+      <button onclick="sdReset()">reset</button>
+    </div>
+    <div>used <span id="sdpct">?</span>%</div>
+    <div class="bar"><div id="sdbar"></div></div>
+    <p class="muted">console mode: <span id="console">?</span></p>
+  </section>
+  <section style="grid-column:1/2">
+    <h2>FAS boards — connect / disconnect</h2>
+    <div id="boards" class="row"></div>
+    <p class="muted">unchecking a board drops it from the fleet and stops its telemetry.</p>
+  </section>
+  <section style="grid-column:2/3">
+    <h2>RAB recovery arming</h2>
+    <div class="row"><b style="width:14px">A</b> <span id="rabA" class="pill off">?</span>
+      <button onclick="rabArm(0,true)">arm</button>
+      <button onclick="rabArm(0,false)">disarm</button>
+      <button onclick="rabMismatch(0)">force mismatch</button></div>
+    <div class="row"><b style="width:14px">B</b> <span id="rabB" class="pill off">?</span>
+      <button onclick="rabArm(1,true)">arm</button>
+      <button onclick="rabArm(1,false)">disarm</button>
+      <button onclick="rabMismatch(1)">force mismatch</button></div>
+    <div class="row">FMC→RAB link: <button id="rablink" onclick="rabLink()">?</button></div>
+  </section>
+  <section style="grid-column:1/2">
+    <h2>Battery charger (PMB)</h2>
+    <div class="row">
+      <label><input type="checkbox" id="chgEn" onchange="applyCharger()"> charging enabled</label>
+      <span id="chgState" class="pill off">?</span>
+    </div>
+    <div class="row">i <input type="number" id="chgI" min="0" max="31" style="width:54px">
+      v <input type="number" id="chgV" min="0" max="31" style="width:54px">
+      <button onclick="applyCharger()">apply limits</button></div>
+    <div class="row"><label><input type="checkbox" id="chgProt" onchange="applyCharger()">
+      battery protect (fault — converters cut)</label></div>
+    <p class="muted">DAC codes 0..31. Mirrors the /api/fas/charger command effect.</p>
+  </section>
+  <section style="grid-column:2/3">
+    <h2>FMC aux / STM32WL radio</h2>
+    <div class="row">
+      <label><input type="checkbox" id="auxRadio" onchange="applyAux()"> modem rail</label>
+      <label><input type="checkbox" id="auxRuncam" onchange="applyAux()"> RunCam power</label>
+      <label><input type="checkbox" id="auxRec" onchange="applyAux()"> recording</label>
+    </div>
+    <div class="row">
+      <label><input type="checkbox" id="auxPa" onchange="applyAux()"> RF PA request</label>
+      <label><input type="checkbox" id="auxPaInh" onchange="applyAux()"> PA inhibit</label>
+      <span id="paState" class="pill off">PA off</span>
+    </div>
+    <div class="row">
+      <label><input type="checkbox" id="radReady" onchange="applyAux()"> modem ready</label>
+      <label><input type="checkbox" id="radFault" onchange="applyAux()"> fault</label>
+    </div>
+    <div class="row">
+      <label><input type="checkbox" id="radCfgOk" onchange="applyAux()"> config valid</label>
+      <label><input type="checkbox" id="radMatch" onchange="applyAux()"> readback matches</label>
+    </div>
+    <div class="row">queue <input type="number" id="radQ" value="0" style="width:64px"
+      onchange="applyAux()"> dropped <input type="number" id="radDrop" value="0"
+      style="width:64px" onchange="applyAux()"></div>
+    <div class="row muted">PPS is always simulated present. The PA cannot come on
+      while the modem is not ready — that is the firmware inhibit, not a failure.</div>
+  </section>
+  <section style="grid-column:1/3">
+    <h2>Soundboard</h2>
+    <div class="row">
+      add clip <input type="text" id="clipName" placeholder="name" style="width:120px">
+      len <input type="number" id="clipLen" value="8000" style="width:74px"> B
+      <button onclick="soundAdd()">add</button>
+      <button onclick="soundClear()">clear all</button>
+      <button onclick="soundTone()">tone</button>
+      <span id="sndInfo" class="muted"></span>
+    </div>
+    <table id="clips"><thead><tr><th>#</th><th>name</th><th>bytes</th><th></th></tr></thead><tbody></tbody></table>
+    <p class="muted">real uploads arrive via the /api/fas/sound/upload backend command and append here too.</p>
+  </section>
+  <section style="grid-column:1/3">
+    <h2>Received commands (live validation)</h2>
+    <div id="cmds"></div>
+  </section>
+</main>
+<script>
+let lastSeq=0, state=null;
+const $=id=>document.getElementById(id);
+async function post(path,body){await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});}
+function num(v){const n=parseFloat(v);return isNaN(n)?null:n;}
 
-<head>
-    <meta charset="utf-8">
-    <title>novaMock control</title>
-    <style>
-        body {
-            font: 14px/1.4 system-ui, sans-serif;
-            margin: 0;
-            background: #0e1116;
-            color: #e6edf3
-        }
-
-        header {
-            padding: 10px 16px;
-            background: #161b22;
-            border-bottom: 1px solid #30363d;
-            display: flex;
-            gap: 16px;
-            align-items: center;
-            flex-wrap: wrap
-        }
-
-        h1 {
-            font-size: 16px;
-            margin: 0
-        }
-
-        main {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 14px;
-            padding: 14px
-        }
-
-        section {
-            background: #161b22;
-            border: 1px solid #30363d;
-            border-radius: 8px;
-            padding: 12px
-        }
-
-        h2 {
-            font-size: 13px;
-            text-transform: uppercase;
-            letter-spacing: .05em;
-            color: #9da7b3;
-            margin: 0 0 10px
-        }
-
-        table {
-            width: 100%;
-            border-collapse: collapse
-        }
-
-        th,
-        td {
-            padding: 4px 6px;
-            text-align: left;
-            border-bottom: 1px solid #21262d;
-            font-size: 13px
-        }
-
-        th {
-            color: #9da7b3;
-            font-weight: 600
-        }
-
-        input,
-        select,
-        button {
-            background: #0d1117;
-            color: #e6edf3;
-            border: 1px solid #30363d;
-            border-radius: 5px;
-            padding: 3px 6px;
-            font: inherit
-        }
-
-        input[type=number] {
-            width: 64px
-        }
-
-        button {
-            cursor: pointer
-        }
-
-        button:hover {
-            border-color: #58a6ff
-        }
-
-        .pill {
-            padding: 1px 8px;
-            border-radius: 10px;
-            font-size: 12px
-        }
-
-        .on {
-            background: #1f6feb33;
-            color: #79c0ff
-        }
-
-        .off {
-            background: #6e768166;
-            color: #9da7b3
-        }
-
-        .grp {
-            font-size: 11px;
-            color: #8b949e
-        }
-
-        #cmds {
-            max-height: 420px;
-            overflow: auto;
-            font-family: ui-monospace, Consolas, monospace;
-            font-size: 12px
-        }
-
-        .cmd {
-            border-bottom: 1px solid #21262d;
-            padding: 5px 4px
-        }
-
-        .ok {
-            border-left: 3px solid #3fb950
-        }
-
-        .bad {
-            border-left: 3px solid #f85149
-        }
-
-        .cmd .meta {
-            color: #8b949e
-        }
-
-        .issues {
-            color: #f85149;
-            margin: 2px 0 0
-        }
-
-        .bar {
-            height: 10px;
-            background: #21262d;
-            border-radius: 5px;
-            overflow: hidden;
-            margin-top: 6px
-        }
-
-        .bar>div {
-            height: 100%;
-            background: #3fb950;
-            width: 0
-        }
-
-        .row {
-            display: flex;
-            gap: 8px;
-            align-items: center;
-            flex-wrap: wrap;
-            margin: 6px 0
-        }
-
-        .muted {
-            color: #8b949e
-        }
-    </style>
-</head>
-
-<body>
-    <header>
-        <h1>novaMock control</h1>
-        <span id="conn" class="muted">connecting…</span>
-        <label><input type="checkbox" id="auto" checked> auto-refresh</label>
-    </header>
-    <main>
-        <section style="grid-column:1/2">
-            <h2>Sensors</h2>
-            <table id="sensors">
-                <thead>
-                    <tr>
-                        <th>name</th>
-                        <th>src</th>
-                        <th>wave</th>
-                        <th>min</th>
-                        <th>max</th>
-                        <th>period</th>
-                        <th>noise</th>
-                        <th>value</th>
-                        <th></th>
-                    </tr>
-                </thead>
-                <tbody></tbody>
-            </table>
-            <p class="muted">value is used by the <b>flat</b> wave. period in seconds.</p>
-        </section>
-        <section style="grid-column:2/3">
-            <h2>Flight state</h2>
-            <div class="row">
-                <select id="fstate"></select>
-                <button onclick="setFlight()">Set state</button>
-                <span id="imc" class="pill off">IMC ?</span>
-            </div>
-            <h2 style="margin-top:16px">SD card fill</h2>
-            <div class="row">
-                <button id="sdtoggle" onclick="toggleSd()">start fill</button>
-                rate <input type="number" id="sdrate" step="0.1" value="1"> %/s
-                <button onclick="sdReset()">reset</button>
-            </div>
-            <div>used <span id="sdpct">?</span>%</div>
-            <div class="bar">
-                <div id="sdbar"></div>
-            </div>
-            <p class="muted">console mode: <span id="console">?</span></p>
-        </section>
-        <section style="grid-column:1/3">
-            <h2>Received commands (live validation)</h2>
-            <div id="cmds"></div>
-        </section>
-    </main>
-    <script>
-        let lastSeq = 0, state = null;
-        const $ = id => document.getElementById(id);
-        async function post(path, body) { await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }); }
-        function num(v) { const n = parseFloat(v); return isNaN(n) ? null : n; }
-
-        function renderSensors() {
-            const tb = $('sensors').querySelector('tbody');
-            tb.innerHTML = '';
-            for (const [name, c] of Object.entries(state.sensors)) {
-                const tr = document.createElement('tr'); tr.dataset.name = name;
-                const opts = state.waves.map(w => `<option ${w === c.wave ? 'selected' : ''}>${w}</option>`).join('');
-                tr.innerHTML = `<td><b>${name}</b></td><td class="grp">${c.group}</td>
+function renderSensors(){
+  const tb=$('sensors').querySelector('tbody');
+  tb.innerHTML='';
+  for(const[name,c]of Object.entries(state.sensors)){
+    const tr=document.createElement('tr');tr.dataset.name=name;
+    const opts=state.waves.map(w=>`<option ${w===c.wave?'selected':''}>${w}</option>`).join('');
+    tr.innerHTML=`<td><b>${name}</b></td><td class="grp">${c.group}</td>
       <td><select class="w">${opts}</select></td>
       <td><input class="mn" type="number" step="0.01" value="${c.min}"></td>
       <td><input class="mx" type="number" step="0.01" value="${c.max}"></td>
@@ -239,65 +170,153 @@
       <td><input class="ns" type="number" step="0.001" value="${c.noise}"></td>
       <td><input class="vl" type="number" step="0.01" value="${c.value}"></td>
       <td><button>apply</button></td>`;
-                tr.querySelector('button').onclick = () => {
-                    post('/api/sensor', {
-                        name, wave: tr.querySelector('.w').value,
-                        min: num(tr.querySelector('.mn').value), max: num(tr.querySelector('.mx').value),
-                        period: num(tr.querySelector('.pd').value), noise: num(tr.querySelector('.ns').value),
-                        value: num(tr.querySelector('.vl').value)
-                    });
-                };
-                tb.appendChild(tr);
-            }
-        }
-        function renderFlight() {
-            const sel = $('fstate');
-            if (sel.options.length !== state.flight_states.length) {
-                sel.innerHTML = state.flight_states.map(s => `<option>${s}</option>`).join('');
-            }
-            sel.value = state.flight_state;
-            const imc = $('imc');
-            imc.textContent = 'IMC ' + (state.imc.armed ? 'ARMED' : 'safe') + ' (b' + state.imc.board_id + ')';
-            imc.className = 'pill ' + (state.imc.armed ? 'on' : 'off');
-            $('console').textContent = state.console_active ? 'active' : 'off';
-            $('sdpct').textContent = state.sd.pct;
-            $('sdbar').style.width = state.sd.pct + '%';
-            $('sdbar').style.background = state.sd.pct >= 80 ? '#f85149' : '#3fb950';
-            $('sdtoggle').textContent = state.sd.filling ? 'stop fill' : 'start fill';
-        }
-        function setFlight() { post('/api/flight', { state: $('fstate').value }); }
-        function toggleSd() { post('/api/sd', { filling: !state.sd.filling, rate: num($('sdrate').value) }); }
-        function sdReset() { post('/api/sd', { reset: true }); }
+    tr.querySelector('button').onclick=()=>{
+      post('/api/sensor',{name,wave:tr.querySelector('.w').value,
+        min:num(tr.querySelector('.mn').value),max:num(tr.querySelector('.mx').value),
+        period:num(tr.querySelector('.pd').value),noise:num(tr.querySelector('.ns').value),
+        value:num(tr.querySelector('.vl').value)});
+    };
+    tb.appendChild(tr);
+  }
+}
+const SEV_COLOR={DEBUG:'#8b949e',INFO:'#79c0ff',WARNING:'#d29922',ERROR:'#f85149',FATAL:'#ff7b72'};
+function renderFlight(){
+  const sel=$('fstate');
+  if(sel.options.length!==state.flight_phases.length){
+    sel.innerHTML=state.flight_phases.map(s=>`<option>${s}</option>`).join('');
+    sel.value=state.flight_phase;
+  }
+  // Don't clobber the dropdown while the user is choosing or a launch is live.
+  if(document.activeElement!==sel && !state.launch.active){
+    sel.value=state.flight_phase;
+  }
+  $('livestate').textContent=state.flight_phase;
+  $('fasstate').textContent=state.fas_state;
+  const imc=$('imc');
+  imc.textContent='IMC '+(state.imc.armed?'ARMED':'safe')+' (b'+state.imc.board_id+')';
+  imc.className='pill '+(state.imc.armed?'on':'off');
+  $('console').textContent=state.console_active?'active':'off';
+  $('sdpct').textContent=state.sd.pct;
+  $('sdbar').style.width=state.sd.pct+'%';
+  $('sdbar').style.background=state.sd.pct>=80?'#f85149':'#3fb950';
+  $('sdtoggle').textContent=state.sd.filling?'stop fill':'start fill';
+  // Flight events (most recent first)
+  $('events').innerHTML=(state.events||[]).slice().reverse().map(e=>{
+    const ts=new Date(e.t).toLocaleTimeString();
+    const col=SEV_COLOR[e.severity]||'#e6edf3';
+    return `<div>${ts} <span style="color:${col}">#${e.id} ${e.name}</span> <span class="muted">${e.severity}</span></div>`;
+  }).join('')||'<span class="muted">no events yet</span>';
+  // Launch
+  const L=state.launch;
+  $('launchbtn').textContent=L.active?'■ Abort':'🚀 Launch';
+  if($('lpath').placeholder.indexOf('default')>=0 && L.default_csv){
+    $('lpath').placeholder=L.default_csv;
+  }
+  $('lstatus').textContent=L.active
+    ? `— ${L.src}, T+${L.elapsed}s / ${L.duration}s ×${L.speed}`
+    : (L.src&&L.src!=='none'?`— last: ${L.src}`:'');
+}
+function renderExtras(){
+  // FAS boards online toggles
+  const bd=$('boards');
+  if(bd.children.length!==Object.keys(state.boards||{}).length){
+    bd.innerHTML='';
+    for(const k of Object.keys(state.boards||{})){
+      const lbl=document.createElement('label');
+      lbl.innerHTML=`<input type="checkbox"> ${k}`;
+      lbl.querySelector('input').onchange=e=>post('/api/boards',{key:k,online:e.target.checked});
+      lbl.dataset.key=k; bd.appendChild(lbl);
+    }
+  }
+  for(const lbl of bd.children){lbl.querySelector('input').checked=!!(state.boards||{})[lbl.dataset.key];}
+  // RAB A/B
+  const rab=state.rab||{};
+  for(const [id,elid] of [['0','rabA'],['1','rabB']]){
+    const r=rab[id]||{}, el=$(elid), mm=r.armed!==r.expected;
+    el.textContent=(r.armed?'ARMED':'safe')+(mm?' ⚠MISMATCH':'');
+    el.className='pill '+(mm?'warn2':(r.armed?'on':'off'));
+  }
+  $('rablink').textContent=rab.link?'up':'DOWN';
+  // Charger
+  const c=state.charger||{};
+  if(document.activeElement!==$('chgI'))$('chgI').value=c.i_setting;
+  if(document.activeElement!==$('chgV'))$('chgV').value=c.v_setting;
+  $('chgEn').checked=!!c.enabled; $('chgProt').checked=!!c.protect;
+  $('chgState').textContent=c.enabled?'CC/CV':'off';
+  $('chgState').className='pill '+(c.enabled?'on':'off');
+  // Aux / STM32WL radio
+  const a=state.aux||{}, r=state.radio||{};
+  $('auxRadio').checked=!!a.radio; $('auxRuncam').checked=!!a.runcam;
+  $('auxRec').checked=!!a.runcam_recording;
+  $('auxPa').checked=!!a.rf_pa_requested; $('auxPaInh').checked=!!a.rf_pa_inhibit;
+  $('radReady').checked=!!r.ready; $('radFault').checked=!!r.fault;
+  $('radCfgOk').checked=!!r.config_valid; $('radMatch').checked=!!r.readback_matches;
+  if(document.activeElement!==$('radQ'))$('radQ').value=r.queue_depth||0;
+  if(document.activeElement!==$('radDrop'))$('radDrop').value=r.tx_dropped||0;
+  const pa=$('paState');
+  pa.textContent=a.rf_pa_on?(a.rf_pa_cycling?'PA cycling':'PA on')
+    :(a.rf_pa_requested?'PA inhibited':'PA off');
+  pa.className='pill '+(a.rf_pa_on?'on':'off');
+  // Soundboard
+  const s=state.sound||{clips:[]};
+  $('sndInfo').textContent=`playing: ${s.playing==null?'—':'#'+s.playing} · vol ${s.volume}`+(s.tone?' · TONE':'');
+  const tb=$('clips').querySelector('tbody'); tb.innerHTML='';
+  (s.clips||[]).forEach((cl,i)=>{
+    const tr=document.createElement('tr');
+    tr.innerHTML=`<td>${i}</td><td>${escapeHtml(cl.name)}</td><td>${cl.length}</td>`+
+      `<td><button onclick="soundPlay(${i})">play</button> <button onclick="soundRemove(${i})">✕</button></td>`;
+    tb.appendChild(tr);
+  });
+}
+function rabArm(id,a){post('/api/rab',{rab_id:id,armed:a});}
+function rabMismatch(id){post('/api/rab',{rab_id:id,mismatch:true});}
+function rabLink(){post('/api/rab',{link:!(state.rab&&state.rab.link)});}
+function applyCharger(){post('/api/charger',{enable:$('chgEn').checked,i_setting:num($('chgI').value),v_setting:num($('chgV').value),protect:$('chgProt').checked});}
+function applyAux(){post('/api/aux',{radio:$('auxRadio').checked,runcam:$('auxRuncam').checked,
+  runcam_recording:$('auxRec').checked,rf_pa_requested:$('auxPa').checked,
+  rf_pa_inhibit:$('auxPaInh').checked,ready:$('radReady').checked,fault:$('radFault').checked,
+  config_valid:$('radCfgOk').checked,readback_matches:$('radMatch').checked,
+  queue_depth:num($('radQ').value),tx_dropped:num($('radDrop').value)});}
+function soundAdd(){post('/api/sound',{action:'add',name:$('clipName').value||'clip',length:num($('clipLen').value)||8000});}
+function soundClear(){post('/api/sound',{action:'clear'});}
+function soundTone(){post('/api/sound',{action:'tone',ms:400});}
+function soundPlay(i){post('/api/sound',{action:'play',idx:i});}
+function soundRemove(i){post('/api/sound',{action:'remove',idx:i});}
+function setFlight(){post('/api/flight',{phase:$('fstate').value});}
+function toggleLaunch(){
+  if(state.launch.active){post('/api/launch',{action:'abort'});}
+  else{post('/api/launch',{action:'launch',speed:num($('lspeed').value)||1,path:$('lpath').value});}
+}
+function toggleSd(){post('/api/sd',{filling:!state.sd.filling,rate:num($('sdrate').value)});}
+function sdReset(){post('/api/sd',{reset:true});}
 
-        async function refresh() {
-            try {
-                state = await (await fetch('/api/state')).json();
-                $('conn').textContent = 'connected'; $('conn').className = 'muted';
-                if (!$('sensors').querySelector('tbody').children.length) renderSensors();
-                renderFlight();
-            } catch (e) { $('conn').textContent = 'disconnected'; }
-        }
-        async function pollCmds() {
-            try {
-                const r = await (await fetch('/api/commands?since=' + lastSeq)).json();
-                const box = $('cmds');
-                for (const c of r.commands) {
-                    lastSeq = Math.max(lastSeq, c.seq);
-                    const d = document.createElement('div');
-                    d.className = 'cmd ' + (c.ok ? 'ok' : 'bad');
-                    const ts = new Date(c.t).toLocaleTimeString();
-                    d.innerHTML = `<div class="meta">#${c.seq} ${ts} ${c.topic} ${c.ok ? '✓' : '✗'}</div>` +
-                        `<div>${escapeHtml(JSON.stringify(c.payload))}</div>` +
-                        (c.issues.length ? `<div class="issues">${c.issues.map(escapeHtml).join('<br>')}</div>` : '');
-                    box.insertBefore(d, box.firstChild);
-                }
-                while (box.children.length > 200) box.removeChild(box.lastChild);
-            } catch (e) { }
-        }
-        function escapeHtml(s) { return String(s).replace(/[&<>]/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[m])); }
-        setInterval(() => { if ($('auto').checked) { refresh(); pollCmds(); } }, 1000);
-        refresh(); pollCmds();
-    </script>
-</body>
-
-</html>
+async function refresh(){
+  try{
+    state=await(await fetch('/api/state')).json();
+    $('conn').textContent='connected';$('conn').className='muted';
+    if(!$('sensors').querySelector('tbody').children.length)renderSensors();
+    renderFlight();
+    renderExtras();
+  }catch(e){$('conn').textContent='disconnected';}
+}
+async function pollCmds(){
+  try{
+    const r=await(await fetch('/api/commands?since='+lastSeq)).json();
+    const box=$('cmds');
+    for(const c of r.commands){
+      lastSeq=Math.max(lastSeq,c.seq);
+      const d=document.createElement('div');
+      d.className='cmd '+(c.ok?'ok':'bad');
+      const ts=new Date(c.t).toLocaleTimeString();
+      d.innerHTML=`<div class="meta">#${c.seq} ${ts} ${c.topic} ${c.ok?'✓':'✗'}</div>`+
+        `<div>${escapeHtml(JSON.stringify(c.payload))}</div>`+
+        (c.issues.length?`<div class="issues">${c.issues.map(escapeHtml).join('<br>')}</div>`:'');
+      box.insertBefore(d,box.firstChild);
+    }
+    while(box.children.length>200)box.removeChild(box.lastChild);
+  }catch(e){}
+}
+function escapeHtml(s){return String(s).replace(/[&<>]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[m]));}
+setInterval(()=>{if($('auto').checked){refresh();pollCmds();}},1000);
+refresh();pollCmds();
+</script></body></html>

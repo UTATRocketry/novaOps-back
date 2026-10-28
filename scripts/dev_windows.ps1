@@ -94,11 +94,11 @@ try {
     $children = @()
 
     if ($WithMock) {
-        $mockArgs = "tools\novaMock.py --broker ${Broker} --port ${brokerPort} --ui"
+        $mockArgs = "tools\novaSim.py --broker ${Broker} --port ${brokerPort} --ui"
         $proc = Start-Process -FilePath $python -ArgumentList $mockArgs `
                               -WorkingDirectory $repoRoot -PassThru
         $children += $proc
-        Write-Host "Started novaMock.py (PID $($proc.Id))" -ForegroundColor Cyan
+        Write-Host "Started novaSim.py (PID $($proc.Id))" -ForegroundColor Cyan
     }
 
     if ($WithFas) {

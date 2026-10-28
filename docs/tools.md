@@ -6,10 +6,10 @@ The programs in `tools/`. All need `paho-mqtt`; the FAS bridge also needs
 | Tool | What it's for |
 |---|---|
 | `fas_bridge.py` | The production serial ↔ MQTT link to the flight computer (FMC) |
-| `novaMock.py` | **The main simulator**: stands in for novaGround and the FAS bridge together |
+| `novaSim.py` | **The main simulator**: stands in for novaGround and the FAS bridge together |
 | `nova_dummy.py` | Lighter novaGround simulator |
 | `serial_probe.py` | See what's on a serial port |
-| `sim_control.html` | Browser controls for the simulators |
+| `sim_control.html` | The control panel `novaSim.py --ui` serves |
 | `novaGround_dummy.py`, `novaSystem_dummy.py` | Legacy simulators; `dev_linux.sh --with-dummy` still uses `novaSystem_dummy.py` |
 
 ## fas_bridge.py
@@ -42,15 +42,19 @@ A missing or unplugged port is retried in the background instead of stopping
 the bridge. The link state is published on `nova/console` as `console_serial`
 and in flight telemetry as `data.fas_link`.
 
-## novaMock.py
+## novaSim.py
 
 ```bash
-python tools/novaMock.py --broker localhost --ui
+python tools/novaSim.py --broker localhost --ui
 ```
 
 Publishes GCS and FAS engine packets and the nested flight snapshot, and
 answers the same commands as novaGround and the FAS bridge, so the backend and
 frontend can be exercised end to end with no hardware.
+
+`--ui` serves the control panel on `--ui-port` (8765 by default). The page is
+`tools/sim_control.html`, read from disk on each request, so edits to it show
+on a browser refresh without restarting the simulator.
 
 ## nova_dummy.py
 
