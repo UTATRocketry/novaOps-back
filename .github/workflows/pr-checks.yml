@@ -69,26 +69,58 @@ jobs:
           echo "Title is fine."
 
   tests:
-    name: tests
-    runs-on: ubuntu-latest
+    name: tests (${{ matrix.os }}, py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v5
 
       - uses: actions/setup-python@v6
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python }}
           cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-test.txt
 
-      # Mosquitto is the MQTT broker for tests/integration (novaMock -> backend).
-      - name: Install
+      # Mosquitto is the MQTT broker for tests/integration (novaSim -> backend).
+      - name: Install Mosquitto (Linux)
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update -q
           sudo apt-get install -y -q mosquitto
-          pip install -r requirements.txt pytest httpx pytest-cov
+
+      # TODO verify: package name and install path on windows-latest.
+      - name: Install Mosquitto (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install mosquitto -y --no-progress
+          "C:\Program Files\mosquitto" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+
+      - name: Install
+        run: pip install -r requirements.txt -r requirements-test.txt
 
       # NOVA_REQUIRE_INTEGRATION makes the integration tests fail rather than
       # skip if Mosquitto is missing, so they can't silently stop running.
+      # The coverage floor is a ratchet: raise it as tests land, never lower it.
       - name: Tests
         env:
           NOVA_REQUIRE_INTEGRATION: "1"
-        run: python -m pytest -q -rs --cov=app --cov-report=term-missing:skip-covered
+        run: >
+          python -m pytest -q -rs --junitxml=junit.xml
+          --cov=app --cov-branch --cov-report=term-missing:skip-covered
+          --cov-report=xml --cov-fail-under=67
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results-${{ matrix.os }}-py${{ matrix.python }}
+          path: |
+            junit.xml
+            coverage.xml

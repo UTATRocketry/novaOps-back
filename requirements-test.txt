@@ -1,0 +1,9 @@
+# Test-only dependencies, pinned exactly (each release is at least two weeks
+# old; see Nova-Collected dev/TESTING-PLAN.md rule 9). Install after
+# requirements.txt.
+pytest==9.1.1
+httpx==0.28.1
+pytest-cov==7.1.0
+coverage==7.16.2
+pytest-timeout==2.4.0
+hypothesis==6.169.0
