@@ -78,7 +78,14 @@ async def _handle_websocket(websocket: WebSocket, ctx) -> None:
 
     try:
         while True:
-            payload = await websocket.receive_json()
+            try:
+                payload = await websocket.receive_json()
+            except ValueError:  # not JSON
+                await ctx.ws_manager.send_json(websocket, {"type": "error", "detail": "Message must be JSON"})
+                continue
+            if not isinstance(payload, dict):
+                await ctx.ws_manager.send_json(websocket, {"type": "error", "detail": "Message must be a JSON object"})
+                continue
             msg_type = payload.get("type")
 
             if msg_type == "console":
@@ -119,6 +126,10 @@ async def _handle_websocket(websocket: WebSocket, ctx) -> None:
                 await ctx.ws_manager.send_json(websocket, {"type": "error", "detail": str(exc)})
 
     except WebSocketDisconnect:
+        pass
+    finally:
+        # Whatever ended the loop (disconnect, send failure, bug), the client
+        # must not stay registered holding a role.
         removed_id = await ctx.ws_manager.disconnect(websocket)
         if removed_id:
             await ctx.role_service.on_disconnect(removed_id)

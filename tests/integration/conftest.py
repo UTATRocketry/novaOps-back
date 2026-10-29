@@ -101,3 +101,45 @@ def nova_mock(mqtt_broker) -> subprocess.Popen:
         yield proc
     finally:
         _stop(proc)
+
+
+class BrokerControl:
+    """A private Mosquitto that tests can kill and bring back on the same port."""
+
+    def __init__(self, exe: str, conf: Path, port: int) -> None:
+        self.host = "127.0.0.1"
+        self.port = port
+        self._exe = exe
+        self._conf = conf
+        self._proc: subprocess.Popen | None = None
+
+    def start(self) -> None:
+        self._proc = subprocess.Popen(
+            [self._exe, "-c", str(self._conf)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+        _wait_for_port(self.port, self._proc, timeout_s=10)
+
+    def stop(self) -> None:
+        if self._proc is not None:
+            _stop(self._proc)
+            self._proc = None
+
+
+@pytest.fixture
+def broker_control(tmp_path) -> BrokerControl:
+    exe = _find_mosquitto()
+    if exe is None:
+        message = "Mosquitto is not installed"
+        if os.getenv("NOVA_REQUIRE_INTEGRATION"):
+            pytest.fail(message)
+        pytest.skip(message)
+
+    port = _free_port()
+    conf = tmp_path / "mosquitto.conf"
+    conf.write_text(f"listener {port} 127.0.0.1\nallow_anonymous true\n", encoding="utf-8")
+    broker = BrokerControl(exe, conf, port)
+    broker.start()
+    try:
+        yield broker
+    finally:
+        broker.stop()
