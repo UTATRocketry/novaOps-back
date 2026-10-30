@@ -32,7 +32,7 @@ include = ["app*"]
 testpaths = ["tests"]
 addopts = "-q"
 markers = [
-  "integration: starts Mosquitto and novaMock; skipped if Mosquitto isn't installed",
+  "integration: starts Mosquitto and novaSim; skipped if Mosquitto isn't installed",
 ]
 
 [tool.pylint.MASTER]

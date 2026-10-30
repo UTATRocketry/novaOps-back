@@ -1,7 +1,7 @@
-"""novaMock -> MQTT -> backend -> websocket client, with real processes.
+"""novaSim -> MQTT -> backend -> websocket client, with real processes.
 
 The backend runs in-process (TestClient), but talks to a real Mosquitto
-broker that novaMock publishes to, so the MQTT contract between the
+broker that novaSim publishes to, so the MQTT contract between the
 simulator and the backend is exercised for real.
 """
 from __future__ import annotations
@@ -15,7 +15,7 @@ from app.main import create_app
 
 pytestmark = pytest.mark.integration
 
-# One sensor from each side that novaMock simulates:
+# One sensor from each side that novaSim simulates:
 #   PGSO: GCS hat 0 / channel 0, raw 0.99-3.99 V, calibrated here to 99-399 psi.
 #   PCC:  FAS EPB_0 / channel 1, raw 0.2-0.9, passed through unconverted.
 TEST_CONFIG = """
@@ -91,7 +91,7 @@ def _by_name(engine_data: dict) -> dict[str, dict]:
     return {row["name"]: row for row in engine_data["data"]}
 
 
-def test_websocket_client_receives_calibrated_engine_telemetry(backend_env, nova_mock) -> None:
+def test_websocket_client_receives_calibrated_engine_telemetry(backend_env, nova_sim) -> None:
     app = create_app()
     with TestClient(app) as client:
         _wait_for_engine_data(app.state.ctx)

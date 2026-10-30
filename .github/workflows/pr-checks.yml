@@ -79,7 +79,7 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      # Mosquitto is the MQTT broker for tests/integration (novaMock -> backend).
+      # Mosquitto is the MQTT broker for tests/integration (novaSim -> backend).
       - name: Install
         run: |
           sudo apt-get update -q
