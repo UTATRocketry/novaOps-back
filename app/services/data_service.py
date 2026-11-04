@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from collections import defaultdict, deque
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Iterable
 
 import numpy as np
 
-from app.models import ConvertMethod, FasSensorBinding, GcsSensorBinding, SensorEntry, SourceTarget, SystemConfig
+from app.models import ConvertMethod, ConvertSpec, FasSensorBinding, GcsSensorBinding, SensorEntry, SourceTarget, SystemConfig
 
 
 def linear_interpolate(raw_value: float, points: list[tuple[float, float]] | None, degree: int = 1) -> float:
@@ -20,6 +21,74 @@ def linear_interpolate(raw_value: float, points: list[tuple[float, float]] | Non
     voltages, readings = calibration_points[:, 0], calibration_points[:, 1]
     m, b = np.polyfit(voltages, readings, degree)
     return m * raw_value + b
+
+
+def _pairwise_slopes(xs: np.ndarray, ys: np.ndarray) -> np.ndarray:
+    """slopes[i, j] is the slope from point i to point j; NaN where i == j or the x values match."""
+    dx = xs[None, :] - xs[:, None]
+    dy = ys[None, :] - ys[:, None]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        slopes = dy / dx
+    slopes[dx == 0] = np.nan
+    return slopes
+
+
+def theil_sen_fit(xs: np.ndarray, ys: np.ndarray) -> tuple[float, float] | None:
+    """Slope is the median of the slopes between every pair of points. Ignores up to ~29% bad points."""
+    slopes = _pairwise_slopes(xs, ys)[np.triu_indices(len(xs), k=1)]
+    slopes = slopes[~np.isnan(slopes)]
+    if slopes.size == 0:
+        return None
+    m = float(np.median(slopes))
+    return m, float(np.median(ys - m * xs))
+
+
+def repeated_median_fit(xs: np.ndarray, ys: np.ndarray) -> tuple[float, float] | None:
+    """Siegel's repeated median: each point's median slope to the others, then the median of those.
+
+    Ignores up to half the points being bad.
+    """
+    slopes = _pairwise_slopes(xs, ys)
+    has_slope = ~np.all(np.isnan(slopes), axis=1)
+    if not has_slope.any():
+        return None
+    m = float(np.median(np.nanmedian(slopes[has_slope], axis=1)))
+    return m, float(np.median(ys - m * xs))
+
+
+_ROBUST_FITS = {
+    ConvertMethod.THEIL_SEN: theil_sen_fit,
+    ConvertMethod.REPEATED_MEDIAN: repeated_median_fit,
+}
+
+
+@lru_cache(maxsize=512)
+def _robust_line(method: ConvertMethod, points: tuple[tuple[float, float], ...]) -> tuple[float, float] | None:
+    # Cached so a sensor's table is fitted once, not on every sample.
+    calibration_points = np.asarray(points, dtype=float)
+    if calibration_points.ndim != 2 or calibration_points.shape[1] != 2:
+        raise ValueError("Calibration must be a list of [voltage, reading] pairs.")
+    return _ROBUST_FITS[method](calibration_points[:, 0], calibration_points[:, 1])
+
+
+def robust_interpolate(raw_value: float, points: list[tuple[float, float]] | None, method: ConvertMethod) -> float:
+    """Apply a robust straight-line fit. Like `linear_interpolate`, the line carries on past the
+    outermost points, and fewer than two points with different raw values pass the raw value through."""
+    if not points or len(points) < 2:
+        return raw_value
+    line = _robust_line(method, tuple((float(x), float(y)) for x, y in points))
+    if line is None:
+        return raw_value
+    m, b = line
+    return m * raw_value + b
+
+
+def convert_value(raw_value: float, convert: ConvertSpec) -> float:
+    """Calibrate one raw reading with the sensor's conversion method (not called for `none`)."""
+    if convert.method in _ROBUST_FITS:
+        return robust_interpolate(raw_value, convert.calibration, convert.method)
+    # linear, and zero_offset / polynomial, which aren't implemented separately yet.
+    return linear_interpolate(raw_value, convert.calibration)
 
 
 @dataclass
@@ -102,7 +171,7 @@ class SensorParser:
 
             value = raw_value
             if calibration_enabled and sensor_cfg.convert.method != ConvertMethod.NONE:
-                value = linear_interpolate(raw_value, sensor_cfg.convert.calibration)
+                value = convert_value(raw_value, sensor_cfg.convert)
             averaged_value = self._rolling_store.add(sensor_cfg.name, value)
 
             parsed.append(
