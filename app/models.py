@@ -52,6 +52,9 @@ class ConvertMethod(str, Enum):
     ZERO_OFFSET = "zero_offset"
     LINEAR = "linear"
     POLYNOMIAL = "polynomial"
+    # Robust straight-line fits: a bad calibration point doesn't pull the line.
+    THEIL_SEN = "theil_sen"
+    REPEATED_MEDIAN = "repeated_median"
 
 
 class ConvertSpec(BaseModel):
