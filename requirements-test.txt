@@ -1,6 +1,5 @@
-# Test-only dependencies, pinned exactly (each release is at least two weeks
-# old; see Nova-Collected dev/TESTING-PLAN.md rule 9). Install after
-# requirements.txt.
+# Test-only dependencies, pinned exactly;
+# Install after requirements.txt.
 pytest==9.1.1
 httpx==0.28.1
 pytest-cov==7.1.0
