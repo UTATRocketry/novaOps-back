@@ -69,6 +69,10 @@ class MqttService:
         on_console_message: Callable[[dict], None] | None = None,
         on_control_message: Callable[[dict], None] | None = None,
         on_raw_message: Callable[[str, dict], None] | None = None,
+        stats_topic: str | None = None,
+        state_topic: str | None = None,
+        on_stats_message: Callable[[str, dict | None], None] | None = None,
+        on_state_message: Callable[[str, dict | None], None] | None = None,
     ) -> None:
         self._sensor_topic = sensor_topic
         self._command_topic = command_topic
@@ -80,6 +84,13 @@ class MqttService:
         self._on_console_message = on_console_message
         self._on_control_message = on_control_message
         self._on_raw_message = on_raw_message
+        # Wildcard filters (nova/stats/#, nova/state/#): one topic per node, so the
+        # handlers get the concrete topic. They get None for an empty payload,
+        # which is how a node clears a retained message.
+        self._stats_topic = stats_topic
+        self._state_topic = state_topic
+        self._on_stats_message = on_stats_message
+        self._on_state_message = on_state_message
         self._client = None
         self._connected = False
         self._file_num = 0
@@ -101,6 +112,10 @@ class MqttService:
             topics.append(self._console_topic)
         if self._control_topic and self._on_control_message is not None:
             topics.append(self._control_topic)
+        if self._stats_topic and self._on_stats_message is not None:
+            topics.append(self._stats_topic)
+        if self._state_topic and self._on_state_message is not None:
+            topics.append(self._state_topic)
         return list(dict.fromkeys(topics))
 
     def subscribe_topic(self, topic: str) -> bool:
@@ -271,7 +286,7 @@ class MqttService:
         LOGGER.warning("MQTT disconnected reason_code=%s", reason_code)
 
     def _is_extra_topic(self, topic: str) -> bool:
-        if topic in self._core_topics():
+        if any(topic_matches(core, topic) for core in self._core_topics()):
             return False
         return any(topic_matches(f, topic) for f in self._extra_topics)
 
@@ -288,11 +303,42 @@ class MqttService:
         if self._on_raw_message is not None:
             self._on_raw_message(topic, payload)
 
+    def _route_node_message(self, topic: str, raw: bytes) -> bool:
+        """Handle nova/stats/<node>[/info] and nova/state/<node>. True if it was one.
+
+        An empty payload (a node clearing its retained message) reaches the
+        handler as None. A payload that is not a JSON object is dropped here,
+        so a bad node cannot disturb the handlers.
+        """
+        for flt, handler in (
+            (self._stats_topic, self._on_stats_message),
+            (self._state_topic, self._on_state_message),
+        ):
+            if not flt or handler is None or not topic_matches(flt, topic):
+                continue
+            payload = None
+            if raw:
+                try:
+                    payload = json.loads(raw.decode("utf-8"))
+                except (ValueError, UnicodeDecodeError):
+                    LOGGER.warning("Ignoring non-JSON message on %s", topic)
+                    return True
+                if not isinstance(payload, dict):
+                    LOGGER.warning("Ignoring non-object message on %s", topic)
+                    return True
+            if self._on_raw_message is not None and payload is not None:
+                self._on_raw_message(topic, payload)
+            handler(topic, payload)
+            return True
+        return False
+
     def _on_message(self, _client, _userdata, message) -> None:
         try:
             topic = getattr(message, "topic", self._sensor_topic)
             if self._is_extra_topic(topic):
                 self._on_extra_message(topic, message.payload)
+                return
+            if self._route_node_message(topic, message.payload):
                 return
             payload = json.loads(message.payload.decode("utf-8"))
             if self._on_raw_message is not None:

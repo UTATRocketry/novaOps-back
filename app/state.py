@@ -22,6 +22,11 @@ class RuntimeState:
     # commands stay blocked (e.g. when novaLock isn't running at all).
     lockout_state: str = "unlocked"
     actuator_states: dict[str, dict[str, str]] = field(default_factory=dict)
+    # Per node (novaGround, novaThermo, novaSim), from nova/stats/<node>[/info]
+    # and nova/state/<node>. See docs/backend-services.md.
+    node_stats: dict[str, dict[str, Any]] = field(default_factory=dict)
+    node_stats_info: dict[str, dict[str, Any]] = field(default_factory=dict)
+    node_state: dict[str, dict[str, Any]] = field(default_factory=dict)
     _actuator_types: dict[str, ActuatorType] = field(default_factory=dict, repr=False)
 
     @property
