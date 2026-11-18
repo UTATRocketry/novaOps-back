@@ -1462,6 +1462,23 @@ def _resolve_fas_board_id(cmd: dict) -> int:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+DATA_FILE_PREFIX = "FAS"
+
+
+def data_file_name(filename) -> str:
+    """CSV name for a recording: `FAS_<recording>.csv`.
+
+    Every logger prefixes its files with its own name so the source is clear
+    in the shared data folder (novaGround: `novaGround_<recording>_sensors.csv`).
+    """
+    name = str(filename or "data")
+    if name.endswith(".csv"):
+        name = name[:-4]
+    if not name.startswith(DATA_FILE_PREFIX + "_"):
+        name = f"{DATA_FILE_PREFIX}_{name}"
+    return name + ".csv"
+
+
 class FasBridge:
     def __init__(self, port: str, baud: int, broker: str,
                  node_id: str, publish_ms: int, verbosity: int,
@@ -1602,16 +1619,13 @@ class FasBridge:
         """Start/stop recording ADC samples to a CSV in the bridge's data dir.
 
         Mirrors the backend's data-saving command:
-          {"type":"data_file","action":"start_data_saving","filename":"..._data_0"}
+          {"type":"data_file","action":"start_data_saving","filename":"<recording>"}
           {"type":"data_file","action":"stop_data_saving"}
         """
         action = str(cmd.get("action", "")).lower()
 
         if action == "start_data_saving":
-            filename = str(cmd.get("filename") or "fas_data")
-            if not filename.endswith(".csv"):
-                filename += ".csv"
-            path = os.path.join(self._data_dir, filename)
+            path = os.path.join(self._data_dir, data_file_name(cmd.get("filename")))
             try:
                 os.makedirs(self._data_dir, exist_ok=True)
                 f = open(path, "w", newline="", encoding="utf-8")

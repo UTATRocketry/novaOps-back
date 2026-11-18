@@ -1,0 +1,56 @@
+# git-cliff config: builds CHANGELOG.md from this repo's history.
+# Run by .github/workflows/changelog.yml whenever a release reaches main.
+# Docs: https://git-cliff.org/docs/configuration
+#
+# Versions are Nova releases. `Nova.ps1 publish` tags every commit a release
+# pins as nova/<release>, e.g. nova/v2026.10.04, and each section lists the
+# PRs merged into dev since the previous release. PR titles are squash-merged
+# into dev, so they follow Conventional Commits (CONTRIBUTING.md section 6).
+
+[changelog]
+header = """
+# Changelog
+
+What changed in this repo in each Nova release, newest first.
+
+> [!NOTE]
+> This file is **generated** by [git-cliff](https://git-cliff.org) from the PR
+> titles merged into `dev`, by the `changelog` GitHub Actions workflow. Don't
+> edit it by hand: change `cliff.toml` instead. Each release's test, notes and
+> the other repos' versions are on the
+> [Nova-Collected releases page](https://github.com/UTATRocketry/Nova-Collected/releases).
+"""
+body = """
+{% if version %}\
+{% set release = version | trim_start_matches(pat="nova/") %}\
+## [{{ release }}](https://github.com/UTATRocketry/Nova-Collected/releases/tag/{{ release }}) - {{ timestamp | date(format="%Y-%m-%d") }}
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | striptags | trim }}
+{% for commit in commits %}
+- {% if commit.scope %}**{{ commit.scope }}:** {% endif %}\
+{% if commit.breaking %}**BREAKING** {% endif %}\
+{{ commit.message | split(pat="\n") | first | trim }}\
+{% endfor %}
+{% endfor %}
+{% endif %}\
+"""
+trim = false
+
+[git]
+conventional_commits = true
+filter_unconventional = true
+filter_commits = true
+split_commits = false
+protect_breaking_commits = true
+tag_pattern = "^nova/v[0-9]{4}\\.[0-9]{2}\\.[0-9]{2}(\\.[0-9]+)?$"
+sort_commits = "oldest"
+commit_parsers = [
+  # The changelog workflow's own PRs.
+  { message = "^docs\\(changelog\\)", skip = true },
+  { message = "^feat", group = "<!-- 1 -->Features" },
+  { message = "^fix", group = "<!-- 2 -->Fixes" },
+  { message = "^refactor", group = "<!-- 3 -->Refactoring" },
+  { message = "^docs", group = "<!-- 4 -->Documentation" },
+  { message = "^test", group = "<!-- 5 -->Tests" },
+  { message = "^chore", group = "<!-- 6 -->Chores" },
+]

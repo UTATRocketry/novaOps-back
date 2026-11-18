@@ -1,4 +1,6 @@
-﻿site_name: NovaOps Backend
+site_name: NovaOps Backend
 nav:
   - Home: index.md
   - Backend Services: backend-services.md
+  - Environment Variables: environment.md
+  - Tools: tools.md

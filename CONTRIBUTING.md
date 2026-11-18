@@ -5,21 +5,32 @@
 Read that first.** In short:
 
 - `dev` collects finished work for hardware testing; `main` is what prod runs.
-- Branch from `dev` as `feature/...`, `bugfix/...` or `chore/...`, e.g. `bugfix/fas-port-reconnect`.
+- Branch from `dev` as `feature/...`, `bugfix/...`, `chore/...` or `tests/...`, e.g. `bugfix/fas-port-reconnect`.
 - Open a PR **into `dev`**, titled `type(scope): what changed`, and fill in the template.
 - CI green + 1 approval (a lead's if it can move hardware), then **Squash and merge**.
 - Leads bring tested releases into `main`; you never merge into `main` yourself.
+
+**Where to work:** clone this repo into the `dev/` folder of a Nova-Collected
+clone, e.g. `Nova/dev/backend` (see "Getting started as a developer" in the
+Nova-Collected README), or anywhere else you like. Branch from `dev` there.
+Never work in the `prod/` or `pi/` submodules of Nova-Collected: they show the
+released version and are overwritten when it changes.
 
 This file only covers what is specific to this repo.
 
 ## Before you open a PR
 
 ```bash
-pip install -r requirements.txt pytest httpx
-python -m pytest -q
+pip install -r requirements.txt pytest httpx pytest-cov
+python -m pytest -q --cov=app
 ```
 
-CI runs the same tests on every PR.
+CI runs the same tests on every PR and prints coverage.
+
+`tests/integration/` starts a real Mosquitto broker and `tools/novaMock.py`
+and checks that telemetry reaches a websocket client. It needs Mosquitto
+installed (on PATH, or in `C:\Program Files\mosquitto`) and is skipped
+without it. CI sets `NOVA_REQUIRE_INTEGRATION=1` so it fails instead.
 
 ## Simulator Test (level 2)
 
@@ -27,8 +38,9 @@ CI runs the same tests on every PR.
   simulated novaGround and FAS traffic over MQTT
 - `tools/sim_control.html`: drive the simulators from a browser
 
-Then go through the testing procedure (`docs/testing-procedure.md` in
-Nova-Collected) against them.
+Then go through the
+[testing procedure](https://github.com/UTATRocketry/Nova-Collected/blob/main/docs/development/testing-procedure.md)
+against them.
 
 ## Scopes for PR titles
 

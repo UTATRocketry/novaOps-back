@@ -1,0 +1,33 @@
+name: Release review
+
+# Every PR into main is a release (release/<tag>, opened by `Nova.ps1 publish`)
+# or a hotfix. CODEOWNERS can't match on branches, so this asks the release
+# owner for a review on each one.
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review]
+    branches: [main]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  request:
+    name: request
+    runs-on: ubuntu-latest
+    steps:
+      - name: Request the release owner's review
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+          REVIEWER: Awesome-Ace22
+        run: |
+          # GitHub won't request a review from the PR's own author.
+          if [[ "${AUTHOR,,}" == "${REVIEWER,,}" ]]; then
+            echo "$REVIEWER opened this PR; not requesting their review."
+            exit 0
+          fi
+          gh api "repos/$REPO/pulls/$PR/requested_reviewers" -f "reviewers[]=$REVIEWER" --silent
+          echo "Requested a review from $REVIEWER."

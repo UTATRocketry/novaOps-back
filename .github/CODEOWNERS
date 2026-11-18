@@ -1,16 +1,27 @@
 # Code owners must approve PRs that touch these paths (branch protection:
-# "require review from code owners"). Everything else needs any one approval.
-# Listed paths are the ones that can move hardware or run the station - see
-# CONTRIBUTING.md in UTATRocketry/Nova-Collected.
+# "require review from code owners"). The last matching line wins.
 #
-# Replace the owner with a team once one exists, e.g. @UTATRocketry/nova-leads
+# Everything defaults to the Software Elevated Privileges team. Orchestration
+# (running the station, deploys, releases, CI) and anything that can move
+# hardware needs @Awesome-Ace22 specifically - see CONTRIBUTING.md in
+# UTATRocketry/Nova-Collected.
 
-# Actuator commands, safety lockout and the flight-computer bridge
+*                   @UTATRocketry/software-elevated-privileges
+
+# Hardware risk: actuator commands, safety lockout, the flight-computer bridge
 /app/services/command_service.py  @Awesome-Ace22
+/app/services/mqtt_service.py     @Awesome-Ace22
 /app/routers/commands.py          @Awesome-Ace22
+/app/routers/websocket.py         @Awesome-Ace22
 /app/routers/lock.py              @Awesome-Ace22
 /app/models.py                    @Awesome-Ace22
 /tools/fas_bridge.py              @Awesome-Ace22
 # Published default sensor/actuator config
 /config/                          @Awesome-Ace22
+# Orchestration: how the backend is built, run and deployed, and CI
+/scripts/                         @Awesome-Ace22
+/initial_config.sh                @Awesome-Ace22
+/post_reboot_config.sh            @Awesome-Ace22
+/Dockerfile                       @Awesome-Ace22
+/docker-compose.yml               @Awesome-Ace22
 /.github/                         @Awesome-Ace22

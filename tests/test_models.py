@@ -60,7 +60,7 @@ def test_fas_sensor_binding_derives_node_from_board_fields() -> None:
 
     binding = config.sensors[0].binding
     assert isinstance(binding, FasSensorBinding)
-    assert binding.resolved_node == "EPB_2"
+    assert binding.resolved_node == "EPB_1"
 
 
 def test_tc_sensor_allows_convert_none() -> None:

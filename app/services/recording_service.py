@@ -14,8 +14,8 @@ was taken. When a recording starts, this service picks its name and writes
   }
 
 The data files themselves are named by the loggers from the same name:
-<name>.csv (fas_bridge), <name>_sensors.csv and <name>_actuators.csv
-(novaGround). ops/Nova.ps1 `archive` bundles all of them with the referenced
+FAS_<name>.csv (fas_bridge), novaGround_<name>_sensors.csv and
+novaGround_<name>_actuators.csv (novaGround). ops/Nova.ps1 `archive` bundles all of them with the referenced
 config snapshots.
 """
 from __future__ import annotations
@@ -39,10 +39,12 @@ META_FORMAT = 1
 def recording_files(data_dir: Path, name: str) -> list[Path]:
     """Every file belonging to recording `name`.
 
-    Matches <name>.<ext> and <name>_<word>.<ext> but not <name>0... so that
-    "..._data_1" never claims "..._data_10_sensors.csv".
+    Matches [<logger>_]<name>.<ext> and [<logger>_]<name>_<word>.<ext> but not
+    <name>0... so that "..._data_1" never claims "..._data_10_sensors.csv".
+    A logger prefix is a word followed by "_"; recording names start with a
+    digit, so a prefix can never swallow another recording's name.
     """
-    pattern = re.compile(rf"^{re.escape(name)}(\.|_[A-Za-z])")
+    pattern = re.compile(rf"^([A-Za-z][A-Za-z0-9]*_)?{re.escape(name)}(\.|_[A-Za-z])")
     return sorted(p for p in data_dir.iterdir() if p.is_file() and pattern.match(p.name))
 
 

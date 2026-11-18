@@ -138,6 +138,17 @@ def test_recording_files_does_not_claim_longer_names(tmp_path) -> None:
     ]
 
 
+def test_recording_files_includes_logger_prefixed_files(tmp_path) -> None:
+    for fname in [
+        "FAS_r_data_1.csv", "novaGround_r_data_1_sensors.csv", "novaGround_r_data_1_actuators.csv",
+        "novaGround_r_data_10_sensors.csv", "FAS_r_data_10.csv", "other_data_1.csv",
+    ]:
+        (tmp_path / fname).write_text("", encoding="utf-8")
+    assert [p.name for p in recording_files(tmp_path, "r_data_1")] == [
+        "FAS_r_data_1.csv", "novaGround_r_data_1_actuators.csv", "novaGround_r_data_1_sensors.csv",
+    ]
+
+
 def test_data_saving_publishes_the_recording_name(tmp_path) -> None:
     ctx = _context(tmp_path)
     calls: list[tuple] = []
