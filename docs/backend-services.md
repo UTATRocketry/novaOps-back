@@ -58,6 +58,10 @@ Flight events are stored and broadcast without parsing:
 - `nova/console`: raw passthrough between frontend, backend, novaGround, and FAS. Backend publishes and broadcasts payloads without adding formatting.
 - `nova/control`: physical lockout updates. A payload such as `{ "source": "novaLock", "state": "locked" }` sets the runtime lockout state and blocks commands matched by `safetyRules.hazardous` while locked.
 
+### Ad-hoc topic subscriptions
+
+For testing a new topic before it has a real implementation, `POST /api/mqtt/topics` `{"topic": "nova/stats/#"}` subscribes the backend to any filter (`+` and `#` allowed) and `POST /api/mqtt/topics/unsubscribe` removes it; `GET /api/mqtt/topics` lists them. Messages on these topics are only relayed to WebSocket clients as `{"type": "mqtt_message", "topic": ..., "payload": ...}` (non-JSON payloads arrive as a string) and never reach the engine, flight, console or control handlers. Both changes need operator or admin role. Filters that overlap a built-in topic (for example `nova/#`) are rejected, and subscriptions are in memory only, so they are cleared on restart. Code that acts on a topic belongs in a dedicated subscription, not here. The frontend UI is on the Console page, WS / MQTT tab.
+
 ### Command parsing
 
 1. Receive UI command payload (`type`, `name`, `state`).

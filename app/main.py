@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from app.context import AppContext
-from app.routers import commands, config, data, flags, roles, views, diagram
+from app.routers import commands, config, data, flags, mqtt_topics, roles, views, diagram
 from app.routers import websocket as ws_router
 
 
@@ -139,6 +139,7 @@ def create_app() -> FastAPI:
     app.include_router(data.router)
     app.include_router(roles.router)
     app.include_router(commands.router)
+    app.include_router(mqtt_topics.router)
     app.include_router(diagram.router)
     app.include_router(ws_router.router)
 

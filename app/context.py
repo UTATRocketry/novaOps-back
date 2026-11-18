@@ -136,7 +136,7 @@ class AppContext:
             return
         asyncio.run_coroutine_threadsafe(self.broadcast(payload), self._event_loop)
 
-    def _on_raw_message(self, topic: str, payload: dict[str, Any]) -> None:
+    def _on_raw_message(self, topic: str, payload: Any) -> None:
         self._broadcast_from_mqtt({"type": "mqtt_message", "topic": topic, "payload": payload})
 
     def _on_engine_message(self, payload: dict[str, Any]) -> None:
