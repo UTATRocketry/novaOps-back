@@ -16,6 +16,46 @@ except ImportError:  # pragma: no cover
 LOGGER = logging.getLogger(__name__)
 DATA_PATH = "/home/admin/Desktop"
 
+MAX_EXTRA_TOPICS = 20
+MAX_TOPIC_LENGTH = 256
+
+
+class InvalidTopicFilter(ValueError):
+    """A requested ad-hoc subscription was malformed or not allowed."""
+
+
+def validate_topic_filter(topic: str) -> str:
+    """Return the stripped MQTT topic filter, or raise InvalidTopicFilter."""
+    topic = topic.strip() if isinstance(topic, str) else ""
+    if not topic:
+        raise InvalidTopicFilter("Topic must not be empty")
+    if len(topic) > MAX_TOPIC_LENGTH:
+        raise InvalidTopicFilter(f"Topic is longer than {MAX_TOPIC_LENGTH} characters")
+    if any(ch.isspace() or ord(ch) < 32 for ch in topic):
+        raise InvalidTopicFilter("Topic must not contain spaces or control characters")
+    levels = topic.split("/")
+    for i, level in enumerate(levels):
+        if "#" in level and (level != "#" or i != len(levels) - 1):
+            raise InvalidTopicFilter("'#' must be the last level on its own (e.g. nova/stats/#)")
+        if "+" in level and level != "+":
+            raise InvalidTopicFilter("'+' must be a whole level on its own (e.g. nova/+/stats)")
+    return topic
+
+
+def topic_matches(topic_filter: str, topic: str) -> bool:
+    """True if a concrete topic matches an MQTT filter (supports + and #)."""
+    f_levels = topic_filter.split("/")
+    t_levels = topic.split("/")
+    for i, f in enumerate(f_levels):
+        if f == "#":
+            return True
+        if i >= len(t_levels):
+            return False
+        if f != "+" and f != t_levels[i]:
+            return False
+    return len(f_levels) == len(t_levels)
+
+
 class MqttService:
     def __init__(
         self,
@@ -29,6 +69,10 @@ class MqttService:
         on_console_message: Callable[[dict], None] | None = None,
         on_control_message: Callable[[dict], None] | None = None,
         on_raw_message: Callable[[str, dict], None] | None = None,
+        stats_topic: str | None = None,
+        state_topic: str | None = None,
+        on_stats_message: Callable[[str, dict | None], None] | None = None,
+        on_state_message: Callable[[str, dict | None], None] | None = None,
     ) -> None:
         self._sensor_topic = sensor_topic
         self._command_topic = command_topic
@@ -40,10 +84,73 @@ class MqttService:
         self._on_console_message = on_console_message
         self._on_control_message = on_control_message
         self._on_raw_message = on_raw_message
+        # Wildcard filters (nova/stats/#, nova/state/#): one topic per node, so the
+        # handlers get the concrete topic. They get None for an empty payload,
+        # which is how a node clears a retained message.
+        self._stats_topic = stats_topic
+        self._state_topic = state_topic
+        self._on_stats_message = on_stats_message
+        self._on_state_message = on_state_message
         self._client = None
         self._connected = False
         self._file_num = 0
         self._data_file = None
+        # Ad-hoc subscriptions added at runtime for testing new topics. Messages
+        # on these are only relayed to WebSocket clients as `mqtt_message`; they
+        # never reach the sensor/flight/console/control handlers.
+        self._extra_topics: list[str] = []
+
+    @property
+    def extra_topics(self) -> list[str]:
+        return list(self._extra_topics)
+
+    def _core_topics(self) -> list[str]:
+        topics = [self._sensor_topic]
+        if self._flight_topic:
+            topics.append(self._flight_topic)
+        if self._console_topic:
+            topics.append(self._console_topic)
+        if self._control_topic and self._on_control_message is not None:
+            topics.append(self._control_topic)
+        if self._stats_topic and self._on_stats_message is not None:
+            topics.append(self._stats_topic)
+        if self._state_topic and self._on_state_message is not None:
+            topics.append(self._state_topic)
+        return list(dict.fromkeys(topics))
+
+    def subscribe_topic(self, topic: str) -> bool:
+        """Subscribe to an extra topic filter. Returns False if already subscribed.
+
+        Filters that would also match a built-in topic are rejected: the broker
+        could then deliver those messages twice and run them through the
+        handlers twice.
+        """
+        topic = validate_topic_filter(topic)
+        if topic in self._extra_topics:
+            return False
+        for core in self._core_topics():
+            if topic_matches(topic, core):
+                raise InvalidTopicFilter(
+                    f"'{topic}' overlaps the built-in topic '{core}'; use a narrower filter"
+                )
+        if len(self._extra_topics) >= MAX_EXTRA_TOPICS:
+            raise InvalidTopicFilter(f"At most {MAX_EXTRA_TOPICS} extra topics can be subscribed")
+        self._extra_topics.append(topic)
+        if self._client is not None and self._connected:
+            self._client.subscribe(topic)
+            LOGGER.info("Subscribed extra MQTT topic topic=%s", topic)
+        return True
+
+    def unsubscribe_topic(self, topic: str) -> bool:
+        """Drop an extra topic filter. Returns False if it was not subscribed."""
+        topic = topic.strip() if isinstance(topic, str) else ""
+        if topic not in self._extra_topics:
+            return False
+        self._extra_topics.remove(topic)
+        if self._client is not None and self._connected:
+            self._client.unsubscribe(topic)
+            LOGGER.info("Unsubscribed extra MQTT topic topic=%s", topic)
+        return True
 
     def start(self) -> None:
         if mqtt is None:
@@ -168,13 +275,7 @@ class MqttService:
             LOGGER.error("MQTT connect failed reason_code=%s", reason_code)
             return
 
-        topics = [self._sensor_topic]
-        if self._flight_topic:
-            topics.append(self._flight_topic)
-        if self._console_topic:
-            topics.append(self._console_topic)
-        if self._control_topic and self._on_control_message is not None:
-            topics.append(self._control_topic)
+        topics = self._core_topics() + self._extra_topics
 
         for topic in dict.fromkeys(topics):
             client.subscribe(topic)
@@ -184,10 +285,62 @@ class MqttService:
         self._connected = False
         LOGGER.warning("MQTT disconnected reason_code=%s", reason_code)
 
+    def _is_extra_topic(self, topic: str) -> bool:
+        if any(topic_matches(core, topic) for core in self._core_topics()):
+            return False
+        return any(topic_matches(f, topic) for f in self._extra_topics)
+
+    def _on_extra_message(self, topic: str, raw: bytes) -> None:
+        """Relay a message from an ad-hoc topic. Non-JSON payloads go as text."""
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            text = raw.hex()
+        try:
+            payload = json.loads(text)
+        except ValueError:
+            payload = text
+        if self._on_raw_message is not None:
+            self._on_raw_message(topic, payload)
+
+    def _route_node_message(self, topic: str, raw: bytes) -> bool:
+        """Handle nova/stats/<node>[/info] and nova/state/<node>. True if it was one.
+
+        An empty payload (a node clearing its retained message) reaches the
+        handler as None. A payload that is not a JSON object is dropped here,
+        so a bad node cannot disturb the handlers.
+        """
+        for flt, handler in (
+            (self._stats_topic, self._on_stats_message),
+            (self._state_topic, self._on_state_message),
+        ):
+            if not flt or handler is None or not topic_matches(flt, topic):
+                continue
+            payload = None
+            if raw:
+                try:
+                    payload = json.loads(raw.decode("utf-8"))
+                except (ValueError, UnicodeDecodeError):
+                    LOGGER.warning("Ignoring non-JSON message on %s", topic)
+                    return True
+                if not isinstance(payload, dict):
+                    LOGGER.warning("Ignoring non-object message on %s", topic)
+                    return True
+            if self._on_raw_message is not None and payload is not None:
+                self._on_raw_message(topic, payload)
+            handler(topic, payload)
+            return True
+        return False
+
     def _on_message(self, _client, _userdata, message) -> None:
         try:
-            payload = json.loads(message.payload.decode("utf-8"))
             topic = getattr(message, "topic", self._sensor_topic)
+            if self._is_extra_topic(topic):
+                self._on_extra_message(topic, message.payload)
+                return
+            if self._route_node_message(topic, message.payload):
+                return
+            payload = json.loads(message.payload.decode("utf-8"))
             if self._on_raw_message is not None:
                 self._on_raw_message(topic, payload)
             if topic == self._flight_topic and self._on_flight_message is not None:

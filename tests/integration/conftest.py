@@ -1,4 +1,4 @@
-"""Fixtures that run real processes: a Mosquitto broker and tools/novaMock.py.
+"""Fixtures that run real processes: a Mosquitto broker and tools/novaSim.py.
 
 Mosquitto must be installed. Without it these tests are skipped, unless
 NOVA_REQUIRE_INTEGRATION is set (as it is in CI), in which case they fail.
@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-NOVA_MOCK = REPO_ROOT / "tools" / "novaMock.py"
+NOVA_SIM = REPO_ROOT / "tools" / "novaSim.py"
 
 # Where the Windows installer puts it; it isn't on PATH by default.
 _WINDOWS_MOSQUITTO = Path(r"C:\Program Files\mosquitto\mosquitto.exe")
@@ -88,11 +88,11 @@ def mqtt_broker(tmp_path_factory) -> tuple[str, int]:
 
 
 @pytest.fixture
-def nova_mock(mqtt_broker) -> subprocess.Popen:
-    """tools/novaMock.py publishing simulated telemetry to the test broker."""
+def nova_sim(mqtt_broker) -> subprocess.Popen:
+    """tools/novaSim.py publishing simulated telemetry to the test broker."""
     host, port = mqtt_broker
     proc = subprocess.Popen(
-        [sys.executable, str(NOVA_MOCK), "--broker", host, "--port", str(port), "--hz", "20"],
+        [sys.executable, str(NOVA_SIM), "--broker", host, "--port", str(port), "--hz", "20"],
         cwd=REPO_ROOT,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,

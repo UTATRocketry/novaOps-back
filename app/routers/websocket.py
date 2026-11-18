@@ -75,6 +75,12 @@ async def _handle_websocket(websocket: WebSocket, ctx) -> None:
     if ctx.runtime.latest_events:
         await ctx.ws_manager.send_json(websocket, {"type": "flight_events", "events": ctx.runtime.latest_events})
     await ctx.ws_manager.send_json(websocket, {"type": "lockout", "state": ctx.runtime.lockout_state})
+    for node, info in list(ctx.runtime.node_stats_info.items()):
+        await ctx.ws_manager.send_json(websocket, {"type": "node_stats_info", "node": node, "info": info})
+    for node, stats in list(ctx.runtime.node_stats.items()):
+        await ctx.ws_manager.send_json(websocket, {"type": "node_stats", "node": node, "stats": stats})
+    for node, state in list(ctx.runtime.node_state.items()):
+        await ctx.ws_manager.send_json(websocket, {"type": "node_state", "node": node, "state": state})
 
     try:
         while True:

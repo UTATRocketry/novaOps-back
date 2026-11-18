@@ -367,7 +367,7 @@ SERIAL_RETRY_S    = 2.0
 ENGINE_STALE_S    = 3.0
 
 # ── Flight FSM taxonomy ───────────────────────────────────────────────────────
-# Kept in sync with tools/novaMock.py. fas_state is the top-level avionics state;
+# Kept in sync with tools/novaSim.py. fas_state is the top-level avionics state;
 # flight_phase is the finer phase reported alongside it. FLIGHT_EVENTS maps each
 # event name to (id, default severity); events are published on nova/console as
 # {"type":"flight_event","event":{id,name,severity}}.

@@ -66,6 +66,10 @@ class AppContext:
             on_console_message=self._on_console_message,
             on_control_message=self._on_control_message,
             on_raw_message=self._on_raw_message,
+            stats_topic="nova/stats/#",
+            state_topic="nova/state/#",
+            on_stats_message=self._on_stats_message,
+            on_state_message=self._on_state_message,
         )
 
         self.command_service = CommandService(self)
@@ -85,6 +89,9 @@ class AppContext:
         self._engine_last_seen: dict[str, tuple] = {}
         self._last_engine_raw: dict[str, Any] = {}
         self._flight_last_seen: float | None = None
+        # Last time a stats message arrived per node. Stats are not retained, so a
+        # node that stops publishing is dropped like stale telemetry.
+        self._stats_last_seen: dict[str, float] = {}
 
     async def startup(self) -> None:
         self._event_loop = asyncio.get_running_loop()
@@ -136,8 +143,51 @@ class AppContext:
             return
         asyncio.run_coroutine_threadsafe(self.broadcast(payload), self._event_loop)
 
-    def _on_raw_message(self, topic: str, payload: dict[str, Any]) -> None:
+    def _on_raw_message(self, topic: str, payload: Any) -> None:
         self._broadcast_from_mqtt({"type": "mqtt_message", "topic": topic, "payload": payload})
+
+    @staticmethod
+    def _node_from_topic(topic: str, prefix: str, allow_info: bool) -> tuple[str, bool] | None:
+        """(node, is_info) for <prefix>/<node>, or <prefix>/<node>/info if allowed."""
+        parts = topic.split("/")
+        if len(parts) < 3 or "/".join(parts[:2]) != prefix or not parts[2]:
+            return None
+        if len(parts) == 3:
+            return parts[2], False
+        if allow_info and len(parts) == 4 and parts[3] == "info":
+            return parts[2], True
+        return None
+
+    def _on_stats_message(self, topic: str, payload: dict[str, Any] | None) -> None:
+        parsed = self._node_from_topic(topic, "nova/stats", allow_info=True)
+        if parsed is None:
+            return
+        node, is_info = parsed
+        if is_info:
+            if payload is None:
+                self.runtime.node_stats_info.pop(node, None)
+            else:
+                self.runtime.node_stats_info[node] = payload
+            self._broadcast_from_mqtt({"type": "node_stats_info", "node": node, "info": payload})
+            return
+        if payload is None:
+            self.runtime.node_stats.pop(node, None)
+            self._stats_last_seen.pop(node, None)
+        else:
+            self.runtime.node_stats[node] = payload
+            self._stats_last_seen[node] = time.monotonic()
+        self._broadcast_from_mqtt({"type": "node_stats", "node": node, "stats": payload})
+
+    def _on_state_message(self, topic: str, payload: dict[str, Any] | None) -> None:
+        parsed = self._node_from_topic(topic, "nova/state", allow_info=False)
+        if parsed is None:
+            return
+        node = parsed[0]
+        if payload is None:
+            self.runtime.node_state.pop(node, None)
+        else:
+            self.runtime.node_state[node] = payload
+        self._broadcast_from_mqtt({"type": "node_state", "node": node, "state": payload})
 
     def _on_engine_message(self, payload: dict[str, Any]) -> None:
         source = str(payload.get("source", ""))
@@ -213,6 +263,16 @@ class AppContext:
                     self.runtime.latest_sensors = snapshot
                     LOGGER.info("Cleared %d stale engine sensor(s): %s", len(stale), ", ".join(stale))
                     await self.broadcast({"type": "engine_data", "data": snapshot})
+
+                stale_nodes = [
+                    node for node, seen in self._stats_last_seen.items()
+                    if now - seen > STALE_TTL_S
+                ]
+                for node in stale_nodes:
+                    self._stats_last_seen.pop(node, None)
+                    self.runtime.node_stats.pop(node, None)
+                    LOGGER.info("Cleared stale stats for %s (no update in %.0fs)", node, STALE_TTL_S)
+                    await self.broadcast({"type": "node_stats", "node": node, "stats": None})
 
                 if (self._flight_last_seen is not None
                         and self.runtime.latest_flight_data

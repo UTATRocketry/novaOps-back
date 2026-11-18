@@ -34,7 +34,7 @@ addopts = "-q"
 # A hung websocket or broker must fail the test, not stall CI.
 timeout = 60
 markers = [
-  "integration: starts Mosquitto and novaMock; skipped if Mosquitto isn't installed",
+  "integration: starts Mosquitto and novaSim; skipped if Mosquitto isn't installed",
 ]
 
 [tool.pylint.MASTER]

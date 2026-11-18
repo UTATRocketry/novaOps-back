@@ -50,7 +50,7 @@ On Linux or macOS, start the backend and the simulator separately:
 
 ```bash
 ./scripts/dev_linux.sh --broker localhost
-python tools/novaMock.py --broker localhost
+python tools/novaSim.py --broker localhost
 ```
 
 Open `http://localhost:8000/docs` for the live API reference. Run the tests:
