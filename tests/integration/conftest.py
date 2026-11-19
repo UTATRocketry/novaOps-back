@@ -38,17 +38,37 @@ def _free_port() -> int:
         return sock.getsockname()[1]
 
 
-def _wait_for_port(port: int, proc: subprocess.Popen, timeout_s: float) -> None:
+def _broker_output(log: Path) -> str:
+    try:
+        text = log.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return "(no output captured)"
+    return text or "(no output)"
+
+
+def _start_broker(exe: str, conf: Path) -> tuple[subprocess.Popen, Path]:
+    """Start Mosquitto on `conf`, sending its output to a log beside the config."""
+    log = conf.with_suffix(".log")
+    with log.open("ab") as out:
+        proc = subprocess.Popen([exe, "-c", str(conf)], stdout=out, stderr=subprocess.STDOUT)
+    return proc, log
+
+
+def _wait_for_port(port: int, proc: subprocess.Popen, log: Path, timeout_s: float) -> None:
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         if proc.poll() is not None:
-            raise RuntimeError(f"mosquitto exited early with code {proc.returncode}")
+            raise RuntimeError(
+                f"mosquitto exited early with code {proc.returncode}:\n{_broker_output(log)}"
+            )
         try:
             with socket.create_connection(("127.0.0.1", port), timeout=0.2):
                 return
         except OSError:
             time.sleep(0.05)
-    raise TimeoutError(f"mosquitto did not open port {port} within {timeout_s}s")
+    raise TimeoutError(
+        f"mosquitto did not open port {port} within {timeout_s}s:\n{_broker_output(log)}"
+    )
 
 
 def _stop(proc: subprocess.Popen) -> None:
@@ -75,13 +95,9 @@ def mqtt_broker(tmp_path_factory) -> tuple[str, int]:
     conf = tmp_path_factory.mktemp("mosquitto") / "mosquitto.conf"
     conf.write_text(f"listener {port} 127.0.0.1\nallow_anonymous true\n", encoding="utf-8")
 
-    proc = subprocess.Popen(
-        [exe, "-c", str(conf)],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    proc, log = _start_broker(exe, conf)
     try:
-        _wait_for_port(port, proc, timeout_s=10)
+        _wait_for_port(port, proc, log, timeout_s=10)
         yield "127.0.0.1", port
     finally:
         _stop(proc)
@@ -114,10 +130,8 @@ class BrokerControl:
         self._proc: subprocess.Popen | None = None
 
     def start(self) -> None:
-        self._proc = subprocess.Popen(
-            [self._exe, "-c", str(self._conf)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-        )
-        _wait_for_port(self.port, self._proc, timeout_s=10)
+        self._proc, log = _start_broker(self._exe, self._conf)
+        _wait_for_port(self.port, self._proc, log, timeout_s=10)
 
     def stop(self) -> None:
         if self._proc is not None:

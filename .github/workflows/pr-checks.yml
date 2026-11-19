@@ -95,13 +95,20 @@ jobs:
           sudo apt-get update -q
           sudo apt-get install -y -q mosquitto
 
-      # TODO verify: package name and install path on windows-latest.
+      # Chocolatey has no mosquitto package, so use the official installer
+      # (NSIS, /S is silent). Same version as Ubuntu's package on ubuntu-latest.
       - name: Install Mosquitto (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          choco install mosquitto -y --no-progress
-          "C:\Program Files\mosquitto" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+          $version = "2.0.22"
+          $installer = Join-Path $env:RUNNER_TEMP "mosquitto-install.exe"
+          Invoke-WebRequest "https://mosquitto.org/files/binary/win64/mosquitto-$version-install-windows-x64.exe" -OutFile $installer
+          $p = Start-Process $installer -ArgumentList "/S" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "mosquitto installer exited with $($p.ExitCode)" }
+          $dir = "C:\Program Files\mosquitto"
+          if (-not (Test-Path "$dir\mosquitto.exe")) { throw "mosquitto.exe not found in $dir" }
+          $dir | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
 
       - name: Install
         run: pip install -r requirements.txt -r requirements-test.txt

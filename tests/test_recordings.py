@@ -111,7 +111,7 @@ def test_upload_requires_a_name(station) -> None:
 
 @pytest.mark.parametrize(
     "uploaded",
-    ["../escape.csv", "..\escape.csv", "C:\Windows\escape.csv", "/etc/escape.csv", "sub/dir/escape.csv"],
+    ["../escape.csv", r"..\escape.csv", r"C:\Windows\escape.csv", "/etc/escape.csv", "sub/dir/escape.csv"],
 )
 def test_upload_never_writes_outside_the_data_dir(station, tmp_path, uploaded) -> None:
     http, ctx, _ = station
