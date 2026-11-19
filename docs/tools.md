@@ -52,6 +52,18 @@ Publishes GCS and FAS engine packets and the nested flight snapshot, and
 answers the same commands as novaGround and the FAS bridge, so the backend and
 frontend can be exercised end to end with no hardware.
 
+It mirrors novaGround's runtime instrumentation, as node `novaSim`:
+
+| Option | Env | Effect |
+|---|---|---|
+| `--stats on\|off` | `NOVA_STATS` | Publish `nova/stats/novaSim/info` (retained), `nova/stats/novaSim` and `nova/state/novaSim` (retained), and add `seq`, `sample_ms` and `publish_ms` to the novaGround engine packet. Off by default. An unreadable value is reported and ignored. |
+| `--stats-ms <ms>` | `NOVA_STATS_MS` | Stats and state interval, in whole ms (default 1000). |
+| `--stop-actuate` | | Drop every relay, servo and gpio write, as novaGround does: commands are handled and counted (`stopped_writes`) but `nova/state/novaSim` does not change. |
+
+The messages have the shapes in novaGround's `docs/instrumentation.md` (code in
+`tools/sim_node_stats.py`). The loops it reports are `publisher` and
+`flight_publisher`; the relay mask starts with every relay on, as at novaGround's startup.
+
 `--ui` serves the control panel on `--ui-port` (8765 by default). The page is
 `tools/sim_control.html`, read from disk on each request, so edits to it show
 on a browser refresh without restarting the simulator.
