@@ -46,12 +46,16 @@ def _broker_output(log: Path) -> str:
     return text or "(no output)"
 
 
-def _start_broker(exe: str, conf: Path) -> tuple[subprocess.Popen, Path]:
-    """Start Mosquitto on `conf`, sending its output to a log beside the config."""
-    log = conf.with_suffix(".log")
+def _start_broker(exe: str, port: int, log: Path) -> subprocess.Popen:
+    """Start Mosquitto on `port`, appending its output to `log`.
+
+    No config file: Mosquitto 2.x run with only -p listens on loopback alone and
+    allows anonymous clients, which is what these tests need. A config file under
+    the pytest temp dir is not an option, since Ubuntu's mosquitto can't open one
+    there ("Unable to open config file"). The log is opened here, by Python.
+    """
     with log.open("ab") as out:
-        proc = subprocess.Popen([exe, "-c", str(conf)], stdout=out, stderr=subprocess.STDOUT)
-    return proc, log
+        return subprocess.Popen([exe, "-p", str(port)], stdout=out, stderr=subprocess.STDOUT)
 
 
 def _wait_for_port(port: int, proc: subprocess.Popen, log: Path, timeout_s: float) -> None:
@@ -92,10 +96,8 @@ def mqtt_broker(tmp_path_factory) -> tuple[str, int]:
         pytest.skip(message)
 
     port = _free_port()
-    conf = tmp_path_factory.mktemp("mosquitto") / "mosquitto.conf"
-    conf.write_text(f"listener {port} 127.0.0.1\nallow_anonymous true\n", encoding="utf-8")
-
-    proc, log = _start_broker(exe, conf)
+    log = tmp_path_factory.mktemp("mosquitto") / "mosquitto.log"
+    proc = _start_broker(exe, port, log)
     try:
         _wait_for_port(port, proc, log, timeout_s=10)
         yield "127.0.0.1", port
@@ -122,16 +124,16 @@ def nova_sim(mqtt_broker) -> subprocess.Popen:
 class BrokerControl:
     """A private Mosquitto that tests can kill and bring back on the same port."""
 
-    def __init__(self, exe: str, conf: Path, port: int) -> None:
+    def __init__(self, exe: str, port: int, log: Path) -> None:
         self.host = "127.0.0.1"
         self.port = port
         self._exe = exe
-        self._conf = conf
+        self._log = log
         self._proc: subprocess.Popen | None = None
 
     def start(self) -> None:
-        self._proc, log = _start_broker(self._exe, self._conf)
-        _wait_for_port(self.port, self._proc, log, timeout_s=10)
+        self._proc = _start_broker(self._exe, self.port, self._log)
+        _wait_for_port(self.port, self._proc, self._log, timeout_s=10)
 
     def stop(self) -> None:
         if self._proc is not None:
@@ -148,10 +150,7 @@ def broker_control(tmp_path) -> BrokerControl:
             pytest.fail(message)
         pytest.skip(message)
 
-    port = _free_port()
-    conf = tmp_path / "mosquitto.conf"
-    conf.write_text(f"listener {port} 127.0.0.1\nallow_anonymous true\n", encoding="utf-8")
-    broker = BrokerControl(exe, conf, port)
+    broker = BrokerControl(exe, _free_port(), tmp_path / "mosquitto.log")
     broker.start()
     try:
         yield broker

@@ -4,6 +4,7 @@ Covers the staging store, the download endpoint, and the request/ack handshake
 that makes /fas/sound/upload wait for the bridge to confirm the upload.
 """
 import asyncio
+import time
 import zlib
 
 import pytest
@@ -39,9 +40,13 @@ def test_clip_store_stage_get_discard(tmp_path) -> None:
     store.discard(clip.token)  # idempotent
 
 
-def test_clip_store_purges_expired(tmp_path) -> None:
+def test_clip_store_purges_expired(tmp_path, monkeypatch) -> None:
     store = ClipStore(ttl_s=0.0, root=tmp_path / "clips")
     clip = store.stage(b"data")
+    # Move the clock on: Windows' monotonic clock ticks about every 15 ms, so
+    # right after stage() the clip's age can be exactly 0.0, which is not > 0.0.
+    later = time.monotonic() + 1.0
+    monkeypatch.setattr(time, "monotonic", lambda: later)
     store.purge_expired()
     assert store.get(clip.token) is None
     assert not clip.path.exists()
