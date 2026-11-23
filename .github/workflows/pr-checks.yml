@@ -131,3 +131,21 @@ jobs:
           path: |
             junit.xml
             coverage.xml
+
+  # Branch protection requires a check named "tests" (Set-RepoRules.ps1 in
+  # Nova-Collected), but the matrix jobs above report as "tests (<os>, py<ver>)".
+  # This job reports their combined result under that one name.
+  tests-result:
+    name: tests
+    needs: tests
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every test job passed
+        run: |
+          result="${{ needs.tests.result }}"
+          if [ "$result" != "success" ]; then
+            echo "::error::The test matrix finished with '$result'; see the failed 'tests (...)' job."
+            exit 1
+          fi
+          echo "All test jobs passed."
