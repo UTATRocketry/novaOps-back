@@ -27,6 +27,11 @@ Publishes:
     nova/console           — console responses, and (while console mode is on)
                        a mocked "fas_frame" RX stream.
 
+    nova/stats/novaSim[/info], nova/state/novaSim
+                       — with --stats on, novaGround's runtime stats and actuator
+                       state (tools/sim_node_stats.py). --stop-actuate drops
+                       every actuator write, as novaGround's flag does.
+
 Listens on nova/command and nova/control:
     relay / servo / gpio   — GCS device commands (novaGround side).
     type "fas"             — FAS device commands, both the high-level
@@ -73,6 +78,8 @@ from urllib.parse import urlparse, parse_qs
 
 import paho.mqtt.client as mqtt
 
+import sim_node_stats
+
 BROKER = os.getenv("NOVA_MQTT_BROKER", "localhost")
 PORT = int(os.getenv("NOVA_MQTT_PORT", "1883"))
 HZ = float(os.getenv("NOVA_PUBLISH_HZ", "20"))
@@ -84,6 +91,12 @@ CONSOLE_TOPIC = "nova/console"
 COMMAND_TOPIC = "nova/command"
 CONTROL_TOPIC = "nova/control"
 CLIENT_ID = "novaSim"
+
+# Runtime stats and actuator state, as novaGround publishes them (see
+# tools/sim_node_stats.py). Replaced in main() once the flags are read; this
+# default is off, like novaGround, so importing the module publishes nothing.
+NODE = sim_node_stats.NODE
+STATS = sim_node_stats.NodeStats(enabled=False)
 
 # Coarse lock guarding every piece of mutable sim state below, since the UI
 # thread, the MQTT callback thread and the publish loop all touch it.
@@ -454,7 +467,15 @@ def build_gcs_packet() -> dict:
              "value": round(wave_value(c, t), 4), "timestamp": timestamp}
             for c in SENSORS.values() if c["group"] == "gcs"
         ]
-    return {"source": "novaGround", "sensors": sensors}
+    packet = {"source": "novaGround", "sensors": sensors}
+    if STATS.enabled:
+        # The three fields novaGround adds with stats on (additive; the backend
+        # ignores them): a per-node packet counter, when the newest sample was
+        # read, and when the packet was built.
+        packet["seq"] = STATS.next_packet_seq()
+        packet["sample_ms"] = timestamp
+        packet["publish_ms"] = int(time.time() * 1000)
+    return packet
 
 
 def build_fas_engine_packet() -> dict:
@@ -1395,6 +1416,8 @@ def on_connect(client: mqtt.Client, _userdata, _flags, reason_code, _properties)
         client.subscribe(CONTROL_TOPIC)
         print(f"[novaSim] Connected to {BROKER}:{PORT}")
         print(f"[novaSim] Subscribed to {COMMAND_TOPIC} and {CONTROL_TOPIC}")
+        publish_stats_info(client)
+        publish_node_state(client)
     else:
         print(f"[novaSim] Connect failed: {reason_code}")
 
@@ -1403,7 +1426,25 @@ def on_disconnect(_client, _userdata, _flags, reason_code, _properties) -> None:
     print(f"[novaSim] Disconnected: {reason_code}")
 
 
+def publish_stats_info(client: mqtt.Client) -> None:
+    """Retained info message, on every (re)connect, so a broker restart gets it back."""
+    if STATS.enabled:
+        client.publish(STATS.info_topic, _dumps(STATS.info()), qos=1, retain=True)
+
+
+def publish_node_state(client: mqtt.Client) -> None:
+    """Retained actuator state, as read back from the (simulated) drivers."""
+    if STATS.enabled:
+        client.publish(STATS.state_topic, _dumps(STATS.state()), qos=1, retain=True)
+
+
+def publish_node_stats(client: mqtt.Client) -> None:
+    if STATS.enabled:
+        client.publish(STATS.stats_topic, _dumps(STATS.stats()), qos=0)
+
+
 def on_message(client, _userdata, message) -> None:
+    received = time.monotonic()
     try:
         payload = json.loads(message.payload.decode("utf-8"))
     except Exception as exc:
@@ -1433,13 +1474,23 @@ def on_message(client, _userdata, message) -> None:
         if payload.get("source", "") != "novaOps":
             return
 
+        # Timing as novaGround measures it: receipt -> handler about to run, and
+        # receipt -> handler returned. Only commands that reach a handler count.
+        handled = time.monotonic()
+
         # --- GCS device commands (novaGround side) ---
         if cmd_type == "relay":
             print(f"[novaSim] Relay command — id={cmd.get('id')} state={cmd.get('state')}")
+            if isinstance(cmd.get("id"), int):
+                STATS.apply_relay(cmd["id"], cmd.get("state", 0))
         elif cmd_type == "servo":
             print(f"[novaSim] Servo command — id={cmd.get('id')} angle={cmd.get('angle')}")
+            if isinstance(cmd.get("id"), int):
+                STATS.apply_servo(cmd["id"], cmd.get("angle"))
         elif cmd_type == "gpio":
             print(f"[novaSim] GPIO command — id={cmd.get('id')} state={cmd.get('state')}")
+            if isinstance(cmd.get("id"), int):
+                STATS.apply_gpio(cmd["id"], cmd.get("state", 0))
 
         # --- FAS device commands (fas_bridge side) ---
         elif cmd_type == "fas":
@@ -1458,6 +1509,10 @@ def on_message(client, _userdata, message) -> None:
 
         else:
             print(f"[novaSim] Unhandled command type '{cmd_type}': {cmd}")
+            return
+
+        done = time.monotonic()
+        STATS.record_command(cmd_type, (handled - received) * 1000.0, (done - received) * 1000.0)
 
     except Exception as exc:
         print(f"[novaSim] Error processing message: {exc}")
@@ -1797,7 +1852,7 @@ def _ui_html() -> str:
 
 
 def main() -> None:
-    global BROKER, PORT, HZ, FLIGHT_HZ, _sim_csv_default
+    global BROKER, PORT, HZ, FLIGHT_HZ, _sim_csv_default, STATS
     p = argparse.ArgumentParser(description="novaGround + FAS-bridge MQTT simulator")
     p.add_argument("--ui", action="store_true",
                    help="start the browser control panel (default: headless)")
@@ -1810,9 +1865,39 @@ def main() -> None:
                    help="trajectory CSV used by the UI 'Launch' button, or set "
                         "NOVA_SIM_CSV instead (falls back to a synthetic "
                         "profile when unset or missing)")
+    p.add_argument("--stats", default=os.environ.get("NOVA_STATS", ""),
+                   help="on|off: publish nova/stats/novaSim[/info] and nova/state/novaSim "
+                        "like novaGround (default off; env NOVA_STATS)")
+    p.add_argument("--stats-ms", default=os.environ.get("NOVA_STATS_MS", ""),
+                   help="stats and state publish interval in whole ms (default 1000; "
+                        "env NOVA_STATS_MS)")
+    p.add_argument("--stop-actuate", action="store_true",
+                   help="drop every actuator write, as novaGround's --stop-actuate: commands "
+                        "are handled and timed but nova/state/novaSim never changes")
     args = p.parse_args()
 
+    # Like novaGround, a stats setting that can't be read is reported and ignored:
+    # a typo in a diagnostics setting must not keep the sim from starting.
+    stats_on = False
+    if args.stats:
+        stats_on = sim_node_stats.parse_stats_flag(args.stats)
+        if stats_on is None:
+            print(f"[novaSim] --stats {args.stats!r} is not on or off; stats stay off")
+            stats_on = False
+    stats_ms = sim_node_stats.DEFAULT_STATS_MS
+    if args.stats_ms:
+        parsed_ms = sim_node_stats.parse_stats_ms(args.stats_ms)
+        if parsed_ms is None:
+            print(f"[novaSim] --stats-ms {args.stats_ms!r} is not a whole number of ms; using {stats_ms}")
+        else:
+            stats_ms = parsed_ms
+
     BROKER, PORT, HZ, FLIGHT_HZ = args.broker, args.port, args.hz, args.flight_hz
+    STATS = sim_node_stats.NodeStats(
+        enabled=stats_on, interval_ms=stats_ms, stop_actuate=args.stop_actuate,
+        loops={"publisher": 1000.0 / HZ, "flight_publisher": 1000.0 / FLIGHT_HZ})
+    if args.stop_actuate:
+        print("[novaSim] Actuation: STOPPED (--stop-actuate)")
     _sim_csv_default = args.sim_csv if os.path.isfile(args.sim_csv) else ""
     if args.sim_csv and not _sim_csv_default:
         print(f"[novaSim] --sim-csv not found, ignoring: {args.sim_csv}")
@@ -1849,12 +1934,25 @@ def main() -> None:
     if not args.ui:
         print("[novaSim] (no UI; pass --ui for the control panel)")
 
+    last_pub = last_flight = None
+    next_stats = time.monotonic() + STATS.interval_ms / 1000.0
     try:
         while True:
             now = time.time()
+            mono = time.monotonic()
+            if last_pub is not None:
+                STATS.record_tick("publisher", (mono - last_pub) * 1000.0)
+            last_pub = mono
             client.publish(TELEMETRY_TOPIC, _dumps(build_gcs_packet()), qos=0)
             client.publish(TELEMETRY_TOPIC, _dumps(build_fas_engine_packet()), qos=0)
+            if mono >= next_stats:
+                publish_node_stats(client)
+                publish_node_state(client)
+                next_stats = mono + STATS.interval_ms / 1000.0
             if now >= next_flight:
+                if last_flight is not None:
+                    STATS.record_tick("flight_publisher", (mono - last_flight) * 1000.0)
+                last_flight = mono
                 client.publish(FLIGHT_TOPIC, _dumps(build_flight_packet()), qos=0)
                 # Publish any flight events the FSM raised this cycle.
                 for ev in drain_flight_events():
@@ -1865,6 +1963,10 @@ def main() -> None:
     except KeyboardInterrupt:
         print("\n[novaSim] Stopping")
     finally:
+        # The last stats window goes out before disconnecting, as in novaGround.
+        publish_node_stats(client)
+        publish_node_state(client)
+        time.sleep(0.2)  # let the loop thread flush them
         client.loop_stop()
         client.disconnect()
 
