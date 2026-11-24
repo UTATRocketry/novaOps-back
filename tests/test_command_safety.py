@@ -23,7 +23,7 @@ Actuators:
     binding: {target: GCS, relay_channel: 2}
   - name: IGNITER
     type: gpio_device
-    binding: {target: GCS, gpio_channel: 3}
+    binding: {target: GCS, gpio_channel: 17}
 safetyRules:
   hazardous:
     - SVFILL: [open]
@@ -39,7 +39,7 @@ def station(tmp_path):
     config_path.write_text(CONFIG, encoding="utf-8")
     ctx = AppContext(config_path, tmp_path / "data")
     published: list[dict] = []
-    ctx.mqtt_service.publish_device_commands = published.extend  # type: ignore[method-assign]
+    ctx.mqtt_service.publish_device_commands = lambda cmds, topic=None: published.extend(cmds)  # type: ignore[method-assign]
     app = FastAPI()
     app.state.ctx = ctx
     app.include_router(commands.router)

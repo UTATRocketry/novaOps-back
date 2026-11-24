@@ -14,7 +14,7 @@ def _gpio(name: str) -> dict:
     return {
         "name": name,
         "type": "gpio_device",
-        "binding": {"target": "GCS", "gpio_channel": 1},
+        "binding": {"target": "GCS", "gpio_channel": 17},
     }
 
 

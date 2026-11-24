@@ -29,7 +29,7 @@ def station(tmp_path):
     ctx.runtime.initialize_all(ctx.config_service.config)
     commands: list[dict] = []
     console: list[dict] = []
-    ctx.mqtt_service.publish_device_commands = commands.extend  # type: ignore[method-assign]
+    ctx.mqtt_service.publish_device_commands = lambda cmds, topic=None: commands.extend(cmds)  # type: ignore[method-assign]
     ctx.mqtt_service.publish_console = console.append  # type: ignore[method-assign]
     ctx.mqtt_service.publish_console_command = console.append  # type: ignore[method-assign]
     app = FastAPI()
@@ -42,13 +42,17 @@ def station(tmp_path):
 
 
 def _drain_connect(ws) -> list[dict]:
-    """Read the messages sent on connect, up to and including the lockout state."""
+    """Read the messages sent on connect, up to and including the last Pi's
+    config status (one per Pi, after the lockout state and node stats)."""
     messages = []
+    pi_status = 0
     while True:
         message = ws.receive_json()
         messages.append(message)
-        if message["type"] == "lockout":
-            return messages
+        if message["type"] == "pi_config_status":
+            pi_status += 1
+            if pi_status == 2:
+                return messages
 
 
 def _set_role(ctx: AppContext, client_id: str, role: str) -> None:
@@ -67,7 +71,9 @@ def test_connect_sequence_is_session_then_snapshot_then_cached_data_then_lockout
 
     assert [m["type"] for m in messages] == [
         "session", "snapshot", "parsed_data", "engine_data", "flight_data", "flight_events", "lockout",
+        "pi_config_status", "pi_config_status",
     ]
+    assert [m["node"] for m in messages[-2:]] == ["novaGround", "novaThermo"]
     assert messages[0]["role"] == "viewer"
     assert messages[0]["client_id"] == messages[1]["client_id"]
     assert set(messages[1]["actuator_states"]) == {"SVVENT"}
@@ -76,7 +82,8 @@ def test_connect_sequence_is_session_then_snapshot_then_cached_data_then_lockout
 def test_empty_cache_sends_only_session_snapshot_and_lockout(station) -> None:
     http, *_ = station
     with http.websocket_connect("/ws") as ws:
-        assert [m["type"] for m in _drain_connect(ws)] == ["session", "snapshot", "lockout"]
+        assert [m["type"] for m in _drain_connect(ws)] == [
+            "session", "snapshot", "lockout", "pi_config_status", "pi_config_status"]
 
 
 def test_clients_are_listed_and_removed_on_disconnect(station) -> None:

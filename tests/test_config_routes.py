@@ -83,7 +83,9 @@ def test_load_switches_actuators_and_tells_every_client(station) -> None:
     assert http.post("/api/config/load", params={"path": "other.yaml"}).status_code == 200
 
     assert set(ctx.runtime.actuator_states) == {"VALVE_B"}
-    assert [m["type"] for m in sent] == ["config_update", "actuator_states"]
+    # Then one pi_config_status per Pi, since the expected config hash changed.
+    assert [m["type"] for m in sent] == [
+        "config_update", "actuator_states", "pi_config_status", "pi_config_status"]
     assert set(sent[1]["actuator_states"]) == {"VALVE_B"}
     assert http.get("/api/config/actuators").json()[0]["name"] == "VALVE_B"
 
