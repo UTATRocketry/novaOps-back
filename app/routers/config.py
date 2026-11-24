@@ -8,7 +8,8 @@ from fastapi.responses import FileResponse
 
 from app.context import AppContext
 from app.deps import get_context
-from app.models import SystemConfig
+from app.models import PI_GPIO_MAX, PI_RESERVED_GPIO, TC_TYPES, SystemConfig
+from app.services import pi_config
 
 router = APIRouter(prefix="/api/config", tags=["Config"])
 
@@ -42,17 +43,51 @@ def _update(ctx: AppContext, data: dict, client_id: str | None) -> SystemConfig:
 
 
 async def _publish_config(ctx: AppContext, config: SystemConfig) -> dict:
-    """Sync actuator state to the new config, then tell every client."""
+    """Sync actuator state to the new config, send each Pi its part, then tell every client."""
     ctx.runtime.sync_actuators(config)
+    ctx.publish_node_configs()
     result = config.model_dump(by_alias=True)
     await ctx.broadcast({"type": "config_update", "config": result})
     await ctx.broadcast({"type": "actuator_states", "actuator_states": ctx.runtime.actuator_states})
+    # The expected hash changed, so each Pi's mismatch did too.
+    for message in ctx.pi_status_messages():
+        await ctx.broadcast(message)
     return result
 
 
 @router.get("/", summary="Get full config", description="Return the active configuration as JSON.")
 async def get_config(ctx: AppContext = Depends(get_context)) -> dict:
     return ctx.config_service.config.model_dump(by_alias=True)
+
+@router.get(
+    "/pi",
+    summary="Per-Pi config and config status",
+    description=(
+        "For each Pi (novaGround = GCS, novaThermo = TCS): the retained `nova/config/<node>` "
+        "message built from the active config, and the latest `nova/config/<node>/status` "
+        "with whether it matches (`mismatch`) and which outputs tripped. Also the reserved "
+        "GPIO pins and thermocouple types the config editor must respect."
+    ),
+)
+async def get_pi_config(ctx: AppContext = Depends(get_context)) -> dict:
+    config = ctx.config_service.config
+    messages = pi_config.build_all_node_configs(config, ctx.config_service.active_hash)
+    views = ctx.pi_status_views()
+    return {
+        "reserved_pins": list(PI_RESERVED_GPIO),
+        "gpio_max": PI_GPIO_MAX,
+        "tc_types": list(TC_TYPES),
+        "nodes": {
+            node: {
+                "target": pi_config.TARGET_FOR_NODE[node].value,
+                "topic": pi_config.config_topic(node),
+                "config": messages[node],
+                "status": views[node],
+            }
+            for node in messages
+        },
+    }
+
 
 @router.get("/actuators", summary="List actuators", description="Return actuator definitions from loaded config.")
 async def get_actuators(ctx: AppContext = Depends(get_context)) -> list[dict]:

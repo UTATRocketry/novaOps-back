@@ -1,13 +1,27 @@
 from __future__ import annotations
 
+import logging
+import time
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Iterable
+from typing import Callable, Iterable
 
 import numpy as np
 
-from app.models import ConvertMethod, ConvertSpec, FasSensorBinding, GcsSensorBinding, SensorEntry, SourceTarget, SystemConfig
+from app.models import (
+    ConvertMethod,
+    ConvertSpec,
+    FasSensorBinding,
+    GcsSensorBinding,
+    PiGpioSensorBinding,
+    SensorEntry,
+    SensorType,
+    SourceTarget,
+    SystemConfig,
+)
+
+LOGGER = logging.getLogger(__name__)
 
 
 def linear_interpolate(raw_value: float, points: list[tuple[float, float]] | None, degree: int = 1) -> float:
@@ -94,10 +108,33 @@ def convert_value(raw_value: float, convert: ConvertSpec) -> float:
 @dataclass
 class ParsedSensor:
     name: str
-    value: float
-    avg: float
+    value: float | None
+    avg: float | None
     unit: str
     timestamp: int
+    # Set (with value and avg None) when a thermocouple reports a fault code.
+    fault: str | None = None
+
+    def to_dict(self) -> dict:
+        """The WebSocket form. `fault` is only present on a faulted reading."""
+        entry = dict(self.__dict__)
+        if entry["fault"] is None:
+            del entry["fault"]
+        return entry
+
+
+# What the daqhats library returns, with a successful return code, for a
+# thermocouple it can't read (mcc134.h: OPEN_TC_VALUE, COMMON_MODE_TC_VALUE,
+# OVERRANGE_TC_VALUE). Matched exactly: they are sentinels, not temperatures.
+TC_FAULT_VALUES = {
+    -9999.0: "open",
+    -7777.0: "common_mode",
+    -8888.0: "overrange",
+}
+
+# Two sources feeding one target within this window is worth a warning (e.g.
+# novaMock running on a broker where the real novaGround is also up).
+DUPLICATE_SOURCE_WINDOW_S = 5.0
 
 
 class RollingAverageStore:
@@ -117,6 +154,8 @@ _SOURCE_ALIASES = {
     "gcs": SourceTarget.GCS,
     "novaground": SourceTarget.GCS,
     "novaops": SourceTarget.GCS,
+    # novaMock is a stand-in for novaGround (docs/design/pi-io-config.md).
+    "novamock": SourceTarget.GCS,
     "tcs": SourceTarget.TCS,
     "novathermo": SourceTarget.TCS,
     "fas": SourceTarget.FAS,
@@ -125,12 +164,68 @@ _SOURCE_ALIASES = {
 
 
 class SensorParser:
-    def __init__(self, rolling_store: RollingAverageStore) -> None:
+    def __init__(self, rolling_store: RollingAverageStore,
+                 clock: Callable[[], float] = time.monotonic) -> None:
         self._rolling_store = rolling_store
+        self._clock = clock
+        # Unknown source names already logged, so each is logged once.
+        self._unknown_sources: set[str] = set()
+        # target -> {source name: when it last sent telemetry}
+        self._target_sources: dict[SourceTarget, dict[str, float]] = defaultdict(dict)
+        # (target, sources) -> when the two-sources warning was last logged
+        self._duplicate_warned: dict[tuple, float] = {}
 
     @staticmethod
     def _resolve_source(source: str) -> SourceTarget | None:
         return _SOURCE_ALIASES.get(source.strip().lower())
+
+    def _note_source(self, source: str, target: SourceTarget) -> None:
+        """Warn when one target gets telemetry from two sources at once."""
+        now = self._clock()
+        seen = self._target_sources[target]
+        seen[source] = now
+        others = sorted(name for name, last in seen.items()
+                        if name != source and now - last <= DUPLICATE_SOURCE_WINDOW_S)
+        if not others:
+            return
+        key = (target, frozenset([source, *others]))
+        last_warned = self._duplicate_warned.get(key)
+        if last_warned is not None and now - last_warned < 60.0:
+            return
+        self._duplicate_warned[key] = now
+        LOGGER.warning(
+            "%s telemetry is arriving from more than one source within %.0fs: %s. "
+            "Both act on %s commands; is novaMock running next to the real node?",
+            target.value, DUPLICATE_SOURCE_WINDOW_S, ", ".join(sorted([source, *others])), target.value,
+        )
+
+    @staticmethod
+    def _gpio_lookup(sensors: Iterable[SensorEntry], target: SourceTarget) -> dict[int, SensorEntry]:
+        return {s.binding.gpio_channel: s for s in sensors
+                if isinstance(s.binding, PiGpioSensorBinding) and s.binding.source == target}
+
+    def _parse_gpios(self, gpios: list, config: SystemConfig, target: SourceTarget,
+                     default_timestamp: int) -> list[ParsedSensor]:
+        """Turn a Pi's `gpios` telemetry ([{pin_id, state}]) into DI readings of 0 or 1."""
+        lookup = self._gpio_lookup(config.sensors, target)
+        if not lookup:
+            return []
+        parsed: list[ParsedSensor] = []
+        for item in gpios:
+            if not isinstance(item, dict):
+                continue
+            try:
+                pin = int(item.get("pin_id"))
+                value = 1 if int(item.get("state")) else 0
+                timestamp = int(item.get("timestamp", default_timestamp))
+            except (TypeError, ValueError):
+                continue
+            sensor_cfg = lookup.get(pin)
+            if sensor_cfg is None:
+                continue
+            parsed.append(ParsedSensor(name=sensor_cfg.name, value=value, avg=value,
+                                       unit=sensor_cfg.unit, timestamp=timestamp))
+        return parsed
 
     @staticmethod
     def _gcs_lookup(sensors: Iterable[SensorEntry], target: SourceTarget) -> dict[tuple[int, int], SensorEntry]:
@@ -142,19 +237,30 @@ class SensorParser:
         return {(s.binding.resolved_node, s.binding.channel): s for s in sensors
                 if isinstance(s.binding, FasSensorBinding)}
 
-    def parse(self, source: str, raw_sensors: list[dict] | dict[str, dict], config: SystemConfig, calibration_enabled: bool) -> list[ParsedSensor]:
+    def parse(self, source: str, raw_sensors: list[dict] | dict[str, dict], config: SystemConfig,
+              calibration_enabled: bool, gpios: list | None = None) -> list[ParsedSensor]:
         target = self._resolve_source(source)
+        if target is None:
+            # An unknown source used to be read as GCS. Drop it instead, so a
+            # stray publisher can't write into GCS sensors.
+            name = source.strip()
+            if name.lower() not in self._unknown_sources:
+                self._unknown_sources.add(name.lower())
+                LOGGER.warning("Dropping telemetry from unknown source %r", name)
+            return []
+        self._note_source(source.strip().lower(), target)
         is_fas = target == SourceTarget.FAS
 
         if is_fas:
             lookup_fas = self._fas_lookup(config.sensors)
         else:
-            lookup_gcs = self._gcs_lookup(config.sensors, target or SourceTarget.GCS)
+            lookup_gcs = self._gcs_lookup(config.sensors, target)
 
         # Accept either a list of sensor dicts or a dict keyed by "node:channel"
         items = raw_sensors.values() if isinstance(raw_sensors, dict) else raw_sensors
 
         parsed: list[ParsedSensor] = []
+        newest_timestamp = 0
         for item in items:
             try:
                 timestamp = int(item.get("timestamp", 0))
@@ -163,6 +269,7 @@ class SensorParser:
                 # One malformed reading (e.g. a null value) must not drop the
                 # rest of the packet.
                 continue
+            newest_timestamp = max(newest_timestamp, timestamp)
 
             if is_fas:
                 key = (str(item.get("node", "")), int(item.get("channel", -1)))
@@ -172,6 +279,14 @@ class SensorParser:
                 sensor_cfg = lookup_gcs.get(key)
 
             if sensor_cfg is None:
+                continue
+
+            fault = TC_FAULT_VALUES.get(raw_value) if (
+                not is_fas and sensor_cfg.type == SensorType.TC) else None
+            if fault is not None:
+                # No value, and kept out of the rolling average.
+                parsed.append(ParsedSensor(name=sensor_cfg.name, value=None, avg=None,
+                                           unit=sensor_cfg.unit, timestamp=timestamp, fault=fault))
                 continue
 
             value = raw_value
@@ -188,5 +303,9 @@ class SensorParser:
                     timestamp=timestamp,
                 )
             )
+
+        if gpios and not is_fas:
+            default_timestamp = newest_timestamp or int(time.time() * 1000)
+            parsed.extend(self._parse_gpios(gpios, config, target, default_timestamp))
 
         return parsed

@@ -11,7 +11,10 @@ from app.models import (
     ActuatorActions,
     ActuatorEntry,
     ActuatorType,
+    COMMAND_TOPICS,
     CommandPayload,
+    GPIO_ACTUATOR_TYPES,
+    PI_TARGETS,
     DirectRelayPayload,
     DirectServoPayload,
     FasAuxPayload,
@@ -101,10 +104,36 @@ class CommandParser:
         return actuator
 
     def parse(self, payload: CommandPayload) -> list[dict]:
+        return self.route(payload)[1]
+
+    def route(self, payload: CommandPayload) -> tuple[str, list[dict]]:
+        """Translate a UI command and return (MQTT topic, device commands).
+
+        GCS and TCS commands go to their own Pi's topic, FAS commands to the
+        broadcast topic the bridge listens on. Any other target is an error, so
+        a Pi actuator can never reach the FAS path.
+        """
         actuator = self._find_actuator(payload.name)
-        if actuator.binding.target == SourceTarget.GCS:
-            return self._parse_gcs(actuator, payload.state)
-        return self._parse_fas(actuator, payload.state)
+        return self.route_actuator(actuator, payload.state)
+
+    def route_actuator(self, actuator: ActuatorEntry, state: str) -> tuple[str, list[dict]]:
+        target = actuator.binding.target
+        topic = COMMAND_TOPICS.get(target)
+        if topic is None:
+            raise ValueError(
+                f"Actuator '{actuator.name}' targets {target.value}, which has no command path"
+            )
+        if target in PI_TARGETS:
+            return topic, self._parse_pi(actuator, state)
+        return topic, self._parse_fas(actuator, state)
+
+    def _parse_pi(self, actuator: ActuatorEntry, state: str) -> list[dict]:
+        binding = actuator.binding
+        if actuator.type in GPIO_ACTUATOR_TYPES and binding.gpio_channel is None:
+            # Config validation already refuses this; never fall back to the
+            # relay channel number as a pin on a Pi.
+            raise ValueError(f"GPIO actuator '{actuator.name}' does not define gpio_channel")
+        return self._parse_gcs(actuator, state)
 
     def _parse_gcs(self, actuator: ActuatorEntry, state: str) -> list[dict]:
         binding = actuator.binding
@@ -275,8 +304,8 @@ class CommandService:
         if ctx.runtime.lockout_is_locked and ctx.config_service.config.is_hazardous_command(command.name, command.state):
             raise ValueError("Nova is locked; actuator commands are disabled")
 
-        parsed = CommandParser(ctx.config_service.config).parse(command)
-        ctx.mqtt_service.publish_device_commands(parsed)
+        topic, parsed = CommandParser(ctx.config_service.config).route(command)
+        ctx.mqtt_service.publish_device_commands(parsed, topic=topic)
 
         actuator = ctx.config_service.config.find_actuator(command.name)
         if actuator is not None:
@@ -305,7 +334,8 @@ class CommandService:
             board = self._fas_board(payload.node)
             action = "on" if payload.state == 1 else "off"
             commands = [{"type": "fas", **board, "port": "relay", "channel": payload.channel, "action": action}]
-        self._ctx.mqtt_service.publish_device_commands(commands)
+        self._ctx.mqtt_service.publish_device_commands(
+            commands, topic=COMMAND_TOPICS[SourceTarget(payload.target)])
         return commands
 
     def apply_direct_servo(self, payload: DirectServoPayload) -> list[dict]:
@@ -314,7 +344,8 @@ class CommandService:
         else:
             board = self._fas_board(payload.node)
             commands = [{"type": "fas", **board, "port": "servo", "channel": payload.channel, "value": payload.pulse_us}]
-        self._ctx.mqtt_service.publish_device_commands(commands)
+        self._ctx.mqtt_service.publish_device_commands(
+            commands, topic=COMMAND_TOPICS[SourceTarget(payload.target)])
         return commands
 
     def apply_fas_buzzer(self, payload: FasBuzzerPayload) -> list[dict]:

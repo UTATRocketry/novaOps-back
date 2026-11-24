@@ -15,18 +15,22 @@ The backend is organized around a few core runtime services:
 
 ### Engine telemetry parsing
 
-1. Receive packet from MQTT topic `nova/telemetry/engine` (`source`, `sensors`).
-2. Select config section by source (`GCS`, `TCS`, `FAS`, fallback).
+1. Receive packet from MQTT topic `nova/telemetry/engine` (`source`, `sensors`, and from a Pi `gpios`).
+2. Select config section by source. `GCS`, `novaGround`, `novaOps` and `novaMock` are `GCS`; `TCS` and `novaThermo` are `TCS`; `FAS` and `novaFAS` are `FAS` (case-insensitive). A packet from any other source is dropped, and each unknown name is logged once. When one target gets telemetry from two sources within 5 s (novaMock next to the real novaGround), a warning is logged.
 3. Map `(hat_id, channel_id)` to configured sensor metadata.
-4. Optionally calibrate using piecewise linear interpolation.
-5. Apply rolling average smoothing.
-6. Broadcast parsed payload over websocket as `engine_data`.
-7. Also broadcast `parsed_data` for compatibility with existing clients.
+4. A `TC` sensor on `GCS`/`TCS` reading exactly `-9999.0` (open), `-7777.0` (common mode) or `-8888.0` (overrange) is a daqhats fault code, not a temperature: it is sent with `value` and `avg` null and `fault` set to `"open"`, `"common_mode"` or `"overrange"`, and left out of the rolling average.
+5. Optionally calibrate using piecewise linear interpolation.
+6. Apply rolling average smoothing.
+7. Turn each `gpios` entry (`{pin_id, state}`) whose pin is a configured `DI` sensor on that Pi into a reading of 0 or 1 (no calibration or averaging). It takes the packet's newest sensor timestamp.
+8. Broadcast parsed payload over websocket as `engine_data`.
+9. Also broadcast `parsed_data` for compatibility with existing clients.
 
-Engine telemetry websocket payload:
+Engine telemetry websocket payload. `fault` is only present on a faulted reading:
 
 ```json
-{ "type": "engine_data", "data": [] }
+{ "type": "engine_data", "data": [
+  { "name": "TC_Tank", "value": null, "avg": null, "unit": "C", "timestamp": 1795110000000, "fault": "open" }
+] }
 ```
 
 ### Flight telemetry routing
@@ -60,7 +64,7 @@ Flight events are stored and broadcast without parsing:
 
 ### Ad-hoc topic subscriptions
 
-For testing a new topic before it has a real implementation, `POST /api/mqtt/topics` `{"topic": "nova/other/#"}` subscribes the backend to any filter (`+` and `#` allowed) and `POST /api/mqtt/topics/unsubscribe` removes it; `GET /api/mqtt/topics` lists them. Messages on these topics are only relayed to WebSocket clients as `{"type": "mqtt_message", "topic": ..., "payload": ...}` (non-JSON payloads arrive as a string) and never reach the engine, flight, console or control handlers. Both changes need operator or admin role. Filters that overlap a built-in topic (for example `nova/#`) are rejected, and subscriptions are in memory only, so they are cleared on restart. Code that acts on a topic belongs in a dedicated subscription, not here. The frontend UI is on the Console page, WS / MQTT tab. `nova/stats/#` and `nova/state/#` are built in (below), so a filter that overlaps them is rejected too.
+For testing a new topic before it has a real implementation, `POST /api/mqtt/topics` `{"topic": "nova/other/#"}` subscribes the backend to any filter (`+` and `#` allowed) and `POST /api/mqtt/topics/unsubscribe` removes it; `GET /api/mqtt/topics` lists them. Messages on these topics are only relayed to WebSocket clients as `{"type": "mqtt_message", "topic": ..., "payload": ...}` (non-JSON payloads arrive as a string) and never reach the engine, flight, console or control handlers. Both changes need operator or admin role. Filters that overlap a built-in topic (for example `nova/#`) are rejected, and subscriptions are in memory only, so they are cleared on restart. Code that acts on a topic belongs in a dedicated subscription, not here. The frontend UI is on the Console page, WS / MQTT tab. `nova/stats/#`, `nova/state/#` and `nova/config/+/status` are built in (below), so a filter that overlaps them is rejected too.
 
 ### Node stats and actuator state
 
@@ -83,7 +87,67 @@ The payloads pass through unchanged; the topic names the node. A message that is
 3. Translate to MQTT command format:
    - relay/gpio state commands
    - servo angle commands
-4. Publish command over MQTT and broadcast updated actuator state.
+4. Publish command over MQTT on the target's topic and broadcast updated actuator state.
+
+Command topics (Nova-Collected `docs/design/pi-io-config.md`):
+
+| Topic | Carries |
+|---|---|
+| `nova/command/novaGround` | `relay`, `gpio`, `servo` for `GCS` actuators and direct `GCS` relay/servo commands |
+| `nova/command/novaThermo` | `relay`, `gpio`, `servo` for `TCS` actuators |
+| `nova/command` | FAS commands (addressed by board), and the broadcasts every node acts on: `data_file` (data saving) and `console` |
+
+`CommandParser.route()` returns the topic with the commands. Any other target
+is an error, so a `TCS` actuator can never reach the FAS path, and config
+validation rejects actuators whose target has no command path (`OPS`).
+
+### Per-Pi config
+
+On every MQTT connect and every active-config change (startup, load, upload,
+edit, reload), the backend publishes a retained `nova/config/novaGround` (from
+the `GCS` part of the config) and `nova/config/novaThermo` (`TCS`):
+
+```json
+{
+  "config_hash": "3f9a1c0be27d4a55",
+  "gpio": { "outputs": { "17": { "max_on_ms": 1800000, "on_comms_loss": "safe" } }, "inputs": [5] },
+  "relays": { "3": { "max_on_ms": null, "on_comms_loss": "hold" } },
+  "daq": { "1": { "0": "K", "1": "T" } },
+  "heartbeat": { "timeout_ms": 2000 }
+}
+```
+
+- `config_hash` is the active config file's content hash, the same one the config history uses.
+- `gpio.outputs`: every `gpio_device` and `powered_gpio_device` on that Pi, by `gpio_channel`, with its limits. `gpio.inputs`: the pins of its `DI` sensors.
+- `relays`: only the relay channels of actuators that set `max_on_s` or `on_comms_loss: safe`. Two actuators on one output get the smaller `max_on_s` and `safe` if either is.
+- `daq`: HAT address -> channel -> thermocouple type, for its `TC` sensors (`tc_type`, default K).
+- `heartbeat.timeout_ms`: the config's `Heartbeat.timeout_ms` (default 2000).
+
+The backend subscribes to the retained `nova/config/+/status` each Pi answers
+with, and keeps the latest per node in `runtime.pi_config_status`. A Pi shows a
+mismatch when its `config_hash` differs from the active config's or its
+`rejected` list isn't empty. Each `tripped` entry (`gpio:N` or `relay:N`) sets
+the matching actuators to their safe state (GPIO level 0, relay de-energized)
+using the command rules (`relay_type`, `solenoid_type`, motor patterns), once
+per trip, and adds `tripped`, `tripped_output` and `tripped_ms` to their entry
+in `actuator_states` until the Pi stops listing it. The backend never sends a
+command because of a trip.
+
+The frontend gets this as a `pi_config_status` WebSocket message per Pi
+(`{type, node, status}`), sent on connect, when a status arrives and when the
+active config changes, and from `GET /api/config/pi`, which also returns the
+config messages, the reserved pins (`0, 1, 2, 3, 7, 8, 9, 10, 11, 12, 13, 16,
+20, 21, 26`), `gpio_max` (27) and the thermocouple types.
+
+### Heartbeat
+
+The backend publishes `{"online": true, "seq": n, "time_ms": t}` on
+`nova/heartbeat/backend` every 250 ms, QoS 0 and not retained, from the main
+event loop, so a stuck loop stops the beats. Its MQTT last will is a retained
+`{"online": false}` on the same topic. On connect it publishes a retained
+`{"online": true}` to replace the will, and on a clean shutdown a retained
+`{"online": false}`, since a clean disconnect doesn't trigger the will. The Pis
+use it to put outputs set to `on_comms_loss: safe` in their safe state.
 
 ## Managers and Runtime Coordination
 
@@ -100,6 +164,7 @@ The payloads pass through unchanged; the topic names the node. A message that is
   - `flight_events`
   - `physical_lockout`
   - `actuator_states`
+  - `pi_config_status`
 
 ### RuntimeState
 
@@ -111,6 +176,7 @@ The payloads pass through unchanged; the topic names the node. A message that is
 - `latest_events`
 - `physical_lockout_state`
 - `actuator_states`
+- `pi_config_status` (latest `nova/config/<node>/status` per Pi)
 
 ## API and OpenAPI
 

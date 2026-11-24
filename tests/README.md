@@ -41,6 +41,12 @@ a hung websocket or broker fails the test instead of stalling the run.
 | `test_recordings.py` | Starting and stopping recordings, and data-file uploads |
 | `test_sound_clip_upload.py` | Staging soundboard clips for HTTP pickup |
 | `test_fas_bridge_data_file.py` | Data-file naming in `tools/fas_bridge.py` |
+| `test_pi_routing.py` | Per-Pi command topics for every target, and broadcasts (data saving, console) staying on `nova/command` |
+| `test_pi_config_schema.py` | `tc_type`, `DI` sensors, `max_on_s` / `on_comms_loss`, `Heartbeat`, reserved and out-of-range pins |
+| `test_pi_config_message.py` | `nova/config/<node>` contents and publishing, its status, mismatch, trips, `GET /api/config/pi` |
+| `test_pi_telemetry.py` | Thermocouple fault values, `gpios` as `DI` readings, the `novaMock` alias, dropped unknown sources |
+| `test_heartbeat.py` | `nova/heartbeat/backend` beats and the MQTT last will |
+| `test_novasim_pi_config.py` | novaSim standing in for novaGround's config status and trips |
 | `golden/config_hash_vectors.json` | Known inputs and their config content hashes |
 | `integration/` | Real processes: Mosquitto, `tools/novaSim.py`, the backend |
 
@@ -52,6 +58,8 @@ port, never 1883, so it can't touch a station's broker. The tests are marked
 
 - `test_novasim_e2e.py` runs novaSim → MQTT → backend → a websocket client
   and checks the client receives calibrated engine telemetry.
+- `test_pi_config_e2e.py` checks the backend's retained `nova/config/novaGround`
+  reaches novaSim and its status comes back with no mismatch.
 - `test_mqtt_reconnect.py` kills the broker mid-test, brings it back on the
   same port, and checks the backend reconnects, resubscribes and publishes.
 

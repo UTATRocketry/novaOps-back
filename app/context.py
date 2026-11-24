@@ -11,6 +11,7 @@ from app.services.clip_store import ClipStore
 from app.services.command_service import CommandService
 from app.services.config_history import ConfigHistory
 from app.services.config_service import ConfigService
+from app.services import pi_config
 from app.services.data_service import RollingAverageStore, SensorParser
 from app.services.mqtt_service import MqttService
 from app.services.recording_service import RecordingService
@@ -70,12 +71,18 @@ class AppContext:
             state_topic="nova/state/#",
             on_stats_message=self._on_stats_message,
             on_state_message=self._on_state_message,
+            heartbeat_topic=pi_config.HEARTBEAT_TOPIC,
+            config_status_topic=pi_config.CONFIG_STATUS_FILTER,
+            on_config_status_message=self._on_config_status_message,
+            on_connected=self.publish_node_configs,
         )
 
         self.command_service = CommandService(self)
 
         self._event_loop: asyncio.AbstractEventLoop | None = None
         self._staleness_task: asyncio.Task | None = None
+        self._heartbeat_task: asyncio.Task | None = None
+        self._heartbeat_seq = 0
 
         # Freshness tracking. Engine sensors are kept by name with the monotonic
         # time their reading last advanced; flight tracks the last message time.
@@ -102,12 +109,16 @@ class AppContext:
         self.mqtt_service.start()
         self.runtime.initialize_all(self.config_service.config)
         self._staleness_task = asyncio.create_task(self._staleness_loop())
+        self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
         LOGGER.info("Application started")
 
     async def shutdown(self) -> None:
         if self._staleness_task is not None:
             self._staleness_task.cancel()
             self._staleness_task = None
+        if self._heartbeat_task is not None:
+            self._heartbeat_task.cancel()
+            self._heartbeat_task = None
         self.mqtt_service.stop()
         self._event_loop = None
         LOGGER.info("Application stopped")
@@ -189,28 +200,98 @@ class AppContext:
             self.runtime.node_state[node] = payload
         self._broadcast_from_mqtt({"type": "node_state", "node": node, "state": payload})
 
+    # --- per-Pi config, config status and heartbeat --------------------------
+
+    def publish_node_configs(self) -> None:
+        """Publish each Pi's retained nova/config/<node> from the active config.
+
+        Called on every MQTT (re)connect and on every active-config change.
+        """
+        config = self.config_service.config
+        config_hash = self.config_service.active_hash
+        for node, message in pi_config.build_all_node_configs(config, config_hash).items():
+            self.mqtt_service.publish_node_config(node, message)
+
+    def pi_status_views(self) -> dict[str, dict]:
+        config = self.config_service.config
+        expected = self.config_service.active_hash
+        return {
+            node: pi_config.status_view(node, self.runtime.pi_config_status.get(node), config, expected)
+            for node in pi_config.TARGET_FOR_NODE
+        }
+
+    def pi_status_messages(self) -> list[dict[str, Any]]:
+        return [{"type": "pi_config_status", "node": node, "status": view}
+                for node, view in self.pi_status_views().items()]
+
+    def apply_config_status(self, node: str, payload: dict[str, Any] | None) -> list[dict[str, Any]]:
+        """Store a Pi's config status and apply its trips. Returns the
+        WebSocket messages to broadcast. Never sends a command."""
+        if payload is None:
+            self.runtime.pi_config_status.pop(node, None)
+        else:
+            self.runtime.pi_config_status[node] = payload
+        config = self.config_service.config
+        messages: list[dict[str, Any]] = []
+        if pi_config.apply_trips(config, self.runtime.pi_config_status, self.runtime.actuator_states,
+                                 self.runtime.applied_trips, self.runtime.update_actuator_state):
+            messages.append({"type": "actuator_states", "actuator_states": self.runtime.actuator_states})
+        view = pi_config.status_view(node, payload, config, self.config_service.active_hash)
+        if view["mismatch"]:
+            LOGGER.warning("%s config status mismatch: %s", node, ", ".join(view["mismatch_reasons"]))
+        messages.insert(0, {"type": "pi_config_status", "node": node, "status": view})
+        return messages
+
+    async def _apply_config_status_async(self, node: str, payload: dict[str, Any] | None) -> None:
+        for message in self.apply_config_status(node, payload):
+            await self.broadcast(message)
+
+    def _on_config_status_message(self, topic: str, payload: dict[str, Any] | None) -> None:
+        node = pi_config.node_from_status_topic(topic)
+        if node is None or node not in pi_config.TARGET_FOR_NODE:
+            return
+        if self._event_loop is None or not self._event_loop.is_running():
+            # No loop to hand it to (tests, shutdown): update state only.
+            self.apply_config_status(node, payload)
+            return
+        # Actuator state is otherwise only changed on the event loop.
+        asyncio.run_coroutine_threadsafe(self._apply_config_status_async(node, payload), self._event_loop)
+
+    async def _heartbeat_loop(self) -> None:
+        """Tell the Pis the backend is alive. Runs on the main event loop on
+        purpose: if the loop is stuck, the beats stop and the Pis go safe."""
+        try:
+            while True:
+                if self.mqtt_service.publish_heartbeat(self._heartbeat_seq, int(time.time() * 1000)):
+                    self._heartbeat_seq += 1
+                await asyncio.sleep(pi_config.HEARTBEAT_INTERVAL_S)
+        except asyncio.CancelledError:
+            pass
+
     def _on_engine_message(self, payload: dict[str, Any]) -> None:
         source = str(payload.get("source", ""))
         sensors = payload.get("sensors", [])
+        gpios = payload.get("gpios")
 
         # The bridge republishes its persistent state every cycle; if this
         # payload is byte-identical to the last one from the same source there is
         # nothing new — skip it so we don't re-average or re-broadcast stale data.
-        if self._last_engine_raw.get(source) == sensors:
+        if self._last_engine_raw.get(source) == (sensors, gpios):
             return
-        self._last_engine_raw[source] = sensors
+        self._last_engine_raw[source] = (sensors, gpios)
 
         parsed = self.sensor_parser.parse(
             source=source,
             raw_sensors=sensors,
             config=self.config_service.config,
             calibration_enabled=self.runtime.calibration_enabled,
+            gpios=gpios if isinstance(gpios, list) else None,
         )
 
         now = time.monotonic()
         changed = False
         for item in parsed:
-            entry = item.__dict__
+            entry = item.to_dict()
             name = entry["name"]
             seen = (entry.get("timestamp"), entry.get("value"))
             # A reading identical to the last one ingested (same timestamp and

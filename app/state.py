@@ -27,6 +27,12 @@ class RuntimeState:
     node_stats: dict[str, dict[str, Any]] = field(default_factory=dict)
     node_stats_info: dict[str, dict[str, Any]] = field(default_factory=dict)
     node_state: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Per Pi (novaGround, novaThermo), the retained nova/config/<node>/status.
+    # See app/services/pi_config.py.
+    pi_config_status: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Trips already applied to actuator state, so a re-delivered status
+    # doesn't apply an old trip again.
+    applied_trips: set = field(default_factory=set, repr=False)
     _actuator_types: dict[str, ActuatorType] = field(default_factory=dict, repr=False)
 
     @property

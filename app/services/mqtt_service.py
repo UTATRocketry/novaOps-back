@@ -73,6 +73,10 @@ class MqttService:
         state_topic: str | None = None,
         on_stats_message: Callable[[str, dict | None], None] | None = None,
         on_state_message: Callable[[str, dict | None], None] | None = None,
+        heartbeat_topic: str | None = None,
+        config_status_topic: str | None = None,
+        on_config_status_message: Callable[[str, dict | None], None] | None = None,
+        on_connected: Callable[[], None] | None = None,
     ) -> None:
         self._sensor_topic = sensor_topic
         self._command_topic = command_topic
@@ -91,6 +95,15 @@ class MqttService:
         self._state_topic = state_topic
         self._on_stats_message = on_stats_message
         self._on_state_message = on_state_message
+        # Backend liveness for the Pis' comms-loss supervision: a retained
+        # {"online": ...} plus a last will on the same topic, and the periodic
+        # beats published by AppContext's heartbeat loop.
+        self._heartbeat_topic = heartbeat_topic
+        # nova/config/+/status, retained, one per Pi.
+        self._config_status_topic = config_status_topic
+        self._on_config_status_message = on_config_status_message
+        # Runs on the MQTT thread after every (re)connect, once subscribed.
+        self._on_connected = on_connected
         self._client = None
         self._connected = False
         self._file_num = 0
@@ -116,6 +129,8 @@ class MqttService:
             topics.append(self._stats_topic)
         if self._state_topic and self._on_state_message is not None:
             topics.append(self._state_topic)
+        if self._config_status_topic and self._on_config_status_message is not None:
+            topics.append(self._config_status_topic)
         return list(dict.fromkeys(topics))
 
     def subscribe_topic(self, topic: str) -> bool:
@@ -164,6 +179,10 @@ class MqttService:
         client.on_connect = self._on_connect
         client.on_disconnect = self._on_disconnect
         client.on_message = self._on_message
+        if self._heartbeat_topic:
+            # The broker publishes this as soon as our connection drops, so the
+            # Pis see comms loss without waiting for the heartbeat timeout.
+            client.will_set(self._heartbeat_topic, json.dumps({"online": False}), qos=1, retain=True)
         client.connect_async(broker, port)
         client.loop_start()
         self._client = client
@@ -172,6 +191,14 @@ class MqttService:
     def stop(self) -> None:
         if self._client is None:
             return
+        if self._heartbeat_topic and self._connected:
+            # A clean disconnect doesn't trigger the last will, so say it ourselves.
+            try:
+                info = self._client.publish(
+                    self._heartbeat_topic, json.dumps({"online": False}), qos=1, retain=True)
+                info.wait_for_publish(1.0)
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.warning("Could not publish offline heartbeat: %s", exc)
         self._client.loop_stop()
         self._client.disconnect()
         self._client = None
@@ -179,14 +206,38 @@ class MqttService:
         self._file_num = 0
         self._data_file = None
 
-    def publish_device_commands(self, commands: list[dict]) -> None:
+    def publish_device_commands(self, commands: list[dict], topic: str | None = None) -> None:
+        """Publish device commands, each in the novaOps envelope.
+
+        `topic` is the node's own command topic (see models.COMMAND_TOPICS);
+        without one they go on the broadcast command topic.
+        """
         if not self._can_publish():
             LOGGER.warning("MQTT unavailable, skipping device command publish commands_count=%s", len(commands))
             return
 
         for command in commands:
             payload = {"source": "novaOps", "command": command}
-            self._publish_json(self._command_topic, payload, label="device-command")
+            self._publish_json(topic or self._command_topic, payload, label="device-command")
+
+    def publish_heartbeat(self, seq: int, time_ms: int) -> bool:
+        """One heartbeat beat: not retained, QoS 0, so a late beat is never queued."""
+        if not self._heartbeat_topic or not self._can_publish():
+            return False
+        self._publish_json(
+            self._heartbeat_topic,
+            {"online": True, "seq": seq, "time_ms": time_ms},
+            label="heartbeat", qos=0, quiet=True,
+        )
+        return True
+
+    def publish_node_config(self, node: str, message: dict) -> bool:
+        """Publish a Pi's retained nova/config/<node> message."""
+        if not self._can_publish():
+            LOGGER.warning("MQTT unavailable, skipping config publish node=%s", node)
+            return False
+        self._publish_json(f"nova/config/{node}", message, label="node-config", retain=True)
+        return True
 
     def publish_console(self, payload: dict) -> None:
         if not self._can_publish():
@@ -258,16 +309,23 @@ class MqttService:
 
         return False
 
-    def _publish_json(self, topic: str, payload: dict, label: str) -> None:
+    def _publish_json(self, topic: str, payload: dict, label: str, *, qos: int = 1,
+                      retain: bool = False, quiet: bool = False) -> None:
         if self._client is None:
             return
 
-        info = self._client.publish(topic, json.dumps(payload), qos=1)
+        if retain:
+            info = self._client.publish(topic, json.dumps(payload), qos=qos, retain=True)
+        else:
+            info = self._client.publish(topic, json.dumps(payload), qos=qos)
         if info.rc != mqtt.MQTT_ERR_SUCCESS:
             LOGGER.error("MQTT publish failed label=%s topic=%s rc=%s", label, topic, info.rc)
             return
 
-        LOGGER.info("MQTT publish ok label=%s topic=%s payload=%s", label, topic, payload)
+        if quiet:
+            LOGGER.debug("MQTT publish ok label=%s topic=%s payload=%s", label, topic, payload)
+        else:
+            LOGGER.info("MQTT publish ok label=%s topic=%s payload=%s", label, topic, payload)
 
     def _on_connect(self, client, _userdata, _flags, reason_code, _properties) -> None:
         self._connected = self._connect_success(reason_code)
@@ -280,6 +338,15 @@ class MqttService:
         for topic in dict.fromkeys(topics):
             client.subscribe(topic)
             LOGGER.info("Subscribed MQTT topic topic=%s", topic)
+
+        if self._heartbeat_topic:
+            # Replaces the retained last will from a previous connection.
+            self._publish_json(self._heartbeat_topic, {"online": True}, label="online", retain=True)
+        if self._on_connected is not None:
+            try:
+                self._on_connected()
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.exception("on_connected handler failed: %s", exc)
 
     def _on_disconnect(self, _client, _userdata, _disconnect_flags, reason_code, _properties) -> None:
         self._connected = False
@@ -313,6 +380,7 @@ class MqttService:
         for flt, handler in (
             (self._stats_topic, self._on_stats_message),
             (self._state_topic, self._on_state_message),
+            (self._config_status_topic, self._on_config_status_message),
         ):
             if not flt or handler is None or not topic_matches(flt, topic):
                 continue

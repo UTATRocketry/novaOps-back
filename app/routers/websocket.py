@@ -81,6 +81,8 @@ async def _handle_websocket(websocket: WebSocket, ctx) -> None:
         await ctx.ws_manager.send_json(websocket, {"type": "node_stats", "node": node, "stats": stats})
     for node, state in list(ctx.runtime.node_state.items()):
         await ctx.ws_manager.send_json(websocket, {"type": "node_state", "node": node, "state": state})
+    for message in ctx.pi_status_messages():
+        await ctx.ws_manager.send_json(websocket, message)
 
     try:
         while True:

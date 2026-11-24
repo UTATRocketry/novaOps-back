@@ -32,14 +32,28 @@ Publishes:
                        state (tools/sim_node_stats.py). --stop-actuate drops
                        every actuator write, as novaGround's flag does.
 
-Listens on nova/command and nova/control:
-    relay / servo / gpio   — GCS device commands (novaGround side).
+Listens on nova/command, nova/command/novaGround and nova/control:
+    relay / servo / gpio   — GCS device commands (novaGround side). Taken only
+                             on nova/command/novaGround, as novaGround does;
+                             on nova/command they are refused and logged.
     type "fas"             — FAS device commands, both the high-level
                              port/action shape and the direct op shape.
     type "console"         — start/stop/list_ports/configure/disconnect/
                              status/tx.
     type "data_file"       — data-saving start/stop (on either topic).
     novaLock lockout       — logged from nova/control.
+
+Stands in for novaGround's per-node config (docs/design/pi-io-config.md in
+Nova-Collected):
+    nova/config/novaGround — checked like the Pi does (reserved pins, BCM 0-27,
+                             input/output clashes, thermocouple types) and
+                             answered with a retained nova/config/novaGround/status.
+                             gpio commands for pins that aren't configured
+                             outputs are refused, and configured inputs show up
+                             in the GCS packet's "gpios", toggling every 5 s.
+    nova/heartbeat/backend — max on-time and comms-loss trips are modelled, so
+                             stopping the backend trips outputs set to "safe"
+                             and the trip shows in the status's "tripped".
 
 Note: this sim does NOT emulate the removed legacy "fas_cmd" system commands or
 the flight "events" array; the live fas_bridge no longer uses them.
@@ -468,6 +482,9 @@ def build_gcs_packet() -> dict:
             for c in SENSORS.values() if c["group"] == "gcs"
         ]
     packet = {"source": "novaGround", "sensors": sensors}
+    gpios = pi_gpio_readings()
+    if gpios:
+        packet["gpios"] = gpios
     if STATS.enabled:
         # The three fields novaGround adds with stats on (additive; the backend
         # ignores them): a per-node packet counter, when the newest sample was
@@ -1000,14 +1017,21 @@ def validate_command(topic: str, payload) -> tuple[bool, list[str]]:
             return (not issues), issues
         # else fall through to command validation below
 
+    if topic == PI_CONFIG_TOPIC:
+        return True, []  # checked by apply_pi_config; problems show in the status
+
     cmd = payload.get("command")
     if not isinstance(cmd, dict):
         issues.append("missing 'command' object")
         return False, issues
-    if topic == COMMAND_TOPIC and source != "novaOps":
+    if topic in (COMMAND_TOPIC, PI_COMMAND_TOPIC) and source != "novaOps":
         issues.append(f"source is {source!r}, expected 'novaOps' (will be ignored)")
 
     ctype = cmd.get("type")
+    if topic == COMMAND_TOPIC and ctype in ACTUATOR_COMMANDS:
+        issues.append(f"{ctype} on {COMMAND_TOPIC}: novaGround only takes it on {PI_COMMAND_TOPIC}")
+    elif topic == PI_COMMAND_TOPIC and ctype not in ACTUATOR_COMMANDS:
+        issues.append(f"{ctype!r} on {PI_COMMAND_TOPIC}: only relay/gpio/servo belong there")
     if ctype in ("relay", "gpio"):
         if not isinstance(cmd.get("id"), int):
             issues.append(f"{ctype}: 'id' must be an int")
@@ -1407,15 +1431,256 @@ def _handle_data_file(cmd: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Per-node config, config status and output supervision, standing in for
+# novaGround (docs/design/pi-io-config.md in Nova-Collected). A plausible
+# model, not the real thing: novaGround's own code and tests are the authority.
+# ---------------------------------------------------------------------------
+PI_NODE = "novaGround"
+PI_COMMAND_TOPIC = f"nova/command/{PI_NODE}"
+PI_CONFIG_TOPIC = f"nova/config/{PI_NODE}"
+PI_CONFIG_STATUS_TOPIC = f"{PI_CONFIG_TOPIC}/status"
+HEARTBEAT_TOPIC = "nova/heartbeat/backend"
+ACTUATOR_COMMANDS = ("relay", "gpio", "servo")
+
+PI_RESERVED_PINS = {
+    0: "reserved (HAT ID EEPROM)", 1: "reserved (HAT ID EEPROM)",
+    2: "reserved (I2C1)", 3: "reserved (I2C1)",
+    7: "reserved (SPI0 CE1)", 8: "reserved (SPI0 CE0)", 9: "reserved (SPI0 MISO)",
+    10: "reserved (SPI0 MOSI)", 11: "reserved (SPI0 SCLK)",
+    12: "reserved (HAT address)", 13: "reserved (HAT address)", 26: "reserved (HAT address)",
+    16: "reserved (MCC 128 reset)", 20: "reserved (MCC 128 interrupt)",
+    21: "reserved (daqhats interrupt)",
+}
+PI_TC_TYPES = ("J", "K", "T", "E", "R", "S", "B", "N")
+PI_SAFE_LEVEL = {"gpio": 0, "relay": 1}  # relay 1 = de-energized, as startup writes
+
+_pi = {
+    "configured": False,
+    "config_hash": None,
+    "applied_ms": None,
+    "rejected": [],
+    "thermocouples": {},
+    "limits": {},           # ("gpio"|"relay", n) -> {"max_on_ms", "on_comms_loss"}
+    "inputs": [],
+    "levels": {},           # ("gpio"|"relay", n) -> level last written
+    "left_safe": {},        # output -> monotonic time it left its safe level
+    "tripped": [],          # [{"output", "reason", "time_ms"}]
+    "timeout_ms": None,
+    "last_beat": None,      # monotonic time of the last live heartbeat
+    "will_seen": False,
+}
+
+
+def _pi_limits(entry, item: str, rejected: list) -> dict | None:
+    if not isinstance(entry, dict) or set(entry) - {"max_on_ms", "on_comms_loss"}:
+        rejected.append({"item": item, "reason": "malformed limits"})
+        return None
+    max_on = entry.get("max_on_ms")
+    mode = entry.get("on_comms_loss", "hold")
+    if (max_on is not None and (not isinstance(max_on, int) or max_on <= 0)) or mode not in ("hold", "safe"):
+        rejected.append({"item": item, "reason": "malformed limits"})
+        return None
+    return {"max_on_ms": max_on, "on_comms_loss": mode}
+
+
+def apply_pi_config(msg) -> dict:
+    """Check a nova/config/<node> message like the Pi does, apply what's valid
+    and return the status to publish."""
+    rejected: list[dict] = []
+    limits: dict = {}
+    inputs: list[int] = []
+    thermocouples: dict = {}
+    timeout_ms = None
+    if not isinstance(msg, dict):
+        msg = {}
+        rejected.append({"item": "config", "reason": "not a JSON object"})
+    for key in set(msg) - {"config_hash", "gpio", "relays", "daq", "heartbeat"}:
+        rejected.append({"item": key, "reason": "unknown key"})
+
+    def pin_ok(pin_text: str, item: str) -> int | None:
+        try:
+            pin = int(pin_text)
+        except (TypeError, ValueError):
+            rejected.append({"item": item, "reason": "not a pin number"})
+            return None
+        if not 0 <= pin <= 27:
+            rejected.append({"item": item, "reason": "outside BCM 0-27"})
+            return None
+        if pin in PI_RESERVED_PINS:
+            rejected.append({"item": item, "reason": PI_RESERVED_PINS[pin]})
+            return None
+        return pin
+
+    gpio = msg.get("gpio") if isinstance(msg.get("gpio"), dict) else {}
+    for pin_text, entry in (gpio.get("outputs") or {}).items():
+        item = f"gpio.outputs.{pin_text}"
+        pin = pin_ok(pin_text, item)
+        lim = _pi_limits(entry, item, rejected) if pin is not None else None
+        if lim is not None:
+            limits[("gpio", pin)] = lim
+    for pin_value in gpio.get("inputs") or []:
+        item = f"gpio.inputs.{pin_value}"
+        pin = pin_ok(pin_value, item)
+        if pin is None:
+            continue
+        if ("gpio", pin) in limits:
+            rejected.append({"item": item, "reason": "pin is also an output"})
+            continue
+        inputs.append(pin)
+    for channel_text, entry in (msg.get("relays") or {}).items():
+        item = f"relays.{channel_text}"
+        try:
+            channel = int(channel_text)
+        except ValueError:
+            channel = -1
+        if not 0 <= channel < 16:
+            rejected.append({"item": item, "reason": "no such relay channel"})
+            continue
+        lim = _pi_limits(entry, item, rejected)
+        if lim is not None:
+            limits[("relay", channel)] = lim
+    for address, channels in (msg.get("daq") or {}).items():
+        for channel, tc_type in (channels or {}).items():
+            if tc_type not in PI_TC_TYPES:
+                rejected.append({"item": f"daq.{address}.{channel}", "reason": f"unknown type {tc_type!r}"})
+                continue
+            thermocouples.setdefault(str(address), {})[str(channel)] = tc_type
+    heartbeat = msg.get("heartbeat")
+    if isinstance(heartbeat, dict) and isinstance(heartbeat.get("timeout_ms"), int):
+        timeout_ms = heartbeat["timeout_ms"]
+
+    with _lock:
+        # A dropped output goes to its safe level.
+        for output in [o for o in _pi["levels"] if o[0] == "gpio" and o not in limits]:
+            _pi_write(output, PI_SAFE_LEVEL["gpio"])
+            del _pi["levels"][output]
+        for output in limits:
+            if output[0] == "gpio" and output not in _pi["levels"]:
+                _pi_write(output, PI_SAFE_LEVEL["gpio"])  # claimed at its safe level
+        _pi.update(configured=True, config_hash=msg.get("config_hash"),
+                   applied_ms=int(time.time() * 1000), rejected=rejected,
+                   thermocouples=thermocouples, limits=limits, inputs=sorted(inputs),
+                   timeout_ms=timeout_ms)
+        return _pi_status()
+
+
+def _pi_status() -> dict:
+    return {
+        "config_hash": _pi["config_hash"],
+        "applied_ms": _pi["applied_ms"],
+        "rejected": list(_pi["rejected"]),
+        "reserved_pins": sorted(PI_RESERVED_PINS),
+        "thermocouples": _pi["thermocouples"],
+        "tripped": list(_pi["tripped"]),
+    }
+
+
+def _pi_write(output: tuple, level: int) -> None:
+    """Record a level and update the stats' read-back. Caller holds _lock."""
+    kind, number = output
+    _pi["levels"][output] = level
+    if level == PI_SAFE_LEVEL[kind]:
+        _pi["left_safe"].pop(output, None)
+    else:
+        _pi["left_safe"].setdefault(output, time.monotonic())
+    if kind == "gpio":
+        STATS.apply_gpio(number, level)
+    else:
+        STATS.apply_relay(number, level)
+
+
+def _pi_heartbeat_stale() -> bool:
+    if _pi["timeout_ms"] is None:
+        return False  # comms-loss supervision starts with the first heartbeat config
+    if _pi["will_seen"] or _pi["last_beat"] is None:
+        return True
+    return (time.monotonic() - _pi["last_beat"]) * 1000.0 > _pi["timeout_ms"]
+
+
+def pi_command_allowed(cmd: dict) -> str | None:
+    """None if a relay/gpio command may run, else why it's refused. Clears a
+    trip on that output when it runs."""
+    kind = cmd.get("type")
+    if kind not in ("relay", "gpio") or not isinstance(cmd.get("id"), int):
+        return None
+    output = (kind, cmd["id"])
+    level = 1 if cmd.get("state") else 0
+    with _lock:
+        if kind == "gpio" and output not in _pi["limits"]:
+            return "not a configured GPIO output" if _pi["configured"] else "no config received yet"
+        lim = _pi["limits"].get(output)
+        if (lim and lim["on_comms_loss"] == "safe" and level != PI_SAFE_LEVEL[kind]
+                and _pi_heartbeat_stale()):
+            return "heartbeat stale"
+        _pi_write(output, level)
+        before = len(_pi["tripped"])
+        _pi["tripped"] = [t for t in _pi["tripped"] if t["output"] != f"{kind}:{output[1]}"]
+        _pi["status_dirty"] = _pi.get("status_dirty") or len(_pi["tripped"]) != before
+    return None
+
+
+def pi_on_heartbeat(payload, retained: bool) -> None:
+    with _lock:
+        if isinstance(payload, dict) and payload.get("online") is False:
+            _pi["will_seen"] = True
+        elif isinstance(payload, dict) and payload.get("online") is True:
+            _pi["will_seen"] = False
+            if not retained:  # a retained message isn't a beat
+                _pi["last_beat"] = time.monotonic()
+
+
+def pi_supervise(client: mqtt.Client) -> None:
+    """Max on-time and comms-loss trips, run from the publish loop."""
+    now = time.monotonic()
+    publish = False
+    with _lock:
+        stale = _pi_heartbeat_stale()
+        for output, lim in _pi["limits"].items():
+            since = _pi["left_safe"].get(output)
+            if since is None:
+                continue
+            reason = None
+            if lim["max_on_ms"] is not None and (now - since) * 1000.0 >= lim["max_on_ms"]:
+                reason = "max_on_time"
+            elif lim["on_comms_loss"] == "safe" and stale:
+                reason = "comms_loss"
+            if reason is None:
+                continue
+            _pi_write(output, PI_SAFE_LEVEL[output[0]])
+            _pi["tripped"].append({"output": f"{output[0]}:{output[1]}", "reason": reason,
+                                   "time_ms": int(time.time() * 1000)})
+            print(f"[novaSim] Tripped {output[0]}:{output[1]} ({reason})")
+            publish = True
+        if _pi.pop("status_dirty", False):
+            publish = True
+        status = _pi_status() if publish and _pi["configured"] else None
+    if status is not None:
+        client.publish(PI_CONFIG_STATUS_TOPIC, _dumps(status), qos=1, retain=True)
+
+
+def pi_gpio_readings() -> list[dict]:
+    """`gpios` telemetry: configured inputs (toggling every 5 s) and outputs."""
+    with _lock:
+        if not _pi["configured"]:
+            return []
+        toggle = int(time.time() / 5) % 2
+        readings = [{"pin_id": pin, "state": toggle} for pin in _pi["inputs"]]
+        readings += [{"pin_id": o[1], "state": level} for o, level in sorted(_pi["levels"].items())
+                     if o[0] == "gpio"]
+    return readings
+
+
+# ---------------------------------------------------------------------------
 # MQTT plumbing
 # ---------------------------------------------------------------------------
 def on_connect(client: mqtt.Client, _userdata, _flags, reason_code, _properties) -> None:
     ok = reason_code == 0 or (hasattr(reason_code, "is_failure") and not reason_code.is_failure)
     if ok:
-        client.subscribe(COMMAND_TOPIC)
-        client.subscribe(CONTROL_TOPIC)
+        for topic in (COMMAND_TOPIC, PI_COMMAND_TOPIC, CONTROL_TOPIC, PI_CONFIG_TOPIC, HEARTBEAT_TOPIC):
+            client.subscribe(topic)
         print(f"[novaSim] Connected to {BROKER}:{PORT}")
-        print(f"[novaSim] Subscribed to {COMMAND_TOPIC} and {CONTROL_TOPIC}")
+        print(f"[novaSim] Subscribed to {COMMAND_TOPIC}, {PI_COMMAND_TOPIC}, {CONTROL_TOPIC}, "
+              f"{PI_CONFIG_TOPIC} and {HEARTBEAT_TOPIC}")
         publish_stats_info(client)
         publish_node_state(client)
     else:
@@ -1445,6 +1710,15 @@ def publish_node_stats(client: mqtt.Client) -> None:
 
 def on_message(client, _userdata, message) -> None:
     received = time.monotonic()
+    if message.topic == HEARTBEAT_TOPIC:
+        # 4 per second: not worth a line in the UI's command log.
+        try:
+            pi_on_heartbeat(json.loads(message.payload.decode("utf-8")), bool(message.retain))
+        except Exception:
+            pass
+        return
+    if message.topic == PI_CONFIG_TOPIC and not message.payload:
+        return  # retained config cleared
     try:
         payload = json.loads(message.payload.decode("utf-8"))
     except Exception as exc:
@@ -1457,8 +1731,29 @@ def on_message(client, _userdata, message) -> None:
 
     try:
         topic = message.topic
+        if topic == PI_CONFIG_TOPIC:
+            status = apply_pi_config(payload)
+            client.publish(PI_CONFIG_STATUS_TOPIC, _dumps(status), qos=1, retain=True)
+            print(f"[novaSim] Applied {PI_NODE} config {status['config_hash']} "
+                  f"({len(status['rejected'])} rejected)")
+            return
+
         cmd = payload.get("command", {}) if isinstance(payload, dict) else {}
         cmd_type = cmd.get("type", "")
+
+        # Like novaGround: actuator commands only on the node's own topic, and
+        # the node's topic carries nothing else.
+        if topic == COMMAND_TOPIC and cmd_type in ACTUATOR_COMMANDS:
+            print(f"[novaSim] Refused {cmd_type} command on broadcast topic {COMMAND_TOPIC}")
+            return
+        if topic == PI_COMMAND_TOPIC and cmd_type not in ACTUATOR_COMMANDS:
+            print(f"[novaSim] Ignored {cmd_type!r} command on {PI_COMMAND_TOPIC}")
+            return
+        if topic == PI_COMMAND_TOPIC and payload.get("source", "") == "novaOps":
+            refused = pi_command_allowed(cmd)
+            if refused:
+                print(f"[novaSim] Refused {cmd_type} id={cmd.get('id')}: {refused}")
+                return
 
         if topic == CONTROL_TOPIC:
             source = payload.get("source", "")
@@ -1470,7 +1765,7 @@ def on_message(client, _userdata, message) -> None:
                 print(f"[novaSim] Control message: {payload}")
             return
 
-        # nova/command — only act on the backend's own envelopes.
+        # nova/command[/novaGround] — only act on the backend's own envelopes.
         if payload.get("source", "") != "novaOps":
             return
 
@@ -1945,6 +2240,7 @@ def main() -> None:
             last_pub = mono
             client.publish(TELEMETRY_TOPIC, _dumps(build_gcs_packet()), qos=0)
             client.publish(TELEMETRY_TOPIC, _dumps(build_fas_engine_packet()), qos=0)
+            pi_supervise(client)
             if mono >= next_stats:
                 publish_node_stats(client)
                 publish_node_state(client)

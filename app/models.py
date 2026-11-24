@@ -1,9 +1,18 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any, Literal
+from typing import Annotated, Any, Literal, Union
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Discriminator,
+    Field,
+    Tag,
+    field_validator,
+    model_validator,
+)
 
 # Console actions the FAS bridge accepts on nova/command (see tools/fas_bridge.py
 # _cmd_console). "configure"/"disconnect" set or drop the bridge's serial port,
@@ -20,10 +29,46 @@ class SourceTarget(str, Enum):
     OPS = "OPS"
 
 
+# Per-Pi command topics (docs/design/pi-io-config.md, "Command topics"). FAS
+# commands stay on the broadcast topic, where the bridge addresses them by
+# board. A target missing here (OPS) has no command path.
+COMMAND_TOPIC_BROADCAST = "nova/command"
+COMMAND_TOPICS = {
+    SourceTarget.GCS: "nova/command/novaGround",
+    SourceTarget.TCS: "nova/command/novaThermo",
+    SourceTarget.FAS: COMMAND_TOPIC_BROADCAST,
+}
+# The Raspberry Pi node behind each Pi target, as used in nova/config/<node>.
+PI_NODES = {
+    SourceTarget.GCS: "novaGround",
+    SourceTarget.TCS: "novaThermo",
+}
+PI_TARGETS = frozenset(PI_NODES)
+
+# BCM pins no Pi ever claims: HAT ID EEPROM, I2C1, SPI0, and the daqhats
+# address, reset and interrupt pins. novaGround holds the authoritative copy;
+# this one lets a config be refused before it's saved.
+PI_RESERVED_GPIO = (0, 1, 2, 3, 7, 8, 9, 10, 11, 12, 13, 16, 20, 21, 26)
+PI_GPIO_MAX = 27
+
+# MCC 134 thermocouple types. A TC sensor without tc_type is type K.
+TC_TYPES = ("J", "K", "T", "E", "R", "S", "B", "N")
+DEFAULT_TC_TYPE = "K"
+
+
+def check_pi_gpio(pin: int, what: str) -> None:
+    """Raise ValueError if `pin` can't be used as a GPIO on a Pi."""
+    if not 0 <= pin <= PI_GPIO_MAX:
+        raise ValueError(f"{what}: GPIO {pin} is outside BCM 0-{PI_GPIO_MAX}")
+    if pin in PI_RESERVED_GPIO:
+        raise ValueError(f"{what}: GPIO {pin} is reserved on the Pi (HAT, I2C or SPI pin)")
+
+
 class SensorType(str, Enum):
     PT = "PT"
     LC = "LC"
     TC = "TC"
+    DI = "DI"  # digital input: a Pi GPIO pin read as 0 or 1
 
 
 class ActuatorType(str, Enum):
@@ -68,6 +113,13 @@ class GcsSensorBinding(BaseModel):
     channel_id: int
 
 
+class PiGpioSensorBinding(BaseModel):
+    """A `DI` sensor: one GPIO input pin on a Pi, instead of a DAQ HAT channel."""
+
+    source: Literal["GCS", "TCS"]
+    gpio_channel: int
+
+
 class FasSensorBinding(BaseModel):
     source: Literal["FAS"]
     node: str | None = None 
@@ -84,13 +136,71 @@ class FasSensorBinding(BaseModel):
         return f"{self.board_type}_{self.board_id}"
 
 
+def _sensor_binding_kind(value: Any) -> str | None:
+    if isinstance(value, BaseModel):
+        return {
+            FasSensorBinding: "fas",
+            PiGpioSensorBinding: "pi_gpio",
+            GcsSensorBinding: "pi",
+        }.get(type(value))
+    if not isinstance(value, dict):
+        return None
+    if value.get("source") == "FAS":
+        return "fas"
+    if value.get("gpio_channel") is not None:
+        return "pi_gpio"
+    return "pi"
+
+
+SensorBinding = Annotated[
+    Union[
+        Annotated[GcsSensorBinding, Tag("pi")],
+        Annotated[PiGpioSensorBinding, Tag("pi_gpio")],
+        Annotated[FasSensorBinding, Tag("fas")],
+    ],
+    Discriminator(_sensor_binding_kind),
+]
+
+
 class SensorEntry(BaseModel):
     name: str
     type: SensorType
     unit: str = ""
     range: tuple[float, float] | None = None
-    binding: GcsSensorBinding | FasSensorBinding = Field(discriminator="source")
+    binding: SensorBinding
     convert: ConvertSpec = Field(default_factory=ConvertSpec)
+    # MCC 134 thermocouple type, for TC sensors on a Pi. None reads as K.
+    tc_type: Literal["J", "K", "T", "E", "R", "S", "B", "N"] | None = None
+
+    @field_validator("tc_type", mode="before")
+    @classmethod
+    def _upper_tc_type(cls, value: Any) -> Any:
+        return value.strip().upper() if isinstance(value, str) else value
+
+    @model_validator(mode="after")
+    def _check_pi_io(self) -> "SensorEntry":
+        is_gpio = isinstance(self.binding, PiGpioSensorBinding)
+        if self.type == SensorType.DI and not is_gpio:
+            raise ValueError(
+                f"DI sensor '{self.name}' must be bound to {{source: GCS|TCS, gpio_channel: N}}"
+            )
+        if is_gpio:
+            if self.type != SensorType.DI:
+                raise ValueError(
+                    f"Sensor '{self.name}' is bound to a GPIO pin, which only DI sensors can be"
+                )
+            check_pi_gpio(self.binding.gpio_channel, f"DI sensor '{self.name}'")
+        if self.tc_type is not None and not (
+            self.type == SensorType.TC and isinstance(self.binding, GcsSensorBinding)
+        ):
+            raise ValueError(
+                f"Sensor '{self.name}': tc_type is only allowed on TC sensors bound to GCS or TCS"
+            )
+        return self
+
+    @property
+    def effective_tc_type(self) -> str:
+        return self.tc_type or DEFAULT_TC_TYPE
 
 
 class ActuatorBinding(BaseModel):
@@ -136,6 +246,20 @@ class ActuatorActions(BaseModel):
         description="Motor only — publish the complement of each relay pattern bit "
         "(for active-low relay boards)",
     )
+    # Output limits, enforced by the Pi (docs/design/pi-io-config.md, "Output limits").
+    max_on_s: float | None = Field(
+        default=None,
+        gt=0,
+        description="Return the relay/GPIO output to its safe level this long after it left it",
+    )
+    on_comms_loss: Literal["hold", "safe"] = Field(
+        default="hold",
+        description="What the output does when the backend's heartbeat stops: hold, or go safe",
+    )
+
+    @property
+    def has_output_limits(self) -> bool:
+        return self.max_on_s is not None or self.on_comms_loss != "hold"
 
     @model_validator(mode="after")
     def _servo_arrays_match(self) -> "ActuatorActions":
@@ -144,11 +268,70 @@ class ActuatorActions(BaseModel):
         return self
 
 
+# Actuator types whose relay or GPIO outputs can have max_on_s / on_comms_loss.
+LIMITED_ACTUATOR_TYPES = frozenset({
+    ActuatorType.SOLENOID,
+    ActuatorType.POWERED_DEVICE,
+    ActuatorType.POWERED_GPIO_DEVICE,
+    ActuatorType.GPIO_DEVICE,
+    ActuatorType.MOTOR,
+})
+GPIO_ACTUATOR_TYPES = frozenset({ActuatorType.GPIO_DEVICE, ActuatorType.POWERED_GPIO_DEVICE})
+
+
 class ActuatorEntry(BaseModel):
     name: str
     type: ActuatorType
     binding: ActuatorBinding
     actions: ActuatorActions = Field(default_factory=ActuatorActions)
+
+    @model_validator(mode="after")
+    def _has_command_path(self) -> "ActuatorEntry":
+        if self.binding.target not in COMMAND_TOPICS:
+            raise ValueError(
+                f"Actuator '{self.name}': target {self.binding.target.value} has no command path"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _pi_outputs(self) -> "ActuatorEntry":
+        on_pi = self.binding.target in PI_TARGETS
+        if self.actions.has_output_limits and not (on_pi and self.type in LIMITED_ACTUATOR_TYPES):
+            raise ValueError(
+                f"Actuator '{self.name}': max_on_s and on_comms_loss only apply to "
+                "solenoid, powered_device, powered_gpio_device, gpio_device and motor "
+                "actuators on GCS or TCS"
+            )
+        if on_pi and self.type in GPIO_ACTUATOR_TYPES:
+            # No fallback to relay_channel on a Pi: it would turn a relay
+            # channel number into a GPIO pin.
+            if self.binding.gpio_channel is None:
+                raise ValueError(
+                    f"GPIO actuator '{self.name}' on {self.binding.target.value} must set "
+                    "binding.gpio_channel"
+                )
+            check_pi_gpio(self.binding.gpio_channel, f"Actuator '{self.name}'")
+        return self
+
+    @property
+    def pi_gpio_output(self) -> int | None:
+        """The GPIO pin this actuator drives on its Pi, if any."""
+        if self.binding.target in PI_TARGETS and self.type in GPIO_ACTUATOR_TYPES:
+            return self.binding.gpio_channel
+        return None
+
+    @property
+    def relay_outputs(self) -> list[int]:
+        """Relay channels this actuator switches (not counting a servo's power relay)."""
+        if self.type == ActuatorType.MOTOR:
+            return self.motor_channels
+        if self.type in (
+            ActuatorType.SOLENOID,
+            ActuatorType.POWERED_DEVICE,
+            ActuatorType.POWERED_GPIO_DEVICE,
+        ) and self.binding.relay_channel is not None:
+            return [self.binding.relay_channel]
+        return []
 
     @model_validator(mode="after")
     def _fas_needs_board(self) -> "ActuatorEntry":
@@ -263,6 +446,12 @@ class Procedure(BaseModel):
     steps: list[str] = Field(default_factory=list)
 
 
+class HeartbeatConfig(BaseModel):
+    """How long a Pi waits for the backend's heartbeat before it counts comms as lost."""
+
+    timeout_ms: int = Field(default=2000, ge=500, le=60000)
+
+
 class SystemConfig(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -281,6 +470,7 @@ class SystemConfig(BaseModel):
             "[freq_hz, dur_ms, vol] notes; freq_hz 0 is a rest (silence)."
         ),
     )
+    heartbeat: HeartbeatConfig = Field(default_factory=HeartbeatConfig, alias="Heartbeat")
 
     @model_validator(mode="before")
     @classmethod

@@ -5,8 +5,8 @@ from typing import Any, Callable
 
 import yaml
 
-from app.models import FasSensorBinding, SourceTarget, SystemConfig
-from app.services.config_history import ConfigHistory
+from app.models import FasSensorBinding, PiGpioSensorBinding, SourceTarget, SystemConfig
+from app.services.config_history import ConfigHistory, content_hash
 
 # (file name, content hash, source) - source is one of
 # "startup", "load", "upload", "edit".
@@ -17,6 +17,7 @@ class ConfigService:
     def __init__(self, config_path: Path, history: ConfigHistory | None = None) -> None:
         self._config_path = config_path
         self._config: SystemConfig | None = None
+        self._active_hash: str | None = None
         self._history = history or ConfigHistory(None)
         self._listeners: list[ConfigListener] = []
 
@@ -40,11 +41,24 @@ class ConfigService:
     def config_path(self) -> Path:
         return self._config_path
 
+    @property
+    def active_hash(self) -> str | None:
+        """Content hash of the file the active config was read from (or written to).
+
+        Same hash as the config history and recordings use, so a Pi's config
+        status can say which config it applied.
+        """
+        if self._config is None:
+            self.reload()
+        return self._active_hash
+
     def reload(self) -> SystemConfig:
-        data = self._read_yaml(self._config_path)
+        raw = self._config_path.read_bytes() if self._config_path.exists() else None
+        data = (yaml.safe_load(raw.decode("utf-8")) or {}) if raw is not None else {}
         config = self._parse_config(data)
         self._check_duplicates(config)
         self._config = config
+        self._active_hash = content_hash(raw) if raw is not None else None
         return self._config
 
     def set_config_path(self, config_path: Path, source: str = "load", client: str | None = None) -> SystemConfig:
@@ -83,6 +97,7 @@ class ConfigService:
         )
         self._write_yaml(self._config_path, clean_data)
         self._config = config
+        self._active_hash = content_hash(self._config_path.read_bytes())
         self.record_active("edit", client)
         return config
 
@@ -102,6 +117,8 @@ class ConfigService:
             binding = sensor.binding
             if isinstance(binding, FasSensorBinding):
                 address = ("FAS", binding.resolved_node, binding.channel)
+            elif isinstance(binding, PiGpioSensorBinding):
+                address = (binding.source, "gpio", binding.gpio_channel)
             else:
                 address = (binding.source, binding.hat_id, binding.channel_id)
             if address in sensor_addresses:
@@ -115,6 +132,22 @@ class ConfigService:
             if actuator.name in actuator_names:
                 raise ValueError(f"Duplicate actuator name '{actuator.name}'")
             actuator_names.add(actuator.name)
+
+        # A Pi pin is either an input or an output, never both.
+        outputs = {
+            (actuator.binding.target.value, actuator.pi_gpio_output): actuator.name
+            for actuator in config.actuators
+            if actuator.pi_gpio_output is not None
+        }
+        for sensor in config.sensors:
+            binding = sensor.binding
+            if isinstance(binding, PiGpioSensorBinding):
+                user = outputs.get((binding.source, binding.gpio_channel))
+                if user is not None:
+                    raise ValueError(
+                        f"GPIO {binding.gpio_channel} on {binding.source} is both an input "
+                        f"('{sensor.name}') and an output ('{user}')"
+                    )
 
     @staticmethod
     def _read_yaml(path: Path) -> dict[str, Any]:

@@ -64,6 +64,18 @@ The messages have the shapes in novaGround's `docs/instrumentation.md` (code in
 `tools/sim_node_stats.py`). The loops it reports are `publisher` and
 `flight_publisher`; the relay mask starts with every relay on, as at novaGround's startup.
 
+It also stands in for novaGround's per-node config (Nova-Collected
+`docs/design/pi-io-config.md`). It takes `relay`, `gpio` and `servo` commands
+only on `nova/command/novaGround` and refuses them on `nova/command`, as
+novaGround does. It checks the backend's retained `nova/config/novaGround` the
+way the Pi does (reserved pins, BCM 0-27, a pin used as input and output,
+thermocouple types) and answers on a retained `nova/config/novaGround/status`.
+A `gpio` command for a pin that isn't a configured output is refused.
+Configured inputs appear in the GCS packet's `gpios`, toggling every 5 s. It
+follows `nova/heartbeat/backend` and models max on-time and comms-loss trips,
+so stopping the backend trips the outputs set to `safe`. This is a plausible
+model for checking the backend and frontend, not a copy of novaGround's code.
+
 `--ui` serves the control panel on `--ui-port` (8765 by default). The page is
 `tools/sim_control.html`, read from disk on each request, so edits to it show
 on a browser refresh without restarting the simulator.
