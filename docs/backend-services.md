@@ -119,7 +119,7 @@ the `GCS` part of the config) and `nova/config/novaThermo` (`TCS`):
 
 - `config_hash` is the active config file's content hash, the same one the config history uses.
 - `gpio.outputs`: every `gpio_device` and `powered_gpio_device` on that Pi, by `gpio_channel`, with its limits. `gpio.inputs`: the pins of its `DI` sensors.
-- `relays`: only the relay channels of actuators that set `max_on_s` or `on_comms_loss: safe`. Two actuators on one output get the smaller `max_on_s` and `safe` if either is.
+- `relays`: only the relay channels of actuators that set `max_on_s` or `on_comms_loss: safe`. A servo can set them only when it has a power relay (`binding.relay_channel`); the limits switch that relay off, never its PWM output. Two actuators on one output get the smaller `max_on_s` and `safe` if either is.
 - `daq`: HAT address -> channel -> thermocouple type, for its `TC` sensors (`tc_type`, default K).
 - `heartbeat.timeout_ms`: the config's `Heartbeat.timeout_ms` (default 2000).
 

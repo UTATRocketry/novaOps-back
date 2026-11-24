@@ -159,6 +159,11 @@ def test_fas_gpio_actuator_keeps_the_relay_channel_fallback() -> None:
         _actuator(type="powered_device", binding={"target": "GCS", "relay_channel": 2},
                   actions={"relay_type": "nominally_off", "max_on_s": 30, "on_comms_loss": "safe"}),
         _actuator(type="motor", binding={"target": "GCS", "relay_channel": 4}, actions={"max_on_s": 10}),
+        # A servo through a power relay: the limits act on that relay.
+        _actuator(type="servo", binding={"target": "GCS", "relay_channel": 1, "servo_channel": 1},
+                  actions={"on_comms_loss": "safe"}),
+        _actuator(type="servo", binding={"target": "TCS", "relay_channel": 5, "servo_channel": 0},
+                  actions={"relay_type": "nominally_off", "max_on_s": 20}),
     ],
 )
 def test_limits_are_accepted_on_pi_relay_and_gpio_outputs(actuator) -> None:
@@ -168,7 +173,11 @@ def test_limits_are_accepted_on_pi_relay_and_gpio_outputs(actuator) -> None:
 @pytest.mark.parametrize(
     "actuator",
     [
-        _actuator(type="servo", binding={"target": "GCS", "relay_channel": 1, "servo_channel": 1},
+        # A servo with no power relay has only its PWM output, which isn't supervised.
+        _actuator(type="servo", binding={"target": "GCS", "servo_channel": 1},
+                  actions={"on_comms_loss": "safe"}),
+        _actuator(type="servo", binding={"target": "GCS", "servo_channel": 1}, actions={"max_on_s": 5}),
+        _actuator(type="servo", binding={"target": "FAS", "node": "EPB_0", "relay_channel": 1, "servo_channel": 1},
                   actions={"on_comms_loss": "safe"}),
         _actuator(type="solenoid", binding={"target": "FAS", "node": "EPB_0", "relay_channel": 1},
                   actions={"max_on_s": 5}),

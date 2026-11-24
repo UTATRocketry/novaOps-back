@@ -99,6 +99,10 @@ class AppContext:
         # Last time a stats message arrived per node. Stats are not retained, so a
         # node that stops publishing is dropped like stale telemetry.
         self._stats_last_seen: dict[str, float] = {}
+        # Per Pi: when its config status last arrived, and (hash, time) of the
+        # first publish of the config it should hold. Wall-clock ms, for the UI.
+        self._pi_status_received_ms: dict[str, int] = {}
+        self._node_config_published: dict[str, tuple[str | None, int]] = {}
 
     async def startup(self) -> None:
         self._event_loop = asyncio.get_running_loop()
@@ -209,16 +213,26 @@ class AppContext:
         """
         config = self.config_service.config
         config_hash = self.config_service.active_hash
+        now_ms = int(time.time() * 1000)
         for node, message in pi_config.build_all_node_configs(config, config_hash).items():
-            self.mqtt_service.publish_node_config(node, message)
+            if self.mqtt_service.publish_node_config(node, message):
+                # A republish of the same config (reconnect) keeps the first time.
+                previous = self._node_config_published.get(node)
+                if previous is None or previous[0] != config_hash:
+                    self._node_config_published[node] = (config_hash, now_ms)
+
+    def _pi_view(self, node: str, payload: dict[str, Any] | None) -> dict:
+        config_hash = self.config_service.active_hash
+        published = self._node_config_published.get(node)
+        return pi_config.status_view(
+            node, payload, self.config_service.config, config_hash,
+            received_ms=self._pi_status_received_ms.get(node),
+            published_ms=published[1] if published and published[0] == config_hash else None,
+        )
 
     def pi_status_views(self) -> dict[str, dict]:
-        config = self.config_service.config
-        expected = self.config_service.active_hash
-        return {
-            node: pi_config.status_view(node, self.runtime.pi_config_status.get(node), config, expected)
-            for node in pi_config.TARGET_FOR_NODE
-        }
+        return {node: self._pi_view(node, self.runtime.pi_config_status.get(node))
+                for node in pi_config.TARGET_FOR_NODE}
 
     def pi_status_messages(self) -> list[dict[str, Any]]:
         return [{"type": "pi_config_status", "node": node, "status": view}
@@ -229,14 +243,16 @@ class AppContext:
         WebSocket messages to broadcast. Never sends a command."""
         if payload is None:
             self.runtime.pi_config_status.pop(node, None)
+            self._pi_status_received_ms.pop(node, None)
         else:
             self.runtime.pi_config_status[node] = payload
+            self._pi_status_received_ms[node] = int(time.time() * 1000)
         config = self.config_service.config
         messages: list[dict[str, Any]] = []
         if pi_config.apply_trips(config, self.runtime.pi_config_status, self.runtime.actuator_states,
                                  self.runtime.applied_trips, self.runtime.update_actuator_state):
             messages.append({"type": "actuator_states", "actuator_states": self.runtime.actuator_states})
-        view = pi_config.status_view(node, payload, config, self.config_service.active_hash)
+        view = self._pi_view(node, payload)
         if view["mismatch"]:
             LOGGER.warning("%s config status mismatch: %s", node, ", ".join(view["mismatch_reasons"]))
         messages.insert(0, {"type": "pi_config_status", "node": node, "status": view})

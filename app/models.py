@@ -269,6 +269,7 @@ class ActuatorActions(BaseModel):
 
 
 # Actuator types whose relay or GPIO outputs can have max_on_s / on_comms_loss.
+# A servo can too, but only through its power relay (ActuatorEntry.supports_output_limits).
 LIMITED_ACTUATOR_TYPES = frozenset({
     ActuatorType.SOLENOID,
     ActuatorType.POWERED_DEVICE,
@@ -277,6 +278,10 @@ LIMITED_ACTUATOR_TYPES = frozenset({
     ActuatorType.MOTOR,
 })
 GPIO_ACTUATOR_TYPES = frozenset({ActuatorType.GPIO_DEVICE, ActuatorType.POWERED_GPIO_DEVICE})
+LIMITS_RULE = (
+    "solenoid, powered_device, powered_gpio_device, gpio_device and motor actuators, "
+    "and servos with a power relay (binding.relay_channel), on GCS or TCS"
+)
 
 
 class ActuatorEntry(BaseModel):
@@ -296,11 +301,9 @@ class ActuatorEntry(BaseModel):
     @model_validator(mode="after")
     def _pi_outputs(self) -> "ActuatorEntry":
         on_pi = self.binding.target in PI_TARGETS
-        if self.actions.has_output_limits and not (on_pi and self.type in LIMITED_ACTUATOR_TYPES):
+        if self.actions.has_output_limits and not self.supports_output_limits:
             raise ValueError(
-                f"Actuator '{self.name}': max_on_s and on_comms_loss only apply to "
-                "solenoid, powered_device, powered_gpio_device, gpio_device and motor "
-                "actuators on GCS or TCS"
+                f"Actuator '{self.name}': max_on_s and on_comms_loss only apply to {LIMITS_RULE}"
             )
         if on_pi and self.type in GPIO_ACTUATOR_TYPES:
             # No fallback to relay_channel on a Pi: it would turn a relay
@@ -314,6 +317,19 @@ class ActuatorEntry(BaseModel):
         return self
 
     @property
+    def supports_output_limits(self) -> bool:
+        """Whether max_on_s / on_comms_loss can apply: a Pi relay or GPIO output.
+
+        A servo qualifies only through its power relay (binding.relay_channel):
+        the limits switch that relay off. Its PWM output is never supervised.
+        """
+        if self.binding.target not in PI_TARGETS:
+            return False
+        if self.type == ActuatorType.SERVO:
+            return self.binding.relay_channel is not None
+        return self.type in LIMITED_ACTUATOR_TYPES
+
+    @property
     def pi_gpio_output(self) -> int | None:
         """The GPIO pin this actuator drives on its Pi, if any."""
         if self.binding.target in PI_TARGETS and self.type in GPIO_ACTUATOR_TYPES:
@@ -322,13 +338,14 @@ class ActuatorEntry(BaseModel):
 
     @property
     def relay_outputs(self) -> list[int]:
-        """Relay channels this actuator switches (not counting a servo's power relay)."""
+        """Relay channels this actuator switches, including a servo's power relay."""
         if self.type == ActuatorType.MOTOR:
             return self.motor_channels
         if self.type in (
             ActuatorType.SOLENOID,
             ActuatorType.POWERED_DEVICE,
             ActuatorType.POWERED_GPIO_DEVICE,
+            ActuatorType.SERVO,
         ) and self.binding.relay_channel is not None:
             return [self.binding.relay_channel]
         return []

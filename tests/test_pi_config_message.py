@@ -66,6 +66,14 @@ Actuators:
     type: motor
     binding: {target: TCS, relay_channel: 6, reverse_relay_channel: 7}
     actions: {reversible: true, invert_relays: true, on_comms_loss: safe}
+  - name: SERVO_PWR
+    type: servo
+    binding: {target: GCS, servo_channel: 0, relay_channel: 4}
+    actions: {relay_type: nominally_off, position_aliases: [open, closed], positions: [2000, 1000],
+              max_on_s: 60, on_comms_loss: safe}
+  - name: SERVO_NO_LIMIT
+    type: servo
+    binding: {target: GCS, servo_channel: 1, relay_channel: 5}
 Heartbeat:
   timeout_ms: 2000
 """
@@ -103,8 +111,12 @@ def test_novaground_config_message() -> None:
         "config_hash": "abc",
         # An output with no limits is still listed: the Pi claims every configured output.
         "gpio": {"outputs": {"22": {"max_on_ms": None, "on_comms_loss": "hold"}}, "inputs": []},
-        # Relays without limits (Test_Sol) are left out.
-        "relays": {"2": {"max_on_ms": 30000, "on_comms_loss": "safe"}},
+        # Relays without limits (Test_Sol, SERVO_NO_LIMIT) are left out. A
+        # servo's power relay carries the servo's limits; its PWM channel doesn't.
+        "relays": {
+            "2": {"max_on_ms": 30000, "on_comms_loss": "safe"},
+            "4": {"max_on_ms": 60000, "on_comms_loss": "safe"},
+        },
         "daq": {"2": {"3": "J"}},
         "heartbeat": {"timeout_ms": 2000},
     }
@@ -199,6 +211,9 @@ def _trip(output: str, reason: str = "comms_loss", time_ms: int = 100) -> dict:
         ("novaGround", "relay:2", "Test_CommsLoss_Relay", {"power": "on"}, {"power": "off"}),
         # nominally_on relay de-energized -> powered; nominally_closed valve powered -> open.
         ("novaThermo", "relay:3", "SAFE_SOL", {"position": "closed"}, {"position": "open"}),
+        # A servo's nominally_off power relay de-energized -> power off; position untouched.
+        ("novaGround", "relay:4", "SERVO_PWR", {"power": "on", "position": "open"},
+         {"power": "off", "position": "open"}),
     ],
 )
 def test_trip_sets_safe_state_with_the_command_rules(ctx, node, output, name, before, after) -> None:

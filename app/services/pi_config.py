@@ -156,8 +156,16 @@ def _trips(status: dict | None) -> list[dict]:
     return [trip for trip in tripped if isinstance(trip, dict)] if isinstance(tripped, list) else []
 
 
-def status_view(node: str, status: dict | None, config: SystemConfig, expected_hash: str | None) -> dict:
-    """What the frontend gets for one Pi: its status plus whether it matches."""
+def status_view(node: str, status: dict | None, config: SystemConfig, expected_hash: str | None,
+                received_ms: int | None = None, published_ms: int | None = None) -> dict:
+    """What the frontend gets for one Pi: its status plus whether it matches.
+
+    `received_ms` is when the backend last got this Pi's status, and
+    `published_ms` when it first sent the Pi the active config (`expected_hash`),
+    both backend wall-clock milliseconds. A Pi whose `config_hash` differs and
+    that rejected nothing hasn't applied the config yet: it is `pending` since
+    `published_ms`.
+    """
     target = TARGET_FOR_NODE.get(node)
     received = isinstance(status, dict)
     status = status if received else {}
@@ -182,6 +190,14 @@ def status_view(node: str, status: dict | None, config: SystemConfig, expected_h
             reasons.append("config_hash")
         if rejected:
             reasons.append("rejected")
+    if not received:
+        apply_state = "waiting"
+    elif rejected:
+        apply_state = "rejected"
+    elif status.get("config_hash") != expected_hash:
+        apply_state = "pending"
+    else:
+        apply_state = "applied"
     return {
         "node": node,
         "target": target.value if target else None,
@@ -195,13 +211,19 @@ def status_view(node: str, status: dict | None, config: SystemConfig, expected_h
         "tripped": tripped,
         "mismatch": bool(reasons),
         "mismatch_reasons": reasons,
+        # waiting: no status yet; applied: the active config, nothing rejected;
+        # pending: the Pi still holds another config; rejected: it refused items.
+        "apply_state": apply_state,
+        "received_ms": received_ms if received else None,
+        "published_ms": published_ms,
     }
 
 
 def _candidate_states(actuator: ActuatorEntry) -> list[str]:
     if actuator.type == ActuatorType.SOLENOID:
         return ["closed", "open"]
-    if actuator.type == ActuatorType.POWERED_DEVICE:
+    if actuator.type in (ActuatorType.POWERED_DEVICE, ActuatorType.SERVO):
+        # A servo's only relay output is its power relay, switched by on/off.
         return ["off", "on"]
     if actuator.type == ActuatorType.POWERED_GPIO_DEVICE:
         return ["off", "on", "disarm", "arm"]
