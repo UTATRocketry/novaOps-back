@@ -133,6 +133,21 @@ per trip, and adds `tripped`, `tripped_output` and `tripped_ms` to their entry
 in `actuator_states` until the Pi stops listing it. The backend never sends a
 command because of a trip.
 
+Each Pi's view (`status_view` in `app/services/pi_config.py`) adds three
+fields to the status:
+
+- `apply_state`:
+  - `waiting`: no status from the Pi yet.
+  - `applied`: its hash matches and it rejected nothing.
+  - `pending`: its hash differs and it rejected nothing, so it hasn't applied the config yet.
+  - `rejected`: it rejected items. This wins over `pending`.
+- `received_ms`: when the backend last got this Pi's status.
+- `published_ms`: when the backend first published the active config to this
+  Pi, set only when the publish succeeded. Republishing the same hash, as on
+  reconnect, keeps the first time.
+
+Both times are backend wall-clock milliseconds.
+
 The frontend gets this as a `pi_config_status` WebSocket message per Pi
 (`{type, node, status}`), sent on connect, when a status arrives and when the
 active config changes, and from `GET /api/config/pi`, which also returns the
